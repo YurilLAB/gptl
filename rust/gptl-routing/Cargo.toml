@@ -1,0 +1,28 @@
+[package]
+name = "gptl-routing"
+version = "0.1.0"
+edition = "2021"
+authors = ["GPTL Team Beta <security@gptl-project.org>"]
+description = "GPTL Routing - Secure routing with BGP and guard protection"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gptl-project/gptl"
+
+[dependencies]
+gptl-core = { path = "../gptl-core" }
+tokio = { version = "1.35", features = ["full"] }
+thiserror = "1.0"
+tracing = "0.1"
+rand = "0.8"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+rustls = "0.23"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+base64 = "0.22"
+hickory-proto = "0.24"
+bytes = "1.5"
+
+[dev-dependencies]
+tokio-test = "0.4"

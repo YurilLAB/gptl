@@ -1,0 +1,29 @@
+# Rust build artifacts
+/rust/target/
+**/*.rs.bk
+Cargo.lock
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment and secrets
+.env
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Logs
+*.log
+
+# Claude Code internal
+CLAUDE.md

@@ -1,0 +1,36 @@
+[package]
+name = "gptl-crypto"
+version = "0.1.0"
+edition = "2021"
+authors = ["GPTL Team Beta <security@gptl-project.org>"]
+description = "GPTL Cryptographic primitives"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gptl-project/gptl"
+
+[dependencies]
+thiserror = "1.0"
+# Modern crypto library (FIPS-validated, replaces ring)
+# Note: FIPS feature disabled on Windows due to LLVM/Clang requirement
+aws-lc-rs = "1.10"
+# X25519 key exchange
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+# Post-quantum ML-KEM (Kyber)
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+# Constant-time operations
+subtle = "2.6"
+# Random number generation
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+hex = "0.4"
+proptest = "1.5"
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { version = "1.35", features = ["full"] }
+
+[[bench]]
+name = "crypto_benchmarks"
+harness = false

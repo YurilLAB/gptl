@@ -1,0 +1,30 @@
+[package]
+name = "gptl-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["GPTL Team Beta <security@gptl-project.org>"]
+description = "GPTL Core - Anti-surveillance and anonymity protections"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gptl-project/gptl"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+thiserror = "1.0"
+tracing = "0.1"
+rand = "0.8"
+rand_distr = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+dirs = "5.0"
+sha2 = "0.10"
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1.5"
+criterion = { version = "0.5", features = ["async_tokio"] }
+mockall = "0.13"
