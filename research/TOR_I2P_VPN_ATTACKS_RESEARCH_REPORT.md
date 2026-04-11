@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-This document presents comprehensive research on modern attacks against anonymity networks (Tor, I2P, VPNs) and provides detailed countermeasures designed for the GPTL (General Privacy Transport Layer) system. Each attack category is analyzed with its mechanism, impact, and specific GPTL countermeasures.
+This document presents comprehensive research on modern attacks against anonymity networks (Tor, I2P, VPNs) and provides detailed countermeasures designed for the GPTL (General Purpose Transport Layer) system. Each attack category is analyzed with its mechanism, impact, and specific GPTL countermeasures.
 
 ---
 

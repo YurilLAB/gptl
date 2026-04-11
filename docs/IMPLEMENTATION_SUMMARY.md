@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document summarizes the implementation of countermeasures against modern attacks on Tor/I2P/VPN systems in the GPTL (General Privacy Transport Layer) project.
+This document summarizes the implementation of countermeasures against modern attacks on Tor/I2P/VPN systems in the GPTL (General Purpose Transport Layer) project.
 
 ## Attacks Addressed
 
