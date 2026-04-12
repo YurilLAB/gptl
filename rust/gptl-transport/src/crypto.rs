@@ -7,7 +7,9 @@
 //! the 16-byte Poly1305 tag) occupies exactly 507 bytes:
 //!   plaintext 491 bytes + tag 16 bytes = 507 bytes.
 
-use crate::cell::{CELL_PAYLOAD_LEN, RELAY_PLAINTEXT_LEN};
+use crate::cell::{
+    CELL_PAYLOAD_LEN, RELAY_INNER_CT_LEN, RELAY_INNER_PLAINTEXT_LEN, RELAY_PLAINTEXT_LEN,
+};
 use crate::TransportError;
 use chacha20poly1305::{AeadInPlace, ChaCha20Poly1305, KeyInit, Nonce};
 
@@ -50,6 +52,44 @@ impl CellCipher {
             .map_err(|_| TransportError::Crypto("decryption failed — authentication tag mismatch".into()))?;
         // buf is now 507 - 16 = 491 bytes
         let mut out = [0u8; RELAY_PLAINTEXT_LEN];
+        out.copy_from_slice(&buf);
+        Ok(out)
+    }
+
+    /// Encrypt a 470-byte inner-hop plaintext into a 486-byte ciphertext.
+    ///
+    /// Used for Phase 2 two-hop circuits. The 486-byte ciphertext fits exactly
+    /// in the `RELAY_MAX_DATA` (486-byte) field of an outer `RELAY_FORWARD` cell,
+    /// and relay2 decrypts it without knowing relay1's session keys.
+    pub fn encrypt_inner(
+        &mut self,
+        plaintext: &[u8; RELAY_INNER_PLAINTEXT_LEN],
+    ) -> Result<[u8; RELAY_INNER_CT_LEN], TransportError> {
+        let nonce = self.next_nonce()?;
+        let mut buf = plaintext.to_vec();
+        self.cipher
+            .encrypt_in_place(&nonce, b"", &mut buf)
+            .map_err(|e| TransportError::Crypto(format!("inner encryption failed: {}", e)))?;
+        // buf is now 470 + 16 = 486 bytes
+        let mut out = [0u8; RELAY_INNER_CT_LEN];
+        out.copy_from_slice(&buf);
+        Ok(out)
+    }
+
+    /// Decrypt a 486-byte inner-hop ciphertext into a 470-byte plaintext.
+    pub fn decrypt_inner(
+        &mut self,
+        ciphertext: &[u8; RELAY_INNER_CT_LEN],
+    ) -> Result<[u8; RELAY_INNER_PLAINTEXT_LEN], TransportError> {
+        let nonce = self.next_nonce()?;
+        let mut buf = ciphertext.to_vec();
+        self.cipher
+            .decrypt_in_place(&nonce, b"", &mut buf)
+            .map_err(|_| TransportError::Crypto(
+                "inner decryption failed — authentication tag mismatch".into(),
+            ))?;
+        // buf is now 486 - 16 = 470 bytes
+        let mut out = [0u8; RELAY_INNER_PLAINTEXT_LEN];
         out.copy_from_slice(&buf);
         Ok(out)
     }
@@ -242,5 +282,86 @@ mod tests {
             let recovered = dec.decrypt(&ct).unwrap();
             assert_eq!(pt, recovered, "roundtrip failed at iteration {}", i);
         }
+    }
+
+    // ── Inner-hop (Phase 2) cipher tests ─────────────────────────────────────
+
+    fn random_inner_plaintext() -> [u8; RELAY_INNER_PLAINTEXT_LEN] {
+        let mut p = [0u8; RELAY_INNER_PLAINTEXT_LEN];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut p);
+        p
+    }
+
+    #[test]
+    fn test_inner_encrypt_decrypt_roundtrip() {
+        let key = random_key();
+        let mut enc = CellCipher::new(&key);
+        let mut dec = CellCipher::new(&key);
+        let pt = random_inner_plaintext();
+        let ct = enc.encrypt_inner(&pt).unwrap();
+        let recovered = dec.decrypt_inner(&ct).unwrap();
+        assert_eq!(pt, recovered);
+    }
+
+    #[test]
+    fn test_inner_ciphertext_size_is_486() {
+        let key = random_key();
+        let mut enc = CellCipher::new(&key);
+        let pt = [0u8; RELAY_INNER_PLAINTEXT_LEN];
+        let ct = enc.encrypt_inner(&pt).unwrap();
+        assert_eq!(ct.len(), RELAY_INNER_CT_LEN);
+    }
+
+    #[test]
+    fn test_inner_ciphertext_differs_from_outer() {
+        // Inner and outer encryption of the same key bytes should produce
+        // different-size outputs: 486 vs 507 bytes.
+        let key = random_key();
+        let mut enc = CellCipher::new(&key);
+        let mut enc2 = CellCipher::new(&key);
+
+        let pt_outer = [0xAAu8; RELAY_PLAINTEXT_LEN];
+        let pt_inner = [0xAAu8; RELAY_INNER_PLAINTEXT_LEN];
+
+        let ct_outer = enc.encrypt(&pt_outer).unwrap();
+        let ct_inner = enc2.encrypt_inner(&pt_inner).unwrap();
+        assert_eq!(ct_outer.len(), 507);
+        assert_eq!(ct_inner.len(), 486);
+    }
+
+    #[test]
+    fn test_inner_tampered_ciphertext_rejected() {
+        let key = random_key();
+        let mut enc = CellCipher::new(&key);
+        let mut dec = CellCipher::new(&key);
+        let pt = random_inner_plaintext();
+        let mut ct = enc.encrypt_inner(&pt).unwrap();
+        ct[100] ^= 0xFF;
+        assert!(dec.decrypt_inner(&ct).is_err());
+    }
+
+    #[test]
+    fn test_inner_wrong_key_rejected() {
+        let key1 = random_key();
+        let key2 = random_key();
+        let mut enc = CellCipher::new(&key1);
+        let mut dec = CellCipher::new(&key2);
+        let pt = random_inner_plaintext();
+        let ct = enc.encrypt_inner(&pt).unwrap();
+        assert!(dec.decrypt_inner(&ct).is_err());
+    }
+
+    #[test]
+    fn test_outer_and_inner_counters_share_state() {
+        // Mixing outer and inner calls on the same CellCipher increments
+        // the counter for each call, preventing nonce reuse.
+        let key = random_key();
+        let mut enc = CellCipher::new(&key);
+        assert_eq!(enc.counter(), 0);
+        let _ = enc.encrypt(&[0u8; RELAY_PLAINTEXT_LEN]).unwrap();
+        assert_eq!(enc.counter(), 1);
+        let _ = enc.encrypt_inner(&[0u8; RELAY_INNER_PLAINTEXT_LEN]).unwrap();
+        assert_eq!(enc.counter(), 2);
     }
 }

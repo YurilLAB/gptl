@@ -155,7 +155,7 @@ pub fn client_finish(
     )?;
 
     // Verify key confirmation
-    let expected = compute_confirmation(&keys.forward_key);
+    let expected = compute_confirmation(&keys.forward_key)?;
     if !constant_time_eq(&expected, &received_confirmation) {
         return Err(TransportError::Handshake(
             "key confirmation mismatch — relay authentication failed".into(),
@@ -224,10 +224,16 @@ pub fn relay_respond(
         return Err(TransportError::Handshake("expected CREATE cell".into()));
     }
 
-    // Parse CREATE payload
-    let client_fp: [u8; 32] = create.payload[0..32].try_into().unwrap();
-    let client_ephemeral_pub_bytes: [u8; 32] = create.payload[32..64].try_into().unwrap();
-    let client_nonce: [u8; 32] = create.payload[64..96].try_into().unwrap();
+    // Parse CREATE payload — use map_err instead of unwrap for untrusted input
+    let client_fp: [u8; 32] = create.payload[0..32]
+        .try_into()
+        .map_err(|_| TransportError::Handshake("fingerprint field truncated in CREATE cell".into()))?;
+    let client_ephemeral_pub_bytes: [u8; 32] = create.payload[32..64]
+        .try_into()
+        .map_err(|_| TransportError::Handshake("ephemeral pubkey field truncated in CREATE cell".into()))?;
+    let client_nonce: [u8; 32] = create.payload[64..96]
+        .try_into()
+        .map_err(|_| TransportError::Handshake("client nonce field truncated in CREATE cell".into()))?;
 
     // Verify that the fingerprint matches our static key
     if !constant_time_eq(&client_fp, &static_key.fingerprint) {
@@ -258,7 +264,7 @@ pub fn relay_respond(
     )?;
 
     // Compute key confirmation (HMAC over forward_key)
-    let confirmation = compute_confirmation(&keys.forward_key);
+    let confirmation = compute_confirmation(&keys.forward_key)?;
 
     // Build CREATED cell
     let mut created = Cell::new(create.circuit_id, CellType::Created);
@@ -304,10 +310,11 @@ fn derive_keys_single_dh(
     })
 }
 
-fn compute_confirmation(forward_key: &[u8; 32]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(forward_key).expect("HMAC accepts any key length");
+fn compute_confirmation(forward_key: &[u8; 32]) -> Result<[u8; 32], TransportError> {
+    let mut mac = HmacSha256::new_from_slice(forward_key)
+        .map_err(|e| TransportError::Crypto(format!("HMAC init failed: {}", e)))?;
     mac.update(b"gptl-v1-confirm");
-    mac.finalize().into_bytes().into()
+    Ok(mac.finalize().into_bytes().into())
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
@@ -408,7 +415,7 @@ mod tests {
     fn test_wrong_cell_type_rejected_by_client() {
         let relay_key = RelayStaticKey::generate();
         let (create_cell, pending) = client_initiate(1, &relay_key.public).unwrap();
-        let (mut created_cell, _) = relay_respond(&create_cell, &relay_key).unwrap();
+        let (created_cell, _) = relay_respond(&create_cell, &relay_key).unwrap();
         // Replace the cell type with Padding
         let mut buf = created_cell.to_bytes();
         buf[4] = CellType::Padding as u8;

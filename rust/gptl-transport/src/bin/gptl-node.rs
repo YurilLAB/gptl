@@ -15,7 +15,10 @@
 
 use gptl_transport::{
     bootstrap::{BootstrapConfig, RelayDescriptor},
-    cell::{Cell, CellType, RelayCell, RelayCommand, CELL_PAYLOAD_LEN, CELL_SIZE, RELAY_MAX_DATA},
+    cell::{
+        Cell, CellType, RelayCell, RelayCommand,
+        CELL_PAYLOAD_LEN, CELL_SIZE, RELAY_INNER_CT_LEN, RELAY_INNER_PLAINTEXT_LEN, RELAY_MAX_DATA,
+    },
     crypto::RelayCiphers,
     handshake::{relay_respond, RelayStaticKey},
     relay_conn::RelayConn,
@@ -200,9 +203,20 @@ async fn run_relay_loop(
     dest_tx: mpsc::Sender<(u16, Vec<u8>)>,
     streams: Arc<Mutex<HashMap<u16, OutboundConn>>>,
 ) -> Result<(), TransportError> {
+    // Phase 2: channels for relay2 communication.
+    // relay2_inbound_tx is cloned into the reader task spawned by handle_extend.
+    // relay2_inbound_rx receives inner ciphertext blobs forwarded from relay2.
+    let (relay2_inbound_tx, mut relay2_inbound_rx) = mpsc::channel::<Vec<u8>>(64);
+    // relay2_write_tx is set once RELAY_EXTEND completes successfully.
+    let mut relay2_write_tx: Option<mpsc::Sender<[u8; CELL_SIZE]>> = None;
+
+    // Tracks whether this relay is operating as an inner hop (relay2 mode).
+    // Set true when the first CellType::RelayInner is received.
+    let mut is_inner_hop = false;
+
     loop {
         tokio::select! {
-            // Inbound: cell from client
+            // Inbound: cell from client (or relay1 if we are relay2)
             maybe = cell_rx.recv() => {
                 let cell = match maybe {
                     Some(Ok(c)) => c,
@@ -214,9 +228,56 @@ async fn run_relay_loop(
                         let ct: [u8; CELL_PAYLOAD_LEN] = cell.payload;
                         let pt = ciphers.inbound.decrypt(&ct)?;
                         let inner = RelayCell::decode(&pt)?;
+
+                        // Intercept Phase 2 circuit-extension commands before stream dispatch
+                        match inner.command {
+                            RelayCommand::Extend => {
+                                match handle_extend(
+                                    inner, circuit_id, ciphers, write_tx,
+                                    relay2_inbound_tx.clone(),
+                                ).await? {
+                                    Some(tx) => { relay2_write_tx = Some(tx); }
+                                    None => {} // extend failed; error already sent to client
+                                }
+                            }
+                            RelayCommand::Forward => {
+                                // Client is forwarding inner ciphertext to relay2
+                                if let Some(ref tx) = relay2_write_tx {
+                                    let inner_ct_len = inner.data.len().min(RELAY_INNER_CT_LEN);
+                                    let mut fwd_cell = Cell::new(circuit_id, CellType::RelayInner);
+                                    fwd_cell.payload[..inner_ct_len]
+                                        .copy_from_slice(&inner.data[..inner_ct_len]);
+                                    if tx.send(fwd_cell.to_bytes()).await.is_err() {
+                                        debug!("circuit {} relay2 write channel closed", circuit_id);
+                                        relay2_write_tx = None;
+                                    }
+                                } else {
+                                    warn!("circuit {} RELAY_FORWARD with no relay2 connection", circuit_id);
+                                }
+                            }
+                            _ => {
+                                dispatch_relay_cell(
+                                    inner, circuit_id, ciphers, write_tx,
+                                    Arc::clone(&streams), dest_tx.clone(),
+                                    is_inner_hop,
+                                ).await?;
+                            }
+                        }
+                    }
+                    CellType::RelayInner => {
+                        // This relay is acting as relay2 (inner hop)
+                        is_inner_hop = true;
+                        let ct: &[u8; RELAY_INNER_CT_LEN] = cell.payload[..RELAY_INNER_CT_LEN]
+                            .try_into()
+                            .map_err(|_| TransportError::Protocol(
+                                "RelayInner payload too short".into(),
+                            ))?;
+                        let pt = ciphers.inbound.decrypt_inner(ct)?;
+                        let inner = RelayCell::decode_inner(&pt)?;
                         dispatch_relay_cell(
                             inner, circuit_id, ciphers, write_tx,
                             Arc::clone(&streams), dest_tx.clone(),
+                            true, // inner-hop send mode
                         ).await?;
                     }
                     CellType::Destroy => {
@@ -228,20 +289,35 @@ async fn run_relay_loop(
                 }
             }
 
+            // Inbound from relay2 (inner ciphertext) → wrap and forward to client
+            Some(inner_ct) = relay2_inbound_rx.recv() => {
+                send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+                    command: RelayCommand::Forward,
+                    stream_id: 0,
+                    data: inner_ct,
+                }).await?;
+            }
+
             // Outbound: data from destination → encrypt and send to client
             Some((stream_id, data)) = dest_rx.recv() => {
                 if data.is_empty() {
                     // EOF from destination — send RELAY_END
                     streams.lock().await.remove(&stream_id);
-                    send_relay_cell(ciphers, circuit_id, write_tx,
+                    send_data_cell(ciphers, circuit_id, write_tx, is_inner_hop,
                         RelayCell { command: RelayCommand::End, stream_id, data: vec![] },
                     ).await?;
                 } else {
                     // Chunk and send as RELAY_DATA cells
+                    let max_chunk = if is_inner_hop {
+                        use gptl_transport::cell::RELAY_INNER_MAX_DATA;
+                        RELAY_INNER_MAX_DATA
+                    } else {
+                        RELAY_MAX_DATA
+                    };
                     let mut remaining = data.as_slice();
                     while !remaining.is_empty() {
-                        let n = remaining.len().min(RELAY_MAX_DATA);
-                        send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+                        let n = remaining.len().min(max_chunk);
+                        send_data_cell(ciphers, circuit_id, write_tx, is_inner_hop, RelayCell {
                             command: RelayCommand::Data,
                             stream_id,
                             data: remaining[..n].to_vec(),
@@ -255,6 +331,7 @@ async fn run_relay_loop(
     Ok(())
 }
 
+/// Route an already-decrypted relay cell to the appropriate stream handler.
 async fn dispatch_relay_cell(
     inner: RelayCell,
     circuit_id: u32,
@@ -262,10 +339,11 @@ async fn dispatch_relay_cell(
     write_tx: &mpsc::Sender<[u8; CELL_SIZE]>,
     streams: Arc<Mutex<HashMap<u16, OutboundConn>>>,
     dest_tx: mpsc::Sender<(u16, Vec<u8>)>,
+    is_inner_hop: bool,
 ) -> Result<(), TransportError> {
     match inner.command {
         RelayCommand::Begin => {
-            begin_stream(inner, circuit_id, ciphers, write_tx, streams, dest_tx).await
+            begin_stream(inner, circuit_id, ciphers, write_tx, streams, dest_tx, is_inner_hop).await
         }
         RelayCommand::Data => {
             let mut map = streams.lock().await;
@@ -274,10 +352,15 @@ async fn dispatch_relay_cell(
                     let sid = inner.stream_id;
                     drop(map);
                     streams.lock().await.remove(&sid);
-                    send_relay_cell(ciphers, circuit_id, write_tx,
+                    send_data_cell(ciphers, circuit_id, write_tx, is_inner_hop,
                         RelayCell { command: RelayCommand::End, stream_id: sid, data: vec![] },
                     ).await?;
                 }
+            } else {
+                debug!(
+                    "circuit {} stream {} data for unknown stream, discarding {} bytes",
+                    circuit_id, inner.stream_id, inner.data.len()
+                );
             }
             Ok(())
         }
@@ -285,9 +368,16 @@ async fn dispatch_relay_cell(
             streams.lock().await.remove(&inner.stream_id);
             Ok(())
         }
-        _ => Ok(()),
+        other => {
+            warn!(
+                "circuit {} unhandled relay command {:?} on stream {}",
+                circuit_id, other, inner.stream_id
+            );
+            Ok(())
+        }
     }
 }
+
 
 async fn begin_stream(
     inner: RelayCell,
@@ -296,6 +386,7 @@ async fn begin_stream(
     write_tx: &mpsc::Sender<[u8; CELL_SIZE]>,
     streams: Arc<Mutex<HashMap<u16, OutboundConn>>>,
     dest_tx: mpsc::Sender<(u16, Vec<u8>)>,
+    is_inner_hop: bool,
 ) -> Result<(), TransportError> {
     let stream_id = inner.stream_id;
     let target = String::from_utf8_lossy(&inner.data).to_string();
@@ -308,7 +399,7 @@ async fn begin_stream(
     let port = match port {
         Some(p) if !host.is_empty() => p,
         _ => {
-            return send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+            return send_data_cell(ciphers, circuit_id, write_tx, is_inner_hop, RelayCell {
                 command: RelayCommand::BeginFailed,
                 stream_id,
                 data: b"invalid target".to_vec(),
@@ -322,7 +413,7 @@ async fn begin_stream(
         Ok(s) => s,
         Err(e) => {
             debug!("stream {} connect failed: {}", stream_id, e);
-            return send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+            return send_data_cell(ciphers, circuit_id, write_tx, is_inner_hop, RelayCell {
                 command: RelayCommand::BeginFailed,
                 stream_id,
                 data: e.to_string().into_bytes(),
@@ -331,7 +422,7 @@ async fn begin_stream(
     };
 
     // Send CONNECTED to client
-    send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+    send_data_cell(ciphers, circuit_id, write_tx, is_inner_hop, RelayCell {
         command: RelayCommand::Connected,
         stream_id,
         data: vec![],
@@ -347,8 +438,18 @@ async fn begin_stream(
         let mut reader = read_half;
         loop {
             match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => { let _ = tx.send((stream_id, vec![])).await; break; }
-                Ok(n) => { if tx.send((stream_id, buf[..n].to_vec())).await.is_err() { break; } }
+                Ok(0) | Err(_) => {
+                    if tx.send((stream_id, vec![])).await.is_err() {
+                        debug!("circuit stream {} dest_tx closed on EOF", stream_id);
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    if tx.send((stream_id, buf[..n].to_vec())).await.is_err() {
+                        debug!("circuit stream {} dest_tx closed mid-stream", stream_id);
+                        break;
+                    }
+                }
             }
         }
     });
@@ -356,8 +457,9 @@ async fn begin_stream(
     Ok(())
 }
 
-// ── Crypto send helper ────────────────────────────────────────────────────────
+// ── Crypto send helpers ───────────────────────────────────────────────────────
 
+/// Send an outer (single-hop exit) relay cell to the client.
 async fn send_relay_cell(
     ciphers: &mut RelayCiphers,
     circuit_id: u32,
@@ -370,6 +472,203 @@ async fn send_relay_cell(
     let mut cell = Cell::new(circuit_id, CellType::Relay);
     cell.payload.copy_from_slice(&ct);
     write_tx.send(cell.to_bytes()).await.map_err(|_| TransportError::CircuitClosed)
+}
+
+/// Send an inner-hop (relay2) relay cell back to relay1.
+async fn send_relay_cell_inner(
+    ciphers: &mut RelayCiphers,
+    circuit_id: u32,
+    write_tx: &mpsc::Sender<[u8; CELL_SIZE]>,
+    inner: RelayCell,
+) -> Result<(), TransportError> {
+    let pt: [u8; RELAY_INNER_PLAINTEXT_LEN] = inner.encode_inner()?;
+    let ct = ciphers.outbound.encrypt_inner(&pt)?;
+    let mut cell = Cell::new(circuit_id, CellType::RelayInner);
+    cell.payload[..RELAY_INNER_CT_LEN].copy_from_slice(&ct);
+    write_tx.send(cell.to_bytes()).await.map_err(|_| TransportError::CircuitClosed)
+}
+
+/// Send a relay cell using the appropriate mode (outer or inner hop).
+async fn send_data_cell(
+    ciphers: &mut RelayCiphers,
+    circuit_id: u32,
+    write_tx: &mpsc::Sender<[u8; CELL_SIZE]>,
+    is_inner_hop: bool,
+    inner: RelayCell,
+) -> Result<(), TransportError> {
+    if is_inner_hop {
+        send_relay_cell_inner(ciphers, circuit_id, write_tx, inner).await
+    } else {
+        send_relay_cell(ciphers, circuit_id, write_tx, inner).await
+    }
+}
+
+// ── Phase 2: RELAY_EXTEND handler ────────────────────────────────────────────
+
+/// Send a RELAY_EXTEND_FAILED cell back to the client (non-fatal; circuit stays open).
+async fn send_extend_failed(
+    reason: &str,
+    circuit_id: u32,
+    ciphers: &mut RelayCiphers,
+    write_tx: &mpsc::Sender<[u8; CELL_SIZE]>,
+) -> Result<(), TransportError> {
+    warn!("circuit {} RELAY_EXTEND failed: {}", circuit_id, reason);
+    send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+        command: RelayCommand::ExtendFailed,
+        stream_id: 0,
+        data: reason.as_bytes().to_vec(),
+    }).await
+}
+
+/// Handle a RELAY_EXTEND cell: connect to relay2, proxy CREATE/CREATED,
+/// spawn forwarding tasks, and return a write channel to relay2.
+///
+/// Returns `Ok(Some(tx))` on success. On a non-fatal extend failure,
+/// sends RELAY_EXTEND_FAILED to the client and returns `Ok(None)`.
+/// A fatal I/O error (client write failed) returns `Err(...)`.
+async fn handle_extend(
+    inner: RelayCell,
+    circuit_id: u32,
+    ciphers: &mut RelayCiphers,
+    write_tx: &mpsc::Sender<[u8; CELL_SIZE]>,
+    relay2_inbound_tx: mpsc::Sender<Vec<u8>>,
+) -> Result<Option<mpsc::Sender<[u8; CELL_SIZE]>>, TransportError> {
+    // ── Parse RELAY_EXTEND payload ────────────────────────────────────────────
+    // Layout (big-endian u32 lengths):
+    //   [0..4]             addr_len
+    //   [4..4+addr_len]    UTF-8 "ip:port"
+    //   [off..off+32]      relay2 fingerprint (SHA-256 of static pubkey)
+    //   [off+32..off+64]   client ephemeral X25519 pubkey (for relay2)
+    //   [off+64..off+96]   client nonce (for relay2)
+    let data = &inner.data;
+
+    if data.len() < 4 {
+        send_extend_failed("payload too short (< 4 bytes)", circuit_id, ciphers, write_tx).await?;
+        return Ok(None);
+    }
+    let addr_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    let required = 4usize.saturating_add(addr_len).saturating_add(96);
+    if data.len() < required {
+        send_extend_failed(
+            &format!("payload truncated: need {} bytes, got {}", required, data.len()),
+            circuit_id, ciphers, write_tx,
+        ).await?;
+        return Ok(None);
+    }
+
+    let addr = match std::str::from_utf8(&data[4..4 + addr_len]) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            send_extend_failed("non-UTF-8 address", circuit_id, ciphers, write_tx).await?;
+            return Ok(None);
+        }
+    };
+
+    let off = 4 + addr_len;
+    let mut fp = [0u8; 32];
+    fp.copy_from_slice(&data[off..off + 32]);
+    let mut client_eph = [0u8; 32];
+    client_eph.copy_from_slice(&data[off + 32..off + 64]);
+    let mut client_nonce_bytes = [0u8; 32];
+    client_nonce_bytes.copy_from_slice(&data[off + 64..off + 96]);
+
+    debug!(
+        "circuit {} extending to {} (fp prefix {}...)",
+        circuit_id, addr, hex::encode(&fp[..4])
+    );
+
+    // ── Connect to relay2 ─────────────────────────────────────────────────────
+    let relay2_tcp = match TcpStream::connect(&addr).await {
+        Ok(s) => s,
+        Err(e) => {
+            send_extend_failed(
+                &format!("connect to {}: {}", addr, e),
+                circuit_id, ciphers, write_tx,
+            ).await?;
+            return Ok(None);
+        }
+    };
+    let _ = relay2_tcp.set_nodelay(true);
+    let mut relay2_conn = RelayConn::new(relay2_tcp);
+
+    // ── Build and send CREATE cell (forwarding client's key material) ─────────
+    let mut create = Cell::new(circuit_id, CellType::Create);
+    create.payload[0..32].copy_from_slice(&fp);
+    create.payload[32..64].copy_from_slice(&client_eph);
+    create.payload[64..96].copy_from_slice(&client_nonce_bytes);
+
+    if let Err(e) = relay2_conn.send(&create).await {
+        send_extend_failed(
+            &format!("send CREATE to relay2: {}", e),
+            circuit_id, ciphers, write_tx,
+        ).await?;
+        return Ok(None);
+    }
+
+    // ── Read CREATED from relay2 ──────────────────────────────────────────────
+    let created = match relay2_conn.recv().await {
+        Ok(c) => c,
+        Err(e) => {
+            send_extend_failed(
+                &format!("recv CREATED from relay2: {}", e),
+                circuit_id, ciphers, write_tx,
+            ).await?;
+            return Ok(None);
+        }
+    };
+    if !matches!(created.cell_type, CellType::Created) {
+        send_extend_failed(
+            &format!("relay2 sent {:?} (expected CREATED)", created.cell_type),
+            circuit_id, ciphers, write_tx,
+        ).await?;
+        return Ok(None);
+    }
+
+    // ── Forward CREATED payload as RELAY_EXTENDED to client ──────────────────
+    // The first 96 bytes are: relay2_eph_pub(32) || relay2_nonce(32) || confirmation(32)
+    let extended_data = created.payload[0..96].to_vec();
+    send_relay_cell(ciphers, circuit_id, write_tx, RelayCell {
+        command: RelayCommand::Extended,
+        stream_id: 0,
+        data: extended_data,
+    }).await?;
+
+    debug!("circuit {} extended successfully to {}", circuit_id, addr);
+
+    // ── Spawn relay2 I/O tasks ────────────────────────────────────────────────
+    let relay2_stream = relay2_conn.into_inner();
+    let (relay2_read_half, mut relay2_write_half) = relay2_stream.into_split();
+
+    // Writer: main loop → relay2
+    let (relay2_cell_tx, mut relay2_cell_rx) = mpsc::channel::<[u8; CELL_SIZE]>(64);
+    tokio::spawn(async move {
+        while let Some(bytes) = relay2_cell_rx.recv().await {
+            if relay2_write_half.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Reader: relay2 → main loop (extract inner ciphertext from RelayInner cells)
+    tokio::spawn(async move {
+        let mut rdr = relay2_read_half;
+        let mut buf = [0u8; CELL_SIZE];
+        loop {
+            match rdr.read_exact(&mut buf).await {
+                Ok(_) if buf[4] == CellType::RelayInner as u8 => {
+                    // Payload offset 0..RELAY_INNER_CT_LEN holds the inner ciphertext
+                    let inner_ct = buf[5..5 + RELAY_INNER_CT_LEN].to_vec();
+                    if relay2_inbound_tx.send(inner_ct).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {} // padding and other cells from relay2 are silently dropped
+                Err(_) => break,
+            }
+        }
+    });
+
+    Ok(Some(relay2_cell_tx))
 }
 
 // ── Argument parsing ──────────────────────────────────────────────────────────

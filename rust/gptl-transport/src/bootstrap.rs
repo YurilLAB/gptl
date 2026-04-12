@@ -76,14 +76,29 @@ impl BootstrapConfig {
         self.relays.iter().find(|r| r.nickname == name)
     }
 
-    /// Validate all descriptors (parseable addresses, well-formed pubkeys).
+    /// Validate all descriptors (parseable addresses, well-formed pubkeys, no duplicates).
     pub fn validate(&self) -> Result<(), TransportError> {
         if self.relays.is_empty() {
             return Err(TransportError::Bootstrap("directory is empty — add at least one relay".into()));
         }
+
+        let mut seen_nicknames = std::collections::HashSet::new();
+        let mut seen_pubkeys = std::collections::HashSet::new();
+
         for r in &self.relays {
             r.pubkey_bytes()?;
             r.socket_addr()?;
+
+            if !seen_nicknames.insert(r.nickname.as_str()) {
+                return Err(TransportError::Bootstrap(
+                    format!("duplicate relay nickname '{}'", r.nickname),
+                ));
+            }
+            if !seen_pubkeys.insert(r.pubkey_hex.as_str()) {
+                return Err(TransportError::Bootstrap(
+                    format!("duplicate relay pubkey in entry '{}'", r.nickname),
+                ));
+            }
         }
         Ok(())
     }
@@ -217,6 +232,68 @@ mod tests {
         };
         assert!(config.find_by_nickname("test-relay").is_some());
         assert!(config.find_by_nickname("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_duplicate_nickname_rejected() {
+        let key1 = RelayStaticKey::generate();
+        let key2 = RelayStaticKey::generate();
+        let config = BootstrapConfig {
+            relays: vec![
+                RelayDescriptor {
+                    nickname: "same-name".into(),
+                    address: "127.0.0.1:9001".into(),
+                    pubkey_hex: hex::encode(key1.public),
+                },
+                RelayDescriptor {
+                    nickname: "same-name".into(), // duplicate
+                    address: "127.0.0.1:9002".into(),
+                    pubkey_hex: hex::encode(key2.public),
+                },
+            ],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_duplicate_pubkey_rejected() {
+        let key = RelayStaticKey::generate();
+        let config = BootstrapConfig {
+            relays: vec![
+                RelayDescriptor {
+                    nickname: "relay-a".into(),
+                    address: "127.0.0.1:9001".into(),
+                    pubkey_hex: hex::encode(key.public),
+                },
+                RelayDescriptor {
+                    nickname: "relay-b".into(),
+                    address: "127.0.0.1:9002".into(),
+                    pubkey_hex: hex::encode(key.public), // duplicate pubkey
+                },
+            ],
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_unique_relays_pass_validation() {
+        let key1 = RelayStaticKey::generate();
+        let key2 = RelayStaticKey::generate();
+        let config = BootstrapConfig {
+            relays: vec![
+                RelayDescriptor {
+                    nickname: "relay-a".into(),
+                    address: "127.0.0.1:9001".into(),
+                    pubkey_hex: hex::encode(key1.public),
+                },
+                RelayDescriptor {
+                    nickname: "relay-b".into(),
+                    address: "127.0.0.1:9002".into(),
+                    pubkey_hex: hex::encode(key2.public),
+                },
+            ],
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]
