@@ -8,16 +8,24 @@
 //!
 //! # Options
 //!
-//!   --relays <PATH>      Path to relays.json (default: ~/.config/gptl/relays.json)
-//!   --listen <ADDR>      SOCKS5 listen address (default: 127.0.0.1:1080)
-//!   --log <LEVEL>        Log level: error|warn|info|debug|trace (default: info)
+//!   --relays <PATH>             Path to relays.json (default: ~/.config/gptl/relays.json)
+//!   --listen <ADDR>             SOCKS5 listen address (default: 127.0.0.1:1080)
+//!   --hops <N>                  Number of hops: 1 or 2 (default: 1)
+//!   --guards <PATH>             Path to guards.json for persistent guard state
+//!   --pool-size <N>             Pre-build N circuits (0 = disabled, default: 0)
+//!   --guard-rotation-days <N>   Guard rotation interval in days (default: 30)
+//!   --log <LEVEL>               Log level: error|warn|info|debug|trace (default: info)
 
 use gptl_transport::{
     bootstrap::{default_bootstrap_path, BootstrapConfig},
+    circuit_pool::{CircuitPoolManager, PoolConfig},
+    guard::{GuardConfig, GuardManager},
+    path::PathConfig,
     proxy::{run as run_proxy, ProxyConfig},
     TransportError,
 };
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() {
@@ -56,10 +64,70 @@ async fn main() {
         relays_path.display()
     );
 
+    let bootstrap = Arc::new(bootstrap);
+
+    // ── Guard manager (optional) ──────────────────────────────────────────────
+    let guard_manager = if let Some(ref guards_path) = args.guards {
+        let guard_config = GuardConfig {
+            rotation_days: args.guard_rotation_days,
+            ..Default::default()
+        };
+        let mut gm = GuardManager::new(guard_config, Some(guards_path.clone()));
+        if let Err(e) = gm.initialize(&bootstrap.relays).await {
+            eprintln!("error initializing guard manager: {}", e);
+            std::process::exit(1);
+        }
+        tracing::info!(
+            "guard manager initialized from {}",
+            guards_path.display()
+        );
+        Some(Arc::new(Mutex::new(gm)))
+    } else {
+        None
+    };
+
+    // ── Circuit pool manager (optional) ───────────────────────────────────────
+    let pool_manager = if args.pool_size > 0 {
+        let pool_config = PoolConfig {
+            size: args.pool_size,
+            ..Default::default()
+        };
+        let path_config = PathConfig {
+            num_hops: args.hop_count,
+            exclude_same_subnet: true,
+            exclude_same_nickname_prefix: true,
+        };
+        // Build a path selector for the pool; guard is wired via guard_config below.
+        let guard_config = args.guards.as_ref().map(|_| GuardConfig {
+            rotation_days: args.guard_rotation_days,
+            ..Default::default()
+        });
+        let guard_path = args.guards.clone();
+        let manager = Arc::new(CircuitPoolManager::new(
+            pool_config,
+            path_config,
+            Arc::clone(&bootstrap),
+            guard_config,
+            guard_path,
+        ));
+        // Start the maintenance task; it will trigger the first pool refill.
+        let handle = Arc::clone(&manager).start_maintenance();
+        // Give the maintenance task a moment to build initial circuits.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tracing::info!("circuit pool manager started (target size: {})", args.pool_size);
+        // Keep the handle alive; leak it intentionally (process will exit on error anyway).
+        std::mem::forget(handle);
+        Some(manager)
+    } else {
+        None
+    };
+
     let config = ProxyConfig {
         listen_addr: args.listen,
-        bootstrap: Arc::new(bootstrap),
+        bootstrap,
         hop_count: args.hop_count,
+        pool_manager,
+        guard_manager,
     };
 
     if let Err(e) = run_proxy(config).await {
@@ -75,6 +143,9 @@ struct Args {
     listen: SocketAddr,
     log_level: String,
     hop_count: usize,
+    guards: Option<PathBuf>,
+    pool_size: usize,
+    guard_rotation_days: u64,
 }
 
 fn parse_args() -> Args {
@@ -82,6 +153,9 @@ fn parse_args() -> Args {
     let mut listen: SocketAddr = "127.0.0.1:1080".parse().unwrap();
     let mut log_level = "info".to_string();
     let mut hop_count: usize = 1;
+    let mut guards: Option<PathBuf> = None;
+    let mut pool_size: usize = 0;
+    let mut guard_rotation_days: u64 = 30;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -108,6 +182,24 @@ fn parse_args() -> Args {
                     std::process::exit(1);
                 }
             }
+            "--guards" => {
+                let val = next_arg(&arg, &mut iter);
+                guards = Some(PathBuf::from(val));
+            }
+            "--pool-size" => {
+                let val = next_arg(&arg, &mut iter);
+                pool_size = val.parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("error: invalid pool size '{}'", val);
+                    std::process::exit(1);
+                });
+            }
+            "--guard-rotation-days" => {
+                let val = next_arg(&arg, &mut iter);
+                guard_rotation_days = val.parse::<u64>().unwrap_or_else(|_| {
+                    eprintln!("error: invalid guard rotation days '{}'", val);
+                    std::process::exit(1);
+                });
+            }
             "--log" => {
                 log_level = next_arg(&arg, &mut iter);
             }
@@ -123,7 +215,7 @@ fn parse_args() -> Args {
         }
     }
 
-    Args { relays, listen, log_level, hop_count }
+    Args { relays, listen, log_level, hop_count, guards, pool_size, guard_rotation_days }
 }
 
 fn next_arg(flag: &str, iter: &mut impl Iterator<Item = String>) -> String {
@@ -140,14 +232,18 @@ fn print_usage() {
     println!("  gptl-client [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("  --relays <PATH>   Path to relays.json  (default: ~/.config/gptl/relays.json)");
-    println!("  --listen <ADDR>   SOCKS5 listen address (default: 127.0.0.1:1080)");
-    println!("  --hops <N>        Number of hops: 1 (single) or 2 (two-hop, default: 1)");
-    println!("  --log <LEVEL>     Log level: error|warn|info|debug|trace (default: info)");
-    println!("  -h, --help        Print this help");
+    println!("  --relays <PATH>             Path to relays.json  (default: ~/.config/gptl/relays.json)");
+    println!("  --listen <ADDR>             SOCKS5 listen address (default: 127.0.0.1:1080)");
+    println!("  --hops <N>                  Number of hops: 1 (single) or 2 (two-hop, default: 1)");
+    println!("  --guards <PATH>             Path to guards.json for persistent guard state");
+    println!("  --pool-size <N>             Pre-build N circuits (0 = disabled, default: 0)");
+    println!("  --guard-rotation-days <N>   Guard rotation interval in days (default: 30)");
+    println!("  --log <LEVEL>               Log level: error|warn|info|debug|trace (default: info)");
+    println!("  -h, --help                  Print this help");
     println!();
     println!("EXAMPLE:");
     println!("  gptl-client --relays /etc/gptl/relays.json --listen 127.0.0.1:1080");
+    println!("  gptl-client --relays relays.json --guards /var/lib/gptl/guards.json --pool-size 3");
 }
 
 fn init_logging(level: &str) {
