@@ -12,6 +12,7 @@
 use crate::TransportError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tracing::debug;
 
 /// The destination requested by the SOCKS5 client.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,7 +146,9 @@ async fn send_reply(stream: &mut TcpStream, code: ReplyCode) {
         0, 0, 0, 0,   // BND.ADDR: 0.0.0.0
         0, 0,         // BND.PORT: 0
     ];
-    let _ = stream.write_all(&reply).await;
+    if let Err(e) = stream.write_all(&reply).await {
+        debug!("SOCKS5 send_reply: write failed: {}", e);
+    }
 }
 
 fn io_err(e: std::io::Error) -> TransportError {
