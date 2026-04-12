@@ -425,6 +425,118 @@ mod tests {
         // Different nonce prefixes should produce different ciphertexts
         assert_ne!(ct1, ct2);
     }
+
+    #[test]
+    fn test_decrypt_with_wrong_key_fails() {
+        let key_a = [0xAAu8; 32];
+        let key_b = [0xBBu8; 32];
+        let nonce_prefix = [0u8; 4];
+
+        let cipher_a = AesGcmCipher::new(&key_a, nonce_prefix).unwrap();
+        let cipher_b = AesGcmCipher::new(&key_b, nonce_prefix).unwrap();
+
+        let plaintext = b"super secret data";
+        let ciphertext = cipher_a.encrypt(plaintext).unwrap();
+
+        let result = cipher_b.decrypt(&ciphertext);
+        assert!(result.is_err(), "decrypting with wrong key must fail");
+    }
+
+    #[test]
+    fn test_chacha20_decrypt_with_wrong_key_fails() {
+        let key_a = [0xCCu8; 32];
+        let key_b = [0xDDu8; 32];
+        let nonce_prefix = [0u8; 4];
+
+        let cipher_a = ChaCha20Cipher::new(&key_a, nonce_prefix).unwrap();
+        let cipher_b = ChaCha20Cipher::new(&key_b, nonce_prefix).unwrap();
+
+        let plaintext = b"another secret";
+        let ciphertext = cipher_a.encrypt(plaintext).unwrap();
+
+        let result = cipher_b.decrypt(&ciphertext);
+        assert!(result.is_err(), "ChaCha20 decryption with wrong key must fail");
+    }
+
+    #[test]
+    fn test_nonce_counter_near_overflow_then_exhaustion() {
+        let key = [0u8; 32];
+        let nonce_prefix = [0u8; 4];
+        let cipher = AesGcmCipher::new(&key, nonce_prefix).unwrap();
+
+        // Set counter to u64::MAX - 1 (one slot left before sentinel value)
+        cipher.nonce_counter.store(u64::MAX - 1, std::sync::atomic::Ordering::SeqCst);
+
+        // This consume uses counter = u64::MAX - 1, increments to u64::MAX, succeeds
+        let result1 = cipher.encrypt(b"first");
+        assert!(result1.is_ok(), "encryption at counter u64::MAX-1 must succeed");
+
+        // Counter is now u64::MAX; next fetch_add returns u64::MAX which equals the sentinel
+        let result2 = cipher.encrypt(b"second");
+        assert!(result2.is_err(), "encryption when counter reaches u64::MAX must fail with NonceExhausted");
+    }
+
+    #[test]
+    fn test_needs_rotation_triggers_at_2_pow_32() {
+        let key = [0u8; 32];
+        let nonce_prefix = [0u8; 4];
+        let cipher = AesGcmCipher::new(&key, nonce_prefix).unwrap();
+
+        // Just below the rotation threshold
+        cipher.nonce_counter.store((1u64 << 32) - 1, std::sync::atomic::Ordering::SeqCst);
+        assert!(!cipher.needs_rotation(), "below 2^32 should not need rotation");
+
+        cipher.nonce_counter.store(1u64 << 32, std::sync::atomic::Ordering::SeqCst);
+        assert!(cipher.needs_rotation(), "at 2^32 must need rotation");
+    }
+
+    #[test]
+    fn test_ciphertext_auth_tag_tampering_at_tag_position() {
+        let key = [0u8; 32];
+        let nonce_prefix = [0u8; 4];
+        let cipher = AesGcmCipher::new(&key, nonce_prefix).unwrap();
+
+        let plaintext = b"authenticated message";
+        let mut ciphertext = cipher.encrypt(plaintext).unwrap();
+
+        // Flip the last byte (part of the GCM authentication tag)
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 0xFF;
+
+        let result = cipher.decrypt(&ciphertext);
+        assert!(result.is_err(), "flipping auth tag byte must cause auth failure");
+    }
+
+    #[test]
+    fn test_encrypt_then_decrypt_different_key_fails_aes() {
+        let key1 = [0x11u8; 32];
+        let key2 = [0x22u8; 32];
+        let prefix = [9u8, 8, 7, 6];
+
+        let enc = AesGcmCipher::new(&key1, prefix).unwrap();
+        let dec = AesGcmCipher::new(&key2, prefix).unwrap();
+
+        let ct = enc.encrypt(b"private").unwrap();
+        assert!(dec.decrypt(&ct).is_err(),
+            "encrypt-then-decrypt with different keys must fail");
+    }
+
+    #[test]
+    fn test_invalid_key_length_rejected() {
+        // 16-byte key (too short for AES-256)
+        let result = AesGcmCipher::new(&[0u8; 16], [0u8; 4]);
+        assert!(result.is_err(), "16-byte key must be rejected for AES-256-GCM");
+
+        // 64-byte key (too long)
+        let result64 = AesGcmCipher::new(&[0u8; 64], [0u8; 4]);
+        assert!(result64.is_err(), "64-byte key must be rejected for AES-256-GCM");
+    }
+
+    #[test]
+    fn test_chacha20_invalid_key_length_rejected() {
+        let result = ChaCha20Cipher::new(&[0u8; 16], [0u8; 4]);
+        assert!(result.is_err(), "16-byte key must be rejected for ChaCha20-Poly1305");
+    }
 }
 
 #[cfg(test)]

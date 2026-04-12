@@ -534,4 +534,174 @@ mod tests {
         assert!(!seq.padding.is_empty());
         assert!(!seq.keepalive.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_obfuscation_maximum_level_adds_cells_to_input() {
+        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+
+        let mut config = AntiSurveillanceConfig::default();
+        config.level = SecurityLevel::Maximum;
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+        let shield = CircuitShield::new(config);
+
+        let input: Vec<Cell> = (0..3)
+            .map(|i| Cell {
+                circuit_id: i,
+                stream_id: 0,
+                command: CellCommand::Data,
+                payload: vec![0xAA; 509],
+                timestamp: Instant::now(),
+            })
+            .collect();
+
+        let output = shield.obfuscate_cells(input.clone()).await.unwrap();
+        // Maximum level adds handshake + keepalive cells, so output > input
+        assert!(output.len() > input.len(),
+            "maximum obfuscation must produce more cells than the input");
+    }
+
+    #[tokio::test]
+    async fn test_obfuscation_output_differs_from_bare_input_sequence() {
+        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+
+        let mut config = AntiSurveillanceConfig::default();
+        config.level = SecurityLevel::Maximum;
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+        let shield = CircuitShield::new(config);
+
+        let input: Vec<Cell> = (0..5)
+            .map(|i| Cell {
+                circuit_id: i,
+                stream_id: 0,
+                command: CellCommand::Data,
+                payload: vec![i as u8; 509],
+                timestamp: Instant::now(),
+            })
+            .collect();
+
+        let output = shield.obfuscate_cells(input.clone()).await.unwrap();
+
+        // The obfuscated stream must contain cells that were NOT in the input
+        // (i.e. the standard sequences injected Create/Created/Padding cells).
+        let has_injected = output.iter().any(|c| {
+            matches!(c.command, CellCommand::Create | CellCommand::Created)
+        });
+        assert!(has_injected,
+            "maximum obfuscation must inject Create/Created cells from the standard handshake");
+    }
+
+    #[tokio::test]
+    async fn test_obfuscation_standard_level_passes_through_cells() {
+        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+
+        let mut config = AntiSurveillanceConfig::default();
+        config.level = SecurityLevel::Standard;
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+        let shield = CircuitShield::new(config);
+
+        let input: Vec<Cell> = vec![Cell {
+            circuit_id: 99,
+            stream_id: 7,
+            command: CellCommand::Data,
+            payload: vec![0xFF; 509],
+            timestamp: Instant::now(),
+        }];
+
+        let output = shield.obfuscate_cells(input).await.unwrap();
+        // Standard level is pass-through
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].circuit_id, 99);
+        assert_eq!(output[0].stream_id, 7);
+    }
+
+    #[tokio::test]
+    async fn test_register_unregistered_circuit_stats_returns_none() {
+        use crate::anti_surveillance::AntiSurveillanceConfig;
+
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            AntiSurveillanceConfig::default(),
+        ));
+        let shield = CircuitShield::new(config);
+
+        // Circuit 9999 was never registered — stats must return None
+        let stats = shield.get_circuit_stats(9999).await;
+        assert!(stats.is_none(),
+            "stats for an unregistered circuit ID must return None");
+    }
+
+    #[tokio::test]
+    async fn test_dummy_cell_payload_not_all_zeros() {
+        use crate::anti_surveillance::AntiSurveillanceConfig;
+
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            AntiSurveillanceConfig::default(),
+        ));
+        let shield = CircuitShield::new(config);
+
+        // generate_dummy_cell uses random fill — verify the security property
+        for _ in 0..10 {
+            let cell = shield.generate_dummy_cell();
+            let all_zero = cell.payload.iter().all(|&b| b == 0);
+            assert!(!all_zero,
+                "dummy cell payload must not be all-zero (security requirement)");
+        }
+    }
+
+    #[test]
+    fn test_vanguard_no_guards_returns_empty_selection() {
+        let manager = VanguardManager::new();
+        let selected = manager.select_guards();
+        // No guards registered yet — selection must return empty vec, not panic
+        assert!(selected.is_empty(),
+            "selecting guards when none are registered must return empty vec");
+    }
+
+    #[test]
+    fn test_vanguard_rotation_needed_flags_correct_layer() {
+        let mut manager = VanguardManager::new();
+
+        // Add a first-layer guard whose added_at is far enough in the past to trigger rotation.
+        // Use Instant::now() as the best approximation (rotation policy is 90 days,
+        // checked_sub will clamp to Instant::now() if the system uptime is < 90 days,
+        // so instead we force it by checking the policy directly).
+        manager.add_guard(GuardInfo {
+            identity: "g1".to_string(),
+            address: "1.2.3.4:9001".to_string(),
+            bandwidth: 1_000_000,
+            layer: GuardLayer::First,
+            added_at: Instant::now(),
+        });
+
+        // Freshly-added guard should NOT need rotation
+        let needs = manager.check_rotations();
+        assert!(!needs.contains(&GuardLayer::First),
+            "freshly added first-layer guard must not need rotation immediately");
+    }
+
+    #[tokio::test]
+    async fn test_preemptive_padding_registered_circuit_gets_cells() {
+        use crate::anti_surveillance::AntiSurveillanceConfig;
+
+        let pcp = PreemptiveCircuitPadding::new();
+        pcp.register_circuit(1).await;
+
+        // Nudge the clock past the next_padding time by overwriting it in the future
+        // then advancing. Since we cannot fake time, just re-schedule to "now - 1ms".
+        // The cleanest approach: call twice — first call primes the machine, second fires.
+        {
+            let mut machines = pcp.padding_machines.write().await;
+            if let Some(m) = machines.get_mut(&1) {
+                // Force next_padding into the past
+                m.next_padding = Instant::now()
+                    .checked_sub(Duration::from_millis(1))
+                    .unwrap_or(Instant::now());
+            }
+        }
+
+        let cells = pcp.get_padding_cells(1).await;
+        assert_eq!(cells.len(), 1, "registered circuit with past next_padding should get 1 padding cell");
+        let all_zero = cells[0].payload.iter().all(|&b| b == 0);
+        assert!(!all_zero,
+            "preemptive padding cell payload must not be all-zero (security requirement)");
+    }
 }

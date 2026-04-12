@@ -893,4 +893,159 @@ mod tests {
         // and high score (0.8) the floor is ~0.60 even with age_factor=0.
         assert!(reputation >= 0.6 && reputation <= 1.0);
     }
+
+    #[tokio::test]
+    async fn test_relay_below_stake_threshold_rejected() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let shield = SybilShield::new(config);
+
+        // Guard relay requires stake ≥ 1000; provide only 500
+        let info = RelayInfo {
+            identity: "cheap-relay".to_string(),
+            address: "10.0.0.1".parse().unwrap(),
+            bandwidth: 1_000_000,
+            relay_type: RelayType::Guard,
+            stake_amount: 500, // below required 1000
+            nickname: "cheap".to_string(),
+            fingerprint: "aabbcc".to_string(),
+        };
+
+        let result = shield.register_relay(info).await;
+        assert!(result.is_err(),
+            "relay with stake below threshold must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_relay_at_exact_stake_threshold_accepted() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let shield = SybilShield::new(config);
+
+        // Exit relay requires stake ≥ 2000; provide exactly 2000
+        let info = RelayInfo {
+            identity: "exact-stake-relay".to_string(),
+            address: "10.0.0.2".parse().unwrap(),
+            bandwidth: 2_000_000,
+            relay_type: RelayType::Exit,
+            stake_amount: 2000, // exactly required
+            nickname: "exact".to_string(),
+            fingerprint: "ddeeff".to_string(),
+        };
+
+        let result = shield.register_relay(info).await;
+        assert!(result.is_ok(),
+            "relay with stake exactly at threshold must be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_reputation_decay_on_repeated_failures() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let shield = SybilShield::new(config);
+
+        // Register relay first
+        let info = RelayInfo {
+            identity: "failing-relay".to_string(),
+            address: "10.0.0.5".parse().unwrap(),
+            bandwidth: 1_000_000,
+            relay_type: RelayType::Middle,
+            stake_amount: 500,
+            nickname: "failing".to_string(),
+            fingerprint: "fffaaa".to_string(),
+        };
+        shield.register_relay(info).await.unwrap();
+
+        // Report 10 failures — score should decrease
+        for _ in 0..10 {
+            shield.report_behavior("failing-relay", RelayBehavior::Failure).await;
+        }
+
+        let reputation = shield.get_reputation("failing-relay").await.unwrap();
+        // Starting score is 0.5; each failure multiplies by 0.9:
+        // 0.5 * 0.9^10 ≈ 0.174 — well below 0.5 threshold
+        assert!(reputation < 0.5,
+            "reputation must decay below threshold after 10 consecutive failures, got {}", reputation);
+    }
+
+    #[tokio::test]
+    async fn test_behavioral_anomaly_detection_suspicious_flags() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let shield = SybilShield::new(config);
+
+        let info = RelayInfo {
+            identity: "suspicious-relay".to_string(),
+            address: "10.0.0.6".parse().unwrap(),
+            bandwidth: 1_000_000,
+            relay_type: RelayType::Guard,
+            stake_amount: 1000,
+            nickname: "susp".to_string(),
+            fingerprint: "123456".to_string(),
+        };
+        shield.register_relay(info).await.unwrap();
+
+        // Report several suspicious behaviors — score should drop
+        for _ in 0..5 {
+            shield.report_behavior("suspicious-relay", RelayBehavior::Suspicious).await;
+        }
+
+        let reputation = shield.get_reputation("suspicious-relay").await.unwrap();
+        // Starting score 0.5 * 0.8^5 ≈ 0.164 — below min_reputation (0.5)
+        assert!(reputation < 0.5,
+            "repeated suspicious reports must reduce score below threshold, got {}", reputation);
+    }
+
+    #[tokio::test]
+    async fn test_blocked_relay_verify_returns_false() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let shield = SybilShield::new(config);
+
+        // Manually block a relay
+        {
+            let mut blocked = shield.blocked_relays.write().await;
+            blocked.insert("blocked-relay".to_string());
+        }
+
+        let result = shield.verify_relay("blocked-relay").await.unwrap();
+        assert!(!result, "explicitly blocked relay must fail verification");
+    }
+
+    #[tokio::test]
+    async fn test_sybil_high_confidence_group_blocks_member() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let shield = SybilShield::new(config);
+
+        // Register members
+        for i in 0..3_u8 {
+            let info = RelayInfo {
+                identity: format!("sybil-member-{}", i),
+                address: format!("10.0.1.{}", i).parse().unwrap(),
+                bandwidth: 1_000_000,
+                relay_type: RelayType::Middle,
+                stake_amount: 500,
+                nickname: format!("sybilnode{}", i),
+                fingerprint: format!("fp{}", i),
+            };
+            shield.register_relay(info).await.unwrap();
+        }
+
+        // Inject a high-confidence Sybil group
+        {
+            let mut engine = shield.detection_engine.write().await;
+            engine.sybil_groups.push(SybilGroup {
+                group_id: "test-sybil".to_string(),
+                members: vec![
+                    "sybil-member-0".to_string(),
+                    "sybil-member-1".to_string(),
+                    "sybil-member-2".to_string(),
+                ],
+                confidence: 0.95, // > 0.8 threshold
+                detected_at: Instant::now(),
+            });
+        }
+
+        // All members with confidence > 0.8 should fail verification
+        for i in 0..3_u8 {
+            let result = shield.verify_relay(&format!("sybil-member-{}", i)).await.unwrap();
+            assert!(!result,
+                "sybil-member-{} with group confidence 0.95 must fail verification", i);
+        }
+    }
 }

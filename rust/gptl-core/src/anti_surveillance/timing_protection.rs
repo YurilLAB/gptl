@@ -382,16 +382,113 @@ mod tests {
     #[test]
     fn test_watermark_detection() {
         let detector = WatermarkDetector::new(10);
-        
+
         // Create alternating pattern (watermark)
         let base = Instant::now();
         let timestamps: Vec<Instant> = (0..10)
             .map(|i| base + Duration::from_millis(if i % 2 == 0 { 100 } else { 10 }))
             .collect();
-        
+
         // Should detect pattern
         let rt = tokio::runtime::Runtime::new().unwrap();
         let detected = rt.block_on(detector.analyze_pattern(timestamps));
         assert!(detected);
+    }
+
+    #[test]
+    fn test_add_gaussian_noise_within_reasonable_bounds() {
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            super::super::AntiSurveillanceConfig::default(),
+        ));
+        let shield = TimingShield::new(config);
+
+        let base = Instant::now();
+        let std_dev_ms = 50.0;
+
+        // Run many samples and verify they stay within 5-sigma (extremely unlikely to fail legitimately)
+        for _ in 0..50 {
+            let noisy = shield.add_gaussian_noise(base, std_dev_ms).unwrap();
+            let diff_ms = if noisy >= base {
+                noisy.duration_since(base).as_millis()
+            } else {
+                base.duration_since(noisy).as_millis()
+            };
+            assert!(diff_ms < 500,
+                "Gaussian noise sample {} ms is unexpectedly far from base (>500 ms at 5σ)",
+                diff_ms);
+        }
+    }
+
+    #[test]
+    fn test_add_gaussian_noise_zero_std_dev() {
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
+            super::super::AntiSurveillanceConfig::default(),
+        ));
+        let shield = TimingShield::new(config);
+
+        let base = Instant::now();
+        // std_dev = 0 → noise is always 0 ms, result must equal base
+        let result = shield.add_gaussian_noise(base, 0.0);
+        assert!(result.is_ok(), "zero std_dev should not error");
+        // With 0 std dev the noise drawn is 0, so result should be base or very close
+        let noisy = result.unwrap();
+        let diff = if noisy >= base {
+            noisy.duration_since(base)
+        } else {
+            base.duration_since(noisy)
+        };
+        assert!(diff <= Duration::from_millis(1),
+            "zero std_dev noise must produce no shift");
+    }
+
+    #[tokio::test]
+    async fn test_batch_cells_exact_batch_size_boundary() {
+        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+        let mut config = AntiSurveillanceConfig::default();
+        config.batch_size = 3;
+        config.level = SecurityLevel::Maximum;
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(config));
+        let shield = TimingShield::new(config);
+
+        // Exactly batch_size cells — must form a complete batch and be returned
+        let cells: Vec<Cell> = (0..3)
+            .map(|i| Cell {
+                circuit_id: i,
+                stream_id: 0,
+                command: CellCommand::Data,
+                payload: vec![0u8; 10],
+                timestamp: Instant::now(),
+            })
+            .collect();
+
+        let output = shield.protect_timing(cells).await.unwrap();
+        // All 3 cells must come out (no loss)
+        let data_count = output.iter().filter(|c| c.command == CellCommand::Data).count();
+        assert_eq!(data_count, 3,
+            "all {} data cells must survive exactly-batch-size protection", 3);
+    }
+
+    #[test]
+    fn test_clock_skew_tcp_timestamp_wraps_safely() {
+        let mut protection = ClockSkewProtection::new();
+        // Force a negative offset (simulates subtraction scenario)
+        protection.offset_ms = -50;
+        // Should not panic even on very short system uptime
+        let _ts = protection.tcp_timestamp();
+    }
+
+    #[tokio::test]
+    async fn test_watermark_detection_below_window_size_returns_false() {
+        let detector = WatermarkDetector::new(10);
+
+        // Fewer timestamps than window_size — must return false, not panic
+        let base = Instant::now();
+        let timestamps: Vec<Instant> = (0..5)
+            .map(|i| base + Duration::from_millis(i * 10))
+            .collect();
+
+        let detected = detector.analyze_pattern(timestamps).await;
+        assert!(!detected,
+            "insufficient timestamps (fewer than window_size) must not detect a pattern");
     }
 }

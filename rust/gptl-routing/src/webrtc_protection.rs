@@ -780,4 +780,145 @@ mod tests {
         assert!(!tester.servers.is_empty());
         assert!(tester.servers.iter().any(|s| s.contains("stun")));
     }
+
+    #[tokio::test]
+    async fn test_local_ip_candidates_filtered_in_relay_only_mode() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = WebrtcGuard::new(config);
+        // Default policy is RelayOnly — local Host candidates must be filtered
+        guard.initialize().await.unwrap();
+
+        let candidates = vec![
+            IceCandidate {
+                ip: "192.168.0.5".parse().unwrap(), // private/local
+                port: 11111,
+                candidate_type: CandidateType::Host,
+                interface: "tun0".to_string(), // not in blocked_interfaces list
+                foundation: "1".to_string(),
+                priority: 100,
+            },
+            IceCandidate {
+                ip: "10.8.0.1".parse().unwrap(), // private/local
+                port: 22222,
+                candidate_type: CandidateType::Host,
+                interface: "tun1".to_string(),
+                foundation: "2".to_string(),
+                priority: 200,
+            },
+        ];
+
+        let filtered = guard.filter_candidates(candidates).await;
+        assert!(filtered.is_empty(),
+            "all Host candidates must be filtered out in RelayOnly mode, got {}", filtered.len());
+    }
+
+    #[tokio::test]
+    async fn test_non_relay_candidates_blocked_in_relay_only_mode() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = WebrtcGuard::new(config);
+        // Default policy is RelayOnly
+
+        let candidates = vec![
+            IceCandidate {
+                ip: "8.8.8.8".parse().unwrap(),
+                port: 33333,
+                candidate_type: CandidateType::ServerReflexive, // STUN
+                interface: "tun0".to_string(),
+                foundation: "1".to_string(),
+                priority: 50,
+            },
+            IceCandidate {
+                ip: "1.2.3.4".parse().unwrap(),
+                port: 44444,
+                candidate_type: CandidateType::Relay, // TURN — allowed
+                interface: "tun0".to_string(),
+                foundation: "2".to_string(),
+                priority: 300,
+            },
+        ];
+
+        let filtered = guard.filter_candidates(candidates).await;
+        // Only the Relay candidate should survive
+        assert_eq!(filtered.len(), 1,
+            "only Relay candidates must survive in RelayOnly mode");
+        assert_eq!(filtered[0].candidate_type, CandidateType::Relay);
+    }
+
+    #[tokio::test]
+    async fn test_filter_candidates_no_host_mode_allows_stun_and_relay() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = WebrtcGuard::new(config);
+        guard.set_ice_policy(IcePolicy::NoHost).await;
+
+        let candidates = vec![
+            IceCandidate {
+                ip: "1.2.3.4".parse().unwrap(),
+                port: 5000,
+                candidate_type: CandidateType::Host, // must be filtered
+                interface: "tun0".to_string(),
+                foundation: "1".to_string(),
+                priority: 10,
+            },
+            IceCandidate {
+                ip: "5.6.7.8".parse().unwrap(),
+                port: 5001,
+                candidate_type: CandidateType::ServerReflexive, // STUN — allowed
+                interface: "tun1".to_string(),
+                foundation: "2".to_string(),
+                priority: 20,
+            },
+            IceCandidate {
+                ip: "9.10.11.12".parse().unwrap(),
+                port: 5002,
+                candidate_type: CandidateType::Relay, // TURN — allowed
+                interface: "tun2".to_string(),
+                foundation: "3".to_string(),
+                priority: 30,
+            },
+        ];
+
+        let filtered = guard.filter_candidates(candidates).await;
+        assert_eq!(filtered.len(), 2,
+            "NoHost mode must allow STUN and Relay but block Host candidates");
+        assert!(filtered.iter().all(|c| c.candidate_type != CandidateType::Host),
+            "no Host candidate must survive NoHost filtering");
+    }
+
+    #[test]
+    fn test_vpn_address_detection_private_ranges() {
+        // 10.x.x.x
+        let c1 = IceCandidate {
+            ip: "10.0.0.1".parse().unwrap(),
+            port: 0, candidate_type: CandidateType::Host,
+            interface: String::new(), foundation: String::new(), priority: 0,
+        };
+        assert!(c1.is_vpn_address(), "10.0.0.1 must be detected as VPN/private address");
+
+        // 172.16.x.x
+        let c2 = IceCandidate {
+            ip: "172.20.0.1".parse().unwrap(),
+            port: 0, candidate_type: CandidateType::Host,
+            interface: String::new(), foundation: String::new(), priority: 0,
+        };
+        assert!(c2.is_vpn_address(), "172.20.0.1 must be detected as VPN/private address");
+
+        // Public IP — must not be flagged as VPN
+        let c3 = IceCandidate {
+            ip: "203.0.113.5".parse().unwrap(),
+            port: 0, candidate_type: CandidateType::Host,
+            interface: String::new(), foundation: String::new(), priority: 0,
+        };
+        assert!(!c3.is_vpn_address(), "203.0.113.5 is a public IP and must not be a VPN address");
+    }
+
+    #[test]
+    fn test_is_private_ip_covers_cgnat_range() {
+        // 100.64.0.0/10 is carrier-grade NAT
+        assert!(is_private_ip(&"100.64.0.1".parse().unwrap()),
+            "CGNAT 100.64.x.x must be treated as private");
+        assert!(is_private_ip(&"100.127.255.255".parse().unwrap()),
+            "CGNAT upper bound must be treated as private");
+        assert!(!is_private_ip(&"100.128.0.0".parse().unwrap()),
+            "100.128.0.0 is outside CGNAT range and must not be private");
+    }
 }

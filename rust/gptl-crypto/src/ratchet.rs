@@ -317,4 +317,125 @@ mod tests {
         // Send and receive keys should be different
         assert_ne!(send_key, recv_key);
     }
+
+    #[test]
+    fn test_ratchet_forward_secrecy_old_keys_differ_from_new() {
+        // After a DH ratchet step the new message keys must differ from
+        // the ones produced before the step.
+        let shared_secret = SharedSecret(Zeroizing::new(vec![0xABu8; 32]));
+        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+
+        // Produce a key before the ratchet step
+        let old_send_key = ratchet.next_send_key().unwrap();
+
+        // Perform a DH ratchet step with a fresh DH output
+        let new_dh_output = SharedSecret(Zeroizing::new(vec![0x99u8; 32]));
+        ratchet.ratchet_dh(&new_dh_output).unwrap();
+
+        // After the ratchet the next send key must differ from the pre-ratchet key
+        let new_send_key = ratchet.next_send_key().unwrap();
+        assert_ne!(old_send_key, new_send_key,
+            "send key after ratchet must differ from pre-ratchet send key");
+    }
+
+    #[test]
+    fn test_ratchet_after_max_messages_send_count_advances() {
+        let shared_secret = SharedSecret(Zeroizing::new(vec![0x01u8; 32]));
+        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+
+        // Simulate sending max_messages worth of messages (use 100 as a proxy)
+        let limit = 100usize;
+        let mut keys = Vec::with_capacity(limit);
+        for _ in 0..limit {
+            keys.push(ratchet.next_send_key().unwrap());
+        }
+
+        // All keys should be unique (no repeats before rotation)
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), limit, "every pre-rotation message key must be unique");
+
+        let stats = ratchet.stats();
+        assert_eq!(stats.send_count, limit as u64,
+            "send_count must equal the number of send keys consumed");
+    }
+
+    #[test]
+    fn test_ratchet_state_after_dh_step_resets_counters() {
+        let shared_secret = SharedSecret(Zeroizing::new(vec![0x07u8; 32]));
+        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+
+        // Advance the send chain a few steps
+        for _ in 0..5 {
+            ratchet.next_send_key().unwrap();
+        }
+        assert_eq!(ratchet.stats().send_count, 5);
+
+        // A DH ratchet step resets the chain counters
+        let dh = SharedSecret(Zeroizing::new(vec![0x77u8; 32]));
+        ratchet.ratchet_dh(&dh).unwrap();
+
+        assert_eq!(ratchet.stats().send_count, 0,
+            "send_count must reset to 0 after a DH ratchet step");
+        assert_eq!(ratchet.stats().recv_count, 0,
+            "recv_count must reset to 0 after a DH ratchet step");
+    }
+
+    #[test]
+    fn test_ratchet_two_parties_send_recv_chains_are_symmetric() {
+        // When Alice and Bob start from the same shared secret, the chains are
+        // deterministic: Alice's send keys and Bob's send keys both advance the
+        // same chain key, so repeated calls on the same chain must produce the
+        // same sequence for both parties (since they share the same root).
+        let secret = SharedSecret(Zeroizing::new(vec![0x42u8; 32]));
+        let mut alice = KeyRatchet::new(&secret).unwrap();
+        let mut bob = KeyRatchet::new(&secret).unwrap();
+
+        // Both parties' send chains start from the same chain key → same keys
+        let alice_s1 = alice.next_send_key().unwrap();
+        let bob_s1 = bob.next_send_key().unwrap();
+        assert_eq!(alice_s1, bob_s1,
+            "Alice and Bob send key[0] must be equal when starting from same secret");
+
+        let alice_s2 = alice.next_send_key().unwrap();
+        let bob_s2 = bob.next_send_key().unwrap();
+        assert_eq!(alice_s2, bob_s2,
+            "Alice and Bob send key[1] must be equal when starting from same secret");
+
+        // Similarly, recv chains are also symmetric
+        let mut alice2 = KeyRatchet::new(&secret).unwrap();
+        let mut bob2 = KeyRatchet::new(&secret).unwrap();
+        let alice_r1 = alice2.next_recv_key().unwrap();
+        let bob_r1 = bob2.next_recv_key().unwrap();
+        assert_eq!(alice_r1, bob_r1,
+            "Alice and Bob recv key[0] must be equal when starting from same secret");
+    }
+
+    #[test]
+    fn test_ratchet_short_shared_secret_rejected() {
+        let short = SharedSecret(Zeroizing::new(vec![0u8; 16]));
+        let result = KeyRatchet::new(&short);
+        assert!(result.is_err(), "shared secret shorter than 32 bytes must be rejected");
+    }
+
+    #[test]
+    fn test_forward_secrecy_mark_rotated_resets_all_counters() {
+        let mut fs = ForwardSecrecy::with_limits(
+            Duration::from_secs(3600),
+            5,
+            1000,
+        );
+
+        for _ in 0..5 {
+            fs.record_message(100);
+        }
+        assert!(fs.needs_rotation(), "should need rotation after max_messages reached");
+
+        fs.mark_rotated();
+        assert!(!fs.needs_rotation(),
+            "should not need rotation immediately after mark_rotated");
+
+        let stats = fs.stats();
+        assert_eq!(stats.message_count, 0, "message_count must reset after rotation");
+        assert_eq!(stats.data_volume, 0, "data_volume must reset after rotation");
+    }
 }

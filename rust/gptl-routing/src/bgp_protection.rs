@@ -666,4 +666,127 @@ mod tests {
         // Mock AS path lookup would return the malicious AS
         // In real implementation, check_route would detect it
     }
+
+    #[tokio::test]
+    async fn test_path_diversity_identical_paths_fails() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = BgpGuard::new(config);
+
+        // Identical intermediate hops → overlap > 1 → must fail diversity check
+        let path = vec![1, 2, 3, 4];
+        let result = guard.validate_path_diversity(&path, &path).await.unwrap();
+        assert!(!result,
+            "identical paths must fail path diversity (all intermediate hops overlap)");
+    }
+
+    #[tokio::test]
+    async fn test_path_diversity_single_hop_paths() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = BgpGuard::new(config);
+
+        // Paths with 0 or 1 elements have no intermediate hops — diverse by definition
+        let short1: Vec<u32> = vec![1];
+        let short2: Vec<u32> = vec![2];
+        let result = guard.validate_path_diversity(&short1, &short2).await.unwrap();
+        assert!(result,
+            "single-hop paths have no intermediate hops and must pass diversity check");
+
+        // Two-element paths: only source and destination, also no intermediate hops
+        let two1 = vec![1, 4];
+        let two2 = vec![1, 5];
+        let result2 = guard.validate_path_diversity(&two1, &two2).await.unwrap();
+        assert!(result2,
+            "two-hop paths have no intermediate hops and must pass diversity check");
+    }
+
+    #[test]
+    fn test_rpki_validation_expired_roa_returns_not_found() {
+        let mut validator = RpkiValidator {
+            roa_cache: HashMap::new(),
+            last_update: Instant::now(),
+        };
+
+        // Insert a ROA that is already expired (valid_until in the past).
+        // Instant::now().checked_sub(1s) may return None on very short-uptime systems;
+        // fall back to Instant::now() in that case — the test still verifies the
+        // validator handles a just-expired entry correctly.
+        let expired_at = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
+
+        validator.roa_cache.insert(
+            "9.9.9.0/24".to_string(),
+            RoaEntry {
+                prefix: "9.9.9.0/24".to_string(),
+                origin_as: 19281,
+                max_length: 24,
+                valid_until: expired_at,
+            },
+        );
+
+        let state = validator.validate_route_origin("9.9.9.0/24", 19281, 24);
+        // Expired ROA → treated as NotFound
+        assert_eq!(state, RpkiValidationState::NotFound,
+            "expired ROA must return NotFound, not Valid");
+    }
+
+    #[test]
+    fn test_rpki_validation_malformed_asn_zero() {
+        let mut validator = RpkiValidator {
+            roa_cache: HashMap::new(),
+            last_update: Instant::now(),
+        };
+
+        // ASN 0 is reserved and should not validate as the expected origin
+        validator.roa_cache.insert(
+            "10.0.0.0/8".to_string(),
+            RoaEntry {
+                prefix: "10.0.0.0/8".to_string(),
+                origin_as: 64512,
+                max_length: 8,
+                valid_until: Instant::now() + Duration::from_secs(3600),
+            },
+        );
+
+        // ASN 0 is not 64512 — must be Invalid
+        let state = validator.validate_route_origin("10.0.0.0/8", 0, 8);
+        assert_eq!(state, RpkiValidationState::Invalid,
+            "ASN 0 must not satisfy a ROA with a different origin AS");
+    }
+
+    #[test]
+    fn test_rpki_validation_asn_max_value() {
+        // ASN u32::MAX is syntactically valid but should not match a real ROA
+        let mut validator = RpkiValidator {
+            roa_cache: HashMap::new(),
+            last_update: Instant::now(),
+        };
+
+        validator.roa_cache.insert(
+            "203.0.113.0/24".to_string(),
+            RoaEntry {
+                prefix: "203.0.113.0/24".to_string(),
+                origin_as: 64496,
+                max_length: 24,
+                valid_until: Instant::now() + Duration::from_secs(3600),
+            },
+        );
+
+        let state = validator.validate_route_origin("203.0.113.0/24", u32::MAX, 24);
+        assert_eq!(state, RpkiValidationState::Invalid,
+            "u32::MAX ASN must not satisfy a different origin ROA");
+    }
+
+    #[tokio::test]
+    async fn test_path_diversity_many_shared_intermediate_hops_fails() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = BgpGuard::new(config);
+
+        // Both paths share 3 intermediate hops — clearly not diverse
+        let path1 = vec![100, 200, 300, 400, 999];
+        let path2 = vec![100, 200, 300, 400, 888];
+        let result = guard.validate_path_diversity(&path1, &path2).await.unwrap();
+        assert!(!result,
+            "paths sharing 3 intermediate hops must fail diversity check");
+    }
 }

@@ -461,6 +461,141 @@ mod tests {
 
         assert_eq!(pub_key.0, restored.0);
     }
+
+    #[test]
+    fn test_x25519_empty_private_key_rejected() {
+        let kex = X25519KeyExchange::new();
+        let (bob_pub, _) = kex.generate_keypair().unwrap();
+
+        let empty_priv = PrivateKey(zeroize::Zeroizing::new(vec![]));
+        let result = kex.compute_shared(&empty_priv, &bob_pub);
+        assert!(result.is_err(), "empty private key should be rejected");
+    }
+
+    #[test]
+    fn test_x25519_wrong_length_private_key_rejected() {
+        let kex = X25519KeyExchange::new();
+        let (bob_pub, _) = kex.generate_keypair().unwrap();
+
+        // 16 bytes instead of 32
+        let short_priv = PrivateKey(zeroize::Zeroizing::new(vec![0xAA; 16]));
+        let result = kex.compute_shared(&short_priv, &bob_pub);
+        assert!(result.is_err(), "wrong-length private key should be rejected");
+    }
+
+    #[test]
+    fn test_x25519_wrong_length_public_key_rejected() {
+        let kex = X25519KeyExchange::new();
+        let (_, alice_priv) = kex.generate_keypair().unwrap();
+
+        // 16 bytes instead of 32
+        let short_pub = PublicKey(vec![0xBB; 16]);
+        let result = kex.compute_shared(&alice_priv, &short_pub);
+        assert!(result.is_err(), "wrong-length public key should be rejected");
+    }
+
+    #[test]
+    fn test_x25519_key_reuse_produces_same_secret() {
+        // Key reuse with the same pair must always give same result (deterministic)
+        let kex = X25519KeyExchange::new();
+        let (alice_pub, alice_priv) = kex.generate_keypair().unwrap();
+        let (bob_pub, bob_priv) = kex.generate_keypair().unwrap();
+
+        let s1 = kex.compute_shared(&alice_priv, &bob_pub).unwrap();
+        let s2 = kex.compute_shared(&alice_priv, &bob_pub).unwrap();
+        let s3 = kex.compute_shared(&bob_priv, &alice_pub).unwrap();
+
+        assert_eq!(s1.0.as_slice(), s2.0.as_slice(), "repeated calls with same keys must match");
+        assert_eq!(s1.0.as_slice(), s3.0.as_slice(), "symmetric shared secret must match");
+    }
+
+    #[test]
+    fn test_x25519_different_keypairs_produce_different_secrets() {
+        let kex = X25519KeyExchange::new();
+        let (alice_pub, _) = kex.generate_keypair().unwrap();
+        let (_, priv1) = kex.generate_keypair().unwrap();
+        let (_, priv2) = kex.generate_keypair().unwrap();
+
+        let s1 = kex.compute_shared(&priv1, &alice_pub).unwrap();
+        let s2 = kex.compute_shared(&priv2, &alice_pub).unwrap();
+
+        assert_ne!(s1.0.as_slice(), s2.0.as_slice(),
+            "different private keys with same public key must produce different secrets");
+    }
+
+    #[test]
+    fn test_x25519_all_zero_shared_secret_is_suspicious() {
+        // A legitimate X25519 exchange should not produce an all-zero shared secret.
+        // This is a sanity check: if both endpoints are real random keys the probability is negligible.
+        let kex = X25519KeyExchange::new();
+        let (alice_pub, alice_priv) = kex.generate_keypair().unwrap();
+        let (bob_pub, _) = kex.generate_keypair().unwrap();
+
+        let shared = kex.compute_shared(&alice_priv, &bob_pub).unwrap();
+        assert!(shared.0.iter().any(|&b| b != 0),
+            "shared secret from random keypairs must not be all-zero");
+    }
+
+    #[test]
+    fn test_hybrid_empty_ciphertext_rejected() {
+        let kex = HybridKeyExchange::new();
+        let (_, bob_private) = kex.generate_keypair().unwrap();
+
+        let result = kex.decapsulate(&bob_private, &[]);
+        assert!(result.is_err(), "empty ciphertext must be rejected");
+    }
+
+    #[test]
+    fn test_hybrid_wrong_length_ciphertext_rejected() {
+        let kex = HybridKeyExchange::new();
+        let (_, bob_private) = kex.generate_keypair().unwrap();
+
+        // Only 32 bytes, needs 32 + 1088 = 1120
+        let short_ct = vec![0u8; 32];
+        let result = kex.decapsulate(&bob_private, &short_ct);
+        assert!(result.is_err(), "short ciphertext must be rejected");
+    }
+
+    #[test]
+    fn test_hybrid_compute_shared_returns_error() {
+        // compute_shared is not meaningful for hybrid KEM; must return Err
+        let kex = HybridKeyExchange::new();
+        let (pub_key, priv_key) = kex.generate_keypair().unwrap();
+        let result = kex.compute_shared(&priv_key, &pub_key);
+        assert!(result.is_err(),
+            "HybridKeyExchange::compute_shared must return Err (use encapsulate/decapsulate)");
+    }
+
+    #[test]
+    fn test_hybrid_shared_secret_not_all_zeros() {
+        let kex = HybridKeyExchange::new();
+        let (bob_public, bob_private) = kex.generate_keypair().unwrap();
+
+        let encap = kex.encapsulate(&bob_public).unwrap();
+        let bob_shared = kex.decapsulate(&bob_private, &encap.ciphertext).unwrap();
+
+        assert!(bob_shared.0.iter().any(|&b| b != 0),
+            "hybrid shared secret must not be all-zero");
+    }
+
+    #[test]
+    fn test_hybrid_unique_secrets_across_keypairs() {
+        let kex = HybridKeyExchange::new();
+        let (pub1, priv1) = kex.generate_keypair().unwrap();
+        let (pub2, priv2) = kex.generate_keypair().unwrap();
+
+        // Alice encapsulates to Bob
+        let encap1 = kex.encapsulate(&pub2).unwrap();
+        // Bob decapsulates
+        let secret1 = kex.decapsulate(&priv2, &encap1.ciphertext).unwrap();
+
+        // Charlie encapsulates to Dave
+        let encap2 = kex.encapsulate(&pub1).unwrap();
+        let secret2 = kex.decapsulate(&priv1, &encap2.ciphertext).unwrap();
+
+        assert_ne!(secret1.0.as_slice(), secret2.0.as_slice(),
+            "secrets from different keypair exchanges must differ");
+    }
 }
 
 #[cfg(test)]

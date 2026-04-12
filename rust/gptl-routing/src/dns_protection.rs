@@ -773,4 +773,123 @@ mod tests {
         let manager = SystemDnsManager::new(vec!["10.0.0.1".parse().unwrap()]);
         assert_eq!(manager.vpn_servers.len(), 1);
     }
+
+    #[tokio::test]
+    async fn test_plain_dns_query_blocked_by_firewall_rule() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = DnsGuard::new(config);
+
+        // Add a block rule for ISP resolver (8.8.8.8-style direct queries)
+        {
+            let mut firewall = guard.firewall.write().await;
+            firewall.intercept_rules.push(InterceptRule {
+                pattern: "blocked-domain".to_string(),
+                action: InterceptAction::Block,
+            });
+        }
+
+        // resolve_secure checks the firewall before making network calls
+        let result = guard.resolve_secure("blocked-domain.example.com").await;
+        assert!(result.is_err(),
+            "query matching a block rule must be rejected before reaching the network");
+    }
+
+    #[test]
+    fn test_dns_query_building_valid_structure() {
+        let query = build_dns_query("www.example.org").unwrap();
+
+        // Minimum valid length: 12 header + at least one label + terminator + QTYPE + QCLASS
+        assert!(query.len() > 12 + 5, "DNS query too short");
+
+        // Transaction ID (2 bytes): random, just verify non-zero length
+        // Flags byte 2 = 0x01 (recursion desired)
+        assert_eq!(query[2], 0x01, "recursion desired flag must be set");
+        // Question count = 1
+        assert_eq!(query[4], 0x00);
+        assert_eq!(query[5], 0x01);
+    }
+
+    #[test]
+    fn test_dns_query_building_very_long_label_rejected() {
+        // Labels > 63 characters are invalid per RFC 1035
+        let long_label = "a".repeat(64);
+        let domain = format!("{}.com", long_label);
+        let result = build_dns_query(&domain);
+        assert!(result.is_err(),
+            "label longer than 63 characters must be rejected");
+    }
+
+    #[test]
+    fn test_dns_response_parsing_malformed_too_short() {
+        // Fewer than 12 bytes → invalid header
+        let malformed = vec![0x00, 0x01, 0x81, 0x80, 0x00, 0x01];
+        let result = parse_dns_response(&malformed);
+        assert!(result.is_err(),
+            "DNS response shorter than 12 bytes must be rejected");
+    }
+
+    #[test]
+    fn test_dns_response_parsing_no_answers_returns_error() {
+        // Valid header with 0 answers → parse_dns_response must return Err
+        let response = vec![
+            0x00, 0x01, // Transaction ID
+            0x81, 0x80, // Flags: response
+            0x00, 0x01, // Questions: 1
+            0x00, 0x00, // Answers: 0
+            0x00, 0x00, // Authority: 0
+            0x00, 0x00, // Additional: 0
+            // Question (minimal)
+            0x00, // empty QNAME
+            0x00, 0x01, // QTYPE A
+            0x00, 0x01, // QCLASS IN
+        ];
+
+        let result = parse_dns_response(&response);
+        assert!(result.is_err(),
+            "DNS response with no answer records must return Err");
+    }
+
+    #[tokio::test]
+    async fn test_dns_cache_prevents_duplicate_network_calls() {
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = DnsGuard::new(config);
+
+        // Manually seed the cache with a known entry
+        {
+            let mut cache = guard.cache.write().await;
+            cache.entries.insert(
+                "cached.example.com".to_string(),
+                CacheEntry {
+                    addresses: vec!["93.184.216.34".parse().unwrap()],
+                    expires_at: Instant::now() + Duration::from_secs(300),
+                },
+            );
+        }
+
+        // resolve_secure should return cached data without hitting the network
+        let result = guard.resolve_secure("cached.example.com").await;
+        assert!(result.is_ok(),
+            "valid cached entry must return Ok without a network request");
+        let data = result.unwrap();
+        // Serialized IPv4: 4 bytes for 93.184.216.34
+        assert_eq!(data.len(), 4, "cached IPv4 must serialize to 4 bytes");
+    }
+
+    #[test]
+    fn test_dns_firewall_block_isp_servers_accumulates() {
+        let mut firewall = DnsFirewall {
+            blocked_servers: Vec::new(),
+            allowed_servers: Vec::new(),
+            intercept_rules: Vec::new(),
+        };
+
+        let servers = vec![
+            "8.8.8.8".parse().unwrap(),
+            "8.8.4.4".parse().unwrap(),
+            "1.1.1.1".parse().unwrap(),
+        ];
+        firewall.block_isp_dns(servers);
+        assert_eq!(firewall.blocked_servers.len(), 3,
+            "all provided ISP servers must be added to blocked list");
+    }
 }

@@ -499,5 +499,65 @@ mod tests {
         // Payloads should be different (random)
         assert_ne!(cell1.payload, cell2.payload);
     }
+
+    #[test]
+    fn test_padding_cell_payload_not_all_zeros() {
+        // Security requirement: padding cells must use random non-zero payloads
+        // so they are indistinguishable from real data.
+        let config = Arc::new(RwLock::new(AntiSurveillanceConfig::default()));
+        let engine = PaddingEngine::new(config);
+
+        // Generate several cells and verify none are all-zero.
+        for i in 0..10 {
+            let cell = engine.generate_padding_cell(i);
+            assert_eq!(cell.payload.len(), 509, "padding cell payload length must be 509 bytes");
+            let all_zero = cell.payload.iter().all(|&b| b == 0);
+            assert!(!all_zero,
+                "padding cell payload must not be all-zeros (security requirement)");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_padding_engine_empty_input_generates_one_padding_cell() {
+        let config = Arc::new(RwLock::new(AntiSurveillanceConfig::default()));
+        let engine = PaddingEngine::new(config);
+
+        let result = engine.pad_cells(vec![]).await.unwrap();
+        assert_eq!(result.len(), 1, "empty input must produce exactly one padding cell");
+        assert_eq!(result[0].command, CellCommand::Padding);
+        // The single cell's payload must not be all-zero
+        let all_zero = result[0].payload.iter().all(|&b| b == 0);
+        assert!(!all_zero,
+            "the generated padding cell payload must not be all-zeros");
+    }
+
+    #[tokio::test]
+    async fn test_histogram_bounds_after_many_updates() {
+        // Verifies the ring-buffer-style histogram stays bounded at 100 entries
+        let config = Arc::new(RwLock::new(AntiSurveillanceConfig::default()));
+        let engine = PaddingEngine::new(config);
+
+        for i in 0..200 {
+            engine.update_histogram(i as f64 * 0.001).await;
+        }
+
+        let len = engine.iat_histogram.read().await.len();
+        assert!(len <= 100, "histogram must not exceed 100 entries, got {}", len);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_registration_bounded_growth() {
+        let config = Arc::new(RwLock::new(AntiSurveillanceConfig::default()));
+        let engine = PaddingEngine::new(config);
+
+        // Register more than the 10_000 circuit limit
+        for i in 0_u32..10_200 {
+            engine.register_circuit(i).await;
+        }
+
+        let machines = engine.state_machines.read().await;
+        assert!(machines.len() <= 10_000,
+            "circuit registration must not exceed 10,000 entries, got {}", machines.len());
+    }
 }
 
