@@ -836,4 +836,4 @@ impl WebrtcGuard {
 
 *Document Version: 1.0*  
 *Last Updated: 2026-04-10*  
-*Classification: Security Research - GPTL Team Beta*
+*Classification: Security Research*
