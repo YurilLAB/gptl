@@ -4,6 +4,8 @@ members = [
     "gptl-routing",
     "gptl-crypto",
     "gptl-relay",
+    "gptl-cli",
+    "gptl-transport",
 ]
 resolver = "2"
 
