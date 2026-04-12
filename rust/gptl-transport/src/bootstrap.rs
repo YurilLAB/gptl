@@ -76,6 +76,20 @@ impl BootstrapConfig {
         self.relays.iter().find(|r| r.nickname == name)
     }
 
+    /// Pick a random relay whose nickname is not `excluded`.
+    ///
+    /// Used when building multi-hop circuits to ensure relay1 ≠ relay2.
+    pub fn pick_relay_excluding(&self, excluded: &str) -> Option<&RelayDescriptor> {
+        let candidates: Vec<&RelayDescriptor> =
+            self.relays.iter().filter(|r| r.nickname != excluded).collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        use rand::Rng;
+        let idx = rand::thread_rng().gen_range(0..candidates.len());
+        Some(candidates[idx])
+    }
+
     /// Validate all descriptors (parseable addresses, well-formed pubkeys, no duplicates).
     pub fn validate(&self) -> Result<(), TransportError> {
         if self.relays.is_empty() {

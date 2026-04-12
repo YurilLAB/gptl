@@ -232,13 +232,13 @@ async fn run_relay_loop(
                         // Intercept Phase 2 circuit-extension commands before stream dispatch
                         match inner.command {
                             RelayCommand::Extend => {
-                                match handle_extend(
+                                if let Some(tx) = handle_extend(
                                     inner, circuit_id, ciphers, write_tx,
                                     relay2_inbound_tx.clone(),
                                 ).await? {
-                                    Some(tx) => { relay2_write_tx = Some(tx); }
-                                    None => {} // extend failed; error already sent to client
+                                    relay2_write_tx = Some(tx);
                                 }
+                                // if None: extend failed; error already sent to client
                             }
                             RelayCommand::Forward => {
                                 // Client is forwarding inner ciphertext to relay2

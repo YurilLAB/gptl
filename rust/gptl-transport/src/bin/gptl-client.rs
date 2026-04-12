@@ -59,6 +59,7 @@ async fn main() {
     let config = ProxyConfig {
         listen_addr: args.listen,
         bootstrap: Arc::new(bootstrap),
+        hop_count: args.hop_count,
     };
 
     if let Err(e) = run_proxy(config).await {
@@ -73,12 +74,14 @@ struct Args {
     relays: Option<PathBuf>,
     listen: SocketAddr,
     log_level: String,
+    hop_count: usize,
 }
 
 fn parse_args() -> Args {
     let mut relays: Option<PathBuf> = None;
     let mut listen: SocketAddr = "127.0.0.1:1080".parse().unwrap();
     let mut log_level = "info".to_string();
+    let mut hop_count: usize = 1;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -93,6 +96,17 @@ fn parse_args() -> Args {
                     eprintln!("error: invalid listen address '{}'", val);
                     std::process::exit(1);
                 });
+            }
+            "--hops" => {
+                let val = next_arg(&arg, &mut iter);
+                hop_count = val.parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("error: invalid hop count '{}' (must be 1 or 2)", val);
+                    std::process::exit(1);
+                });
+                if hop_count == 0 || hop_count > 2 {
+                    eprintln!("error: hop count must be 1 or 2 (got {})", hop_count);
+                    std::process::exit(1);
+                }
             }
             "--log" => {
                 log_level = next_arg(&arg, &mut iter);
@@ -109,7 +123,7 @@ fn parse_args() -> Args {
         }
     }
 
-    Args { relays, listen, log_level }
+    Args { relays, listen, log_level, hop_count }
 }
 
 fn next_arg(flag: &str, iter: &mut impl Iterator<Item = String>) -> String {
@@ -128,6 +142,7 @@ fn print_usage() {
     println!("OPTIONS:");
     println!("  --relays <PATH>   Path to relays.json  (default: ~/.config/gptl/relays.json)");
     println!("  --listen <ADDR>   SOCKS5 listen address (default: 127.0.0.1:1080)");
+    println!("  --hops <N>        Number of hops: 1 (single) or 2 (two-hop, default: 1)");
     println!("  --log <LEVEL>     Log level: error|warn|info|debug|trace (default: info)");
     println!("  -h, --help        Print this help");
     println!();
