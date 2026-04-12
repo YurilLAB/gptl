@@ -62,6 +62,41 @@ cd rust
 cargo test
 ```
 
+## CLI Usage
+
+The `gptl` binary is the primary way to configure GPTL. Configuration is stored at
+`~/.config/gptl/config.toml` (Unix) or `%APPDATA%\gptl\config.toml` (Windows).
+
+### Commands
+
+```
+gptl status                              # Overview: level badge + all 11 protections
+gptl config show                         # Full configuration table
+gptl config show --format json           # Machine-readable JSON
+gptl config set <key> <value>            # Change a setting (security changes require confirmation)
+gptl config keys                         # All settable keys with accepted values
+gptl config reset                        # Reset to defaults
+gptl config path                         # Show config file location
+
+gptl security level standard|enhanced|maximum   # Change security level (shows full diff + confirms)
+gptl security level enhanced --label-only        # Update label only, keep individual settings
+gptl security status                             # Protection checklist
+gptl security audit                              # Detect mismatches and weaknesses
+
+gptl profile list                        # List profiles (built-ins: standard/enhanced/maximum)
+gptl profile show <name>                 # Preview a profile
+gptl profile apply <name>                # Apply profile (shows diff + confirmation)
+gptl profile save <name>                 # Save current config as named profile
+gptl profile delete <name>               # Delete a saved profile
+
+# Skip confirmation prompts (for scripting):
+gptl -y security level maximum
+gptl --yes profile apply standard
+```
+
+Security-sensitive changes (disabling protections, lowering security level) always show
+a diff of what will change and ask for confirmation. Use `-y`/`--yes` to bypass in scripts.
+
 ## Security Levels
 
 GPTL provides three configurable security levels:
@@ -116,6 +151,15 @@ Production-grade cryptographic primitives (FIPS 140-3 validated via aws-lc-rs):
 - **Forward secrecy** — Key ratcheting with Double Ratchet-inspired design
 - **Counter-based nonces** — NIST-compliant with automatic rotation at 2³² messages
 - **Memory safety** — All keys and secrets zeroized on drop
+
+### `gptl-cli`
+User-facing command-line interface (`gptl` binary):
+
+- **`main.rs`** — Entry point; dispatches `config`, `security`, `profile`, and `status` subcommands
+- Config stored at `~/.config/gptl/config.toml` (Unix) / `%APPDATA%\gptl\config.toml` (Windows)
+- Built-in profiles: `standard`, `enhanced`, `maximum` (read-only)
+- User profiles: `~/.config/gptl/profiles/<name>.toml`
+- Security-sensitive changes require confirmation; use `-y`/`--yes` for scripting
 
 ### `gptl-relay`
 Enterprise relay server with multi-layer security:
