@@ -13,12 +13,12 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use tracing::{debug, info, warn, trace};
+use tracing::{info, warn, trace};
 
 use crate::relay_registry::{RelayInfo, RelayRegistry, RelayCriteria, HealthStatus, SecurityLevel};
 
 /// Selection strategy for choosing relays
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SelectionStrategy {
     /// Pure random selection from matching relays
     Random,
@@ -29,13 +29,8 @@ pub enum SelectionStrategy {
     /// Geographic proximity to client
     Geographic,
     /// Hybrid: combine bandwidth and health score
+    #[default]
     Hybrid,
-}
-
-impl Default for SelectionStrategy {
-    fn default() -> Self {
-        SelectionStrategy::Hybrid
-    }
 }
 
 /// Relay score for ranking
@@ -43,9 +38,13 @@ impl Default for SelectionStrategy {
 struct RelayScore {
     relay: RelayInfo,
     score: f64,
+    #[allow(dead_code)]
     bandwidth_weight: f64,
+    #[allow(dead_code)]
     latency_weight: f64,
+    #[allow(dead_code)]
     health_weight: f64,
+    #[allow(dead_code)]
     geographic_weight: f64,
 }
 
@@ -255,7 +254,7 @@ impl<R: RelayRegistry> RelaySelector<R> {
 
             // Exclude same region for diversity (after first hop)
             if exclude_same_region && i > 0 {
-                for region in &excluded_regions {
+                for _region in &excluded_regions {
                     // This is a simplified check - in production you'd use proper region exclusion
                 }
             }
@@ -467,47 +466,51 @@ impl<R: RelayRegistry> RelaySelector<R> {
         }).ok_or(SelectorError::NoRelaysAvailable)
     }
 
-    /// Latency-weighted selection (placeholder - would use actual latency measurements)
+    /// Select using bandwidth-as-latency heuristic (lower bandwidth = higher estimated latency)
     async fn select_latency_weighted(
         &self,
         relays: &[RelayInfo],
     ) -> Result<SelectionResult, SelectorError> {
-        // In a real implementation, this would use actual latency measurements
-        // For now, we use a synthetic score based on location and bandwidth
-        use rand::SeedableRng;
-        use rand::rngs::StdRng;
-        
-        let seed = rand::random::<u64>();
-        let mut rng = StdRng::seed_from_u64(seed);
-        
+        // Bandwidth-as-latency proxy: higher bandwidth implies lower latency.
+        // Synthetic estimate: latency_ms = 50 + (1_000_000 / (bandwidth + 1))
         let scored: Vec<_> = relays.iter().map(|r| {
-            // Synthetic latency score (lower is better)
-            let latency_score = 1.0 / (1.0 + r.bandwidth as f64 / 1_000_000.0);
+            let latency_ms = 50 + (1_000_000.0 / (r.bandwidth as f64 + 1.0)) as u64;
+            // Selection probability is inverse of estimated latency (prefer low-latency)
+            let score = 1.0 / latency_ms as f64;
             RelayScore {
                 relay: r.clone(),
-                score: 1.0 / latency_score, // Invert for selection probability
+                score,
                 bandwidth_weight: r.bandwidth as f64,
-                latency_weight: 1.0 / latency_score,
+                latency_weight: score,
                 health_weight: if r.health_status == HealthStatus::Healthy { 1.0 } else { 0.5 },
                 geographic_weight: 1.0,
             }
         }).collect();
 
         let total_score: f64 = scored.iter().map(|s| s.score).sum();
-        let mut choice = rng.gen_range(0.0..total_score);
-
-        for score in scored {
-            if choice < score.score {
-                return Ok(SelectionResult {
-                    relay: score.relay,
-                    strategy: SelectionStrategy::LatencyWeighted,
-                    score: Some(score.score / total_score),
-                    estimated_latency: Some(Duration::from_millis(
-                        (1000.0 / score.latency_weight) as u64
-                    )),
-                });
+        // Use a block to drop rng before any await points
+        let winner = {
+            let mut rng = rand::thread_rng();
+            let mut choice = rng.gen_range(0.0..total_score);
+            let mut found: Option<(RelayScore, u64)> = None;
+            for score in scored {
+                let latency_ms = 50 + (1_000_000.0 / (score.relay.bandwidth as f64 + 1.0)) as u64;
+                if choice < score.score {
+                    found = Some((score, latency_ms));
+                    break;
+                }
+                choice -= score.score;
             }
-            choice -= score.score;
+            found
+        };
+
+        if let Some((score, latency_ms)) = winner {
+            return Ok(SelectionResult {
+                relay: score.relay,
+                strategy: SelectionStrategy::LatencyWeighted,
+                score: Some(score.score / total_score),
+                estimated_latency: Some(Duration::from_millis(latency_ms)),
+            });
         }
 
         self.select_random(relays).await
@@ -773,7 +776,7 @@ impl<R: RelayRegistry + 'static> RelayPool<R> {
         indices.shuffle(&mut rng);
         
         for idx in indices {
-            let relay_id = &preferred[idx];
+            let _relay_id = &preferred[idx];
             // Check if relay is still healthy
             // In a real implementation, you'd check the registry
             // For now, just return the first one

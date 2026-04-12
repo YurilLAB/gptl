@@ -54,7 +54,7 @@ impl std::fmt::Display for ChangeCategory {
 
 impl ChangeCategory {
     /// Parse category from string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "network" => Some(ChangeCategory::Network),
             "security" => Some(ChangeCategory::Security),
@@ -562,8 +562,7 @@ impl ChangeTracker {
     pub async fn get_statistics(&self) -> ChangeStatistics {
         let changes = self.changes.read().await;
         
-        let mut stats = ChangeStatistics::default();
-        stats.total_changes = changes.len();
+        let mut stats = ChangeStatistics { total_changes: changes.len(), ..Default::default() };
         
         for change in changes.iter() {
             match change.status {
@@ -574,7 +573,7 @@ impl ChangeTracker {
                 ChangeStatus::Pending => stats.pending_count += 1,
             }
             
-            *stats.by_category.entry(change.category.clone()).or_insert(0) += 1;
+            *stats.by_category.entry(change.category).or_insert(0) += 1;
         }
         
         stats

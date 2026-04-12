@@ -329,7 +329,7 @@ async fn cmd_changes(
     let mut filter = ChangeFilter::new();
 
     if let Some(cat_str) = category {
-        match ChangeCategory::from_str(&cat_str) {
+        match ChangeCategory::parse(&cat_str) {
             Some(cat) => filter = filter.with_category(cat),
             None => {
                 eprintln!("Error: Unknown category '{}'. Valid categories:", cat_str);
@@ -498,7 +498,7 @@ async fn cmd_export(
     let mut filter = ChangeFilter::new();
 
     if let Some(cat_str) = category {
-        match ChangeCategory::from_str(&cat_str) {
+        match ChangeCategory::parse(&cat_str) {
             Some(cat) => filter = filter.with_category(cat),
             None => {
                 eprintln!("Error: Unknown category '{}'", cat_str);
@@ -569,7 +569,7 @@ async fn cmd_simulate(
     category: String,
     description: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let cat = match ChangeCategory::from_str(&category) {
+    let cat = match ChangeCategory::parse(&category) {
         Some(c) => c,
         None => {
             eprintln!("Error: Unknown category '{}'", category);

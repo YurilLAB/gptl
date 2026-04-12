@@ -23,10 +23,13 @@ pub struct CircuitShield {
 /// Circuit state machine for tracking circuit state
 #[derive(Debug, Clone)]
 struct CircuitStateMachine {
+    #[allow(dead_code)]
     circuit_id: u32,
     /// Circuit type (obfuscated)
+    #[allow(dead_code)]
     circuit_type: ObfuscatedCircuitType,
     /// Current state
+    #[allow(dead_code)]
     state: CircuitState,
     /// Cells sent counter
     cells_sent: usize,
@@ -43,10 +46,13 @@ enum ObfuscatedCircuitType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CircuitState {
+pub(crate) enum CircuitState {
     Creating,
+    #[allow(dead_code)]
     Established,
+    #[allow(dead_code)]
     Active,
+    #[allow(dead_code)]
     Closing,
 }
 
@@ -56,6 +62,7 @@ struct StandardSequences {
     /// Standard handshake sequence
     handshake: Vec<Cell>,
     /// Standard padding sequence
+    #[allow(dead_code)]
     padding: Vec<Cell>,
     /// Standard keep-alive sequence
     keepalive: Vec<Cell>,
@@ -195,7 +202,8 @@ impl CircuitShield {
     }
 
     /// Update circuit state
-    pub async fn update_circuit_state(&self, circuit_id: u32, state: CircuitState) {
+    #[allow(dead_code)]
+    pub(crate) async fn update_circuit_state(&self, circuit_id: u32, state: CircuitState) {
         let mut circuits = self.circuits.write().await;
         if let Some(circuit) = circuits.get_mut(&circuit_id) {
             circuit.state = state;
@@ -352,6 +360,12 @@ impl Default for RotationPolicy {
     }
 }
 
+impl Default for VanguardManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VanguardManager {
     /// Create new vanguard manager
     pub fn new() -> Self {
@@ -440,11 +454,18 @@ pub struct PreemptiveCircuitPadding {
 /// Padding machine for a circuit
 #[derive(Debug, Clone)]
 struct PaddingMachine {
+    #[allow(dead_code)]
     circuit_id: u32,
     /// Next scheduled padding time
     next_padding: Instant,
     /// Padding interval distribution
     padding_interval: Duration,
+}
+
+impl Default for PreemptiveCircuitPadding {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PreemptiveCircuitPadding {

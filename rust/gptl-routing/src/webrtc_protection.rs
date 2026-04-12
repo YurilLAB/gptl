@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 
 /// WebRTC guard for preventing IP leaks
 pub struct WebrtcGuard {
+    #[allow(dead_code)]
     config: Arc<RwLock<RoutingConfig>>,
     /// STUN server configuration
     stun_config: Arc<RwLock<StunConfig>>,
@@ -24,6 +25,7 @@ pub struct WebrtcGuard {
 
 /// STUN server configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct StunConfig {
     /// VPN-provided STUN servers
     servers: Vec<String>,
@@ -33,6 +35,7 @@ struct StunConfig {
 
 /// TURN server configuration
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TurnConfig {
     /// VPN-provided TURN servers
     servers: Vec<String>,
@@ -43,6 +46,7 @@ struct TurnConfig {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TurnCredentials {
     username: String,
     credential: String,
@@ -50,7 +54,8 @@ struct TurnCredentials {
 
 /// ICE (Interactive Connectivity Establishment) policy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IcePolicy {
+#[allow(dead_code)]
+pub(crate) enum IcePolicy {
     /// Allow all candidates
     All,
     /// Relay only (force TURN)
@@ -160,7 +165,7 @@ impl WebrtcGuard {
     }
 
     /// Update ICE policy
-    pub async fn set_ice_policy(&self, policy: IcePolicy) {
+    pub(crate) async fn set_ice_policy(&self, policy: IcePolicy) {
         let mut ice = self.ice_policy.write().await;
         *ice = policy;
     }
@@ -251,6 +256,7 @@ pub enum BrowserType {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BrowserSettings {
     /// Disable WebRTC
     disable_webrtc: bool,
@@ -344,6 +350,12 @@ pub struct BrowserConfig {
 pub struct StunTurnTester {
     /// Test servers
     servers: Vec<String>,
+}
+
+impl Default for StunTurnTester {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StunTurnTester {
@@ -454,7 +466,7 @@ fn parse_stun_response(data: &[u8]) -> Result<IpAddr, StunError> {
     }
 
     // Verify Magic Cookie
-    if &data[4..8] != &[0x21, 0x12, 0xA4, 0x42] {
+    if data[4..8] != [0x21, 0x12, 0xA4, 0x42] {
         return Err(StunError::InvalidResponse);
     }
 
@@ -573,7 +585,14 @@ pub enum StunError {
 /// Prevents local hostname leakage via mDNS
 pub struct MdnsProtection {
     /// Block mDNS queries
+    #[allow(dead_code)]
     block_mdns: bool,
+}
+
+impl Default for MdnsProtection {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MdnsProtection {

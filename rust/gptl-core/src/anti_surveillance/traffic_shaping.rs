@@ -14,6 +14,7 @@ use tokio::time::{interval, Interval};
 pub struct TrafficShaper {
     config: Arc<RwLock<AntiSurveillanceConfig>>,
     cell_queue: Arc<RwLock<VecDeque<Cell>>>,
+    #[allow(dead_code)]
     padding_queue: Arc<RwLock<VecDeque<Cell>>>,
     transmission_interval: Arc<RwLock<Interval>>,
 }
@@ -117,6 +118,12 @@ pub struct BurstMorphing {
     last_burst: Instant,
 }
 
+impl Default for BurstMorphing {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BurstMorphing {
     /// Create new burst morphing with standard patterns
     pub fn new() -> Self {
@@ -191,6 +198,7 @@ pub struct TrafficSplitter {
     /// Number of paths to split across
     num_paths: usize,
     /// Split ratio (using secret sharing)
+    #[allow(dead_code)]
     split_ratio: f64,
 }
 

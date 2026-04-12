@@ -17,7 +17,7 @@ pub mod aead;
 pub mod kex;
 pub mod ratchet;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub use aead::{AesGcmCipher, ChaCha20Cipher, CellCipher};
 pub use kex::{HybridKeyExchange, KeyExchange, X25519KeyExchange};
@@ -103,7 +103,12 @@ pub enum CellEncryptionError {
     DecryptionFailed(String),
     /// Invalid key length
     #[error("Invalid key length: expected {expected}, got {actual}")]
-    InvalidKeyLength { expected: usize, actual: usize },
+    InvalidKeyLength {
+        /// Expected key length in bytes
+        expected: usize,
+        /// Actual key length in bytes
+        actual: usize,
+    },
     /// Invalid nonce
     #[error("Invalid nonce: {0}")]
     InvalidNonce(String),

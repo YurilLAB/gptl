@@ -325,4 +325,63 @@ mod tests {
         let _ = path.entry();
         let _ = path.exit();
     }
+
+    // ── no duplicate relays ───────────────────────────────────────────────────
+
+    /// Run path selection many times and verify no relay appears twice in a path.
+    #[test]
+    fn test_no_duplicate_relays_in_path() {
+        let relays = diverse_relays(); // 5 relays on distinct subnets
+        let config = PathConfig { num_hops: 2, ..Default::default() };
+        let selector = PathSelector::new(config);
+        for _ in 0..50 {
+            let path = selector.select_path(&relays, None).unwrap();
+            let pubkeys: Vec<&str> = path.hops.iter().map(|r| r.pubkey_hex.as_str()).collect();
+            let unique: std::collections::HashSet<&str> = pubkeys.iter().cloned().collect();
+            assert_eq!(
+                pubkeys.len(),
+                unique.len(),
+                "relay appeared more than once in path: {:?}",
+                path.hops.iter().map(|r| &r.nickname).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // ── nickname prefix exclusion ─────────────────────────────────────────────
+
+    /// Two relays whose nicknames share the same 8-char prefix must never both
+    /// appear in a 2-hop path when `exclude_same_nickname_prefix` is enabled.
+    #[test]
+    fn test_nickname_prefix_exclusion_enforced() {
+        // "guardxxx" and "guardyyy" share the 8-char prefix "guardxxx"/"guardyyy" (length 8)
+        // Actually the prefix check is first 8 chars: "guardxxx" vs "guardyyy" — different.
+        // Let's use exactly the same 8-char prefix: "relay001a" vs "relay001b" → prefix = "relay001"
+        let relays = vec![
+            make_relay("relay001a", "10.0.1.1", 1),  // prefix "relay001"
+            make_relay("relay001b", "10.0.2.1", 2),  // prefix "relay001" (same!)
+            make_relay("relay002a", "10.0.3.1", 3),  // prefix "relay002"
+            make_relay("relay003a", "10.0.4.1", 4),  // prefix "relay003"
+        ];
+        let config = PathConfig {
+            num_hops: 2,
+            exclude_same_subnet: false,
+            exclude_same_nickname_prefix: true,
+        };
+        let selector = PathSelector::new(config);
+
+        for _ in 0..60 {
+            let path = selector.select_path(&relays, None).unwrap();
+            if path.len() < 2 {
+                continue;
+            }
+            let entry_prefix: String = path.entry().nickname.chars().take(8).collect();
+            let exit_prefix: String = path.exit().nickname.chars().take(8).collect();
+            assert_ne!(
+                entry_prefix, exit_prefix,
+                "two relays with the same nickname prefix appeared in the same path: {} and {}",
+                path.entry().nickname,
+                path.exit().nickname,
+            );
+        }
+    }
 }

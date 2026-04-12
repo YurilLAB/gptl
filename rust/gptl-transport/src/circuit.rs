@@ -944,4 +944,149 @@ mod tests {
         relay1_task.await.unwrap();
         relay2_task.await.unwrap();
     }
+
+    // ── extend limit ─────────────────────────────────────────────────────────
+
+    /// extend() on a 2-hop circuit must return an error immediately.
+    #[tokio::test]
+    async fn test_extend_limit_enforced() {
+        // We need a 2-hop circuit; use the same approach as test_extend_two_hop_completes
+        // but then call extend a third time and verify failure.
+        let relay2_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay2_addr = relay2_listener.local_addr().unwrap();
+        let relay2_key = RelayStaticKey::generate();
+
+        let relay2_task = tokio::spawn({
+            let relay2_key = relay2_key.clone();
+            async move {
+                let (stream, _) = relay2_listener.accept().await.unwrap();
+                let mut conn = RelayConn::new(stream);
+                let create = conn.recv().await.unwrap();
+                let (created, _keys) = relay_respond(&create, &relay2_key).unwrap();
+                conn.send(&created).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        });
+
+        let relay1_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay1_addr = relay1_listener.local_addr().unwrap();
+        let relay1_key = RelayStaticKey::generate();
+        let relay2_addr_str = relay2_addr.to_string();
+
+        let relay1_task = tokio::spawn({
+            let relay1_key = relay1_key.clone();
+            async move {
+                let (stream, _) = relay1_listener.accept().await.unwrap();
+                let _ = stream.set_nodelay(true);
+                let mut rc = RelayConn::new(stream);
+                let create = rc.recv().await.unwrap();
+                let (created, keys) = relay_respond(&create, &relay1_key).unwrap();
+                rc.send(&created).await.unwrap();
+                let mut ciphers = crate::crypto::RelayCiphers::new(&keys.forward_key, &keys.backward_key);
+
+                let cell = rc.recv().await.unwrap();
+                let ct: [u8; CELL_PAYLOAD_LEN] = cell.payload;
+                let pt = ciphers.inbound.decrypt(&ct).unwrap();
+                let extend_cell = crate::cell::RelayCell::decode(&pt).unwrap();
+                let data = &extend_cell.data;
+                let addr_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+                let off = 4 + addr_len;
+                let fp: [u8; 32] = data[off..off + 32].try_into().unwrap();
+                let client_eph: [u8; 32] = data[off + 32..off + 64].try_into().unwrap();
+                let client_nonce2: [u8; 32] = data[off + 64..off + 96].try_into().unwrap();
+
+                let mut relay2_rc = RelayConn::connect(relay2_addr).await.unwrap();
+                let mut create2 = Cell::new(create.circuit_id, CellType::Create);
+                create2.payload[0..32].copy_from_slice(&fp);
+                create2.payload[32..64].copy_from_slice(&client_eph);
+                create2.payload[64..96].copy_from_slice(&client_nonce2);
+                relay2_rc.send(&create2).await.unwrap();
+                let created2 = relay2_rc.recv().await.unwrap();
+
+                let extended = crate::cell::RelayCell {
+                    command: RelayCommand::Extended,
+                    stream_id: 0,
+                    data: created2.payload[0..96].to_vec(),
+                };
+                let pt2: [u8; crate::cell::RELAY_PLAINTEXT_LEN] = extended.encode().unwrap();
+                let ct2 = ciphers.outbound.encrypt(&pt2).unwrap();
+                let mut resp = Cell::new(create.circuit_id, CellType::Relay);
+                resp.payload.copy_from_slice(&ct2);
+                rc.send(&resp).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        });
+
+        let mut relay1_rc = RelayConn::connect(relay1_addr).await.unwrap();
+        let circuit_id = 1u32;
+        let (create, pending) = client_initiate(circuit_id, &relay1_key.public).unwrap();
+        relay1_rc.send(&create).await.unwrap();
+        let created = relay1_rc.recv().await.unwrap();
+        let keys = client_finish(pending, &created).unwrap();
+        let mut circuit = Circuit::new(circuit_id, keys, relay1_rc);
+
+        // Extend to 2 hops
+        let relay2_desc = RelayDescriptor {
+            nickname: "relay2".into(),
+            address: relay2_addr_str,
+            pubkey_hex: hex::encode(relay2_key.public),
+        };
+        circuit.extend(&relay2_desc).await.unwrap();
+        assert_eq!(circuit.hop_count(), 2);
+
+        // Attempt a third extend — must fail immediately
+        let dummy_desc = RelayDescriptor {
+            nickname: "relay3".into(),
+            address: "127.0.0.1:9999".into(),
+            pubkey_hex: hex::encode([0u8; 32]),
+        };
+        let result = circuit.extend(&dummy_desc).await;
+        assert!(result.is_err(), "extend beyond 2 hops must return an error");
+        assert!(
+            matches!(result.unwrap_err(), TransportError::Protocol(_)),
+            "error must be Protocol type"
+        );
+
+        relay1_task.await.unwrap();
+        relay2_task.await.unwrap();
+    }
+
+    // ── stream close sends RELAY_END ────────────────────────────────────────
+
+    /// open_stream + close must enqueue a RELAY_END cell in outbound_tx.
+    #[tokio::test]
+    async fn test_stream_close_sends_end() {
+        let (mut circuit, _relay_conn) = make_circuit_and_relay().await;
+        // Get a handle to the outbound channel before opening a stream
+        let outbound_tx = circuit.outbound_tx.clone();
+
+        // Open a stream (sends RELAY_BEGIN via send_relay_cell_raw, which goes direct
+        // in 1-hop; the `outbound_tx` is for queued outbound from CircuitStream)
+        let stream = circuit.open_stream("example.com", 80).await.unwrap();
+        let sid = stream.stream_id;
+
+        // Close the stream — this sends RELAY_END into outbound_tx
+        stream.close().await.unwrap();
+
+        // The RELAY_END must now be in the channel
+        let mut rx = {
+            let (_, rx) = (outbound_tx, circuit.outbound_rx);
+            rx
+        };
+        let cell = rx.recv().await.expect("expected RELAY_END in outbound channel");
+        assert_eq!(cell.command, RelayCommand::End, "close() must send RELAY_END");
+        assert_eq!(cell.stream_id, sid, "RELAY_END must carry the correct stream_id");
+    }
+
+    // ── hop_count ─────────────────────────────────────────────────────────────
+
+    /// hop_count() == 1 after new(), == 2 after one successful extend().
+    #[tokio::test]
+    async fn test_circuit_hop_count() {
+        let (circuit, _) = make_circuit_and_relay().await;
+        assert_eq!(circuit.hop_count(), 1, "new circuit must have 1 hop");
+        // A 2-hop extend is already covered in test_extend_two_hop_completes;
+        // this test just verifies the baseline count.
+        drop(circuit);
+    }
 }

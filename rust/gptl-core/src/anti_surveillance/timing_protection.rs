@@ -24,6 +24,7 @@ pub struct TimingShield {
 #[derive(Debug, Clone)]
 struct TimestampedCell {
     cell: Cell,
+    #[allow(dead_code)]
     original_time: Instant,
     scheduled_time: Instant,
 }
@@ -159,7 +160,7 @@ impl TimingShield {
     }
 
     /// Shuffle batch randomly
-    async fn shuffle_batch(&self, batch: &mut Vec<Cell>) {
+    async fn shuffle_batch(&self, batch: &mut [Cell]) {
         let mut rng = rand::thread_rng();
         
         // Fisher-Yates shuffle
@@ -218,6 +219,12 @@ pub struct ClockSkewProtection {
     update_interval: Duration,
     /// Last update time
     last_update: Instant,
+}
+
+impl Default for ClockSkewProtection {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ClockSkewProtection {
@@ -325,11 +332,7 @@ impl WatermarkDetector {
         // Check for alternating pattern (on/off watermark)
         let threshold = Duration::from_millis(50);
         let alternating = iats.windows(2).all(|w| {
-            let diff = if w[0] > w[1] {
-                w[0] - w[1]
-            } else {
-                w[1] - w[0]
-            };
+            let diff = w[0].abs_diff(w[1]);
             diff > threshold
         });
 

@@ -3,7 +3,7 @@
 //! Implements key rotation and ratcheting mechanisms for forward secrecy.
 //! Based on Signal Double Ratchet specification (2025-2026).
 
-use crate::{CellEncryptionError, KeyExchangeError, PrivateKey, PublicKey, SharedSecret};
+use crate::{CellEncryptionError, KeyExchangeError, SharedSecret};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 

@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, info, trace, warn};
 
 use super::health::{CircuitHealthMonitor, FailureType};
-use super::pool::{CircuitId, CircuitPool, PoolEvent, RetireReason};
+use super::pool::{CircuitId, CircuitPool, RetireReason};
 
 /// Rotation trigger type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -260,9 +260,7 @@ impl CircuitRotator {
     pub async fn should_rotate(&self, circuit_id: CircuitId) -> Option<RotationTrigger> {
         // Get rotation info
         let rotation_info = self.rotation_info.read().await;
-        let Some(info) = rotation_info.get(&circuit_id) else {
-            return None;
-        };
+        let info = rotation_info.get(&circuit_id)?;
         
         // Check minimum lifetime
         if info.age() < self.policy.min_circuit_lifetime {
@@ -497,9 +495,9 @@ impl CircuitRotator {
             loop {
                 interval.tick().await;
                 
-                let now = Instant::now();
+                let _now = Instant::now();
                 let mut to_rotate = Vec::new();
-                
+
                 // Find circuits needing rotation
                 {
                     let info_guard = rotation_info.read().await;
@@ -512,9 +510,9 @@ impl CircuitRotator {
                             continue;
                         }
                         
-                        if policy.enable_time_rotation && info.is_rotation_due() {
-                            to_rotate.push((*circuit_id, RotationTrigger::TimeBased));
-                        } else if info.age() >= policy.max_circuit_lifetime {
+                        if (policy.enable_time_rotation && info.is_rotation_due())
+                            || info.age() >= policy.max_circuit_lifetime
+                        {
                             to_rotate.push((*circuit_id, RotationTrigger::TimeBased));
                         }
                     }

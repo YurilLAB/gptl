@@ -25,6 +25,7 @@ pub struct BgpGuard {
 
 /// RPKI validator for route origin validation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RpkiValidator {
     /// ROA (Route Origin Authorization) cache
     roa_cache: HashMap<String, RoaEntry>,
@@ -34,6 +35,7 @@ struct RpkiValidator {
 
 /// ROA entry
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RoaEntry {
     prefix: String,
     origin_as: u32,
@@ -43,6 +45,7 @@ struct RoaEntry {
 
 /// BGP monitor for real-time anomaly detection
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BgpMonitor {
     /// BGP update history
     update_history: Vec<BgpUpdate>,
@@ -52,7 +55,8 @@ struct BgpMonitor {
 
 /// BGP update record
 #[derive(Debug, Clone)]
-struct BgpUpdate {
+#[allow(dead_code)]
+pub struct BgpUpdate {
     timestamp: Instant,
     prefix: String,
     origin_as: u32,
@@ -61,6 +65,7 @@ struct BgpUpdate {
 
 /// Detection heuristic
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum DetectionHeuristic {
     /// Frequency-based detection
     Frequency { threshold: f64 },
@@ -74,6 +79,7 @@ enum DetectionHeuristic {
 
 /// AS path analyzer
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AsPathAnalyzer {
     /// Historical AS paths
     path_history: HashMap<String, Vec<Vec<u32>>>,
@@ -118,7 +124,7 @@ impl BgpGuard {
     /// Initialize BGP protection
     pub async fn initialize(&self) -> Result<(), RoutingError> {
         // Start BGP monitoring task
-        let monitor = self.bgp_monitor.clone();
+        let _monitor = self.bgp_monitor.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -221,6 +227,7 @@ impl BgpGuard {
     }
 }
 
+#[allow(dead_code)]
 impl RpkiValidator {
     /// Validate prefix against ROAs (2025 best practices)
     async fn validate_prefix(&self, prefix: &str) -> bool {
@@ -349,8 +356,8 @@ impl BgpMonitor {
         _destination: &IpAddr,
         threshold: Duration,
     ) -> Option<String> {
-        let now = Instant::now();
-        
+        let _now = Instant::now();
+
         // Group updates by prefix
         let mut prefix_durations: HashMap<String, (Instant, Instant)> = HashMap::new();
         
@@ -462,12 +469,14 @@ pub struct GuardCandidate {
 /// ARTEMIS-style real-time detection
 pub struct ArtemisDetector {
     /// Detection threshold
+    #[allow(dead_code)]
     threshold: f64,
     /// Historical state
     baseline: HashMap<String, BaselineEntry>,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BaselineEntry {
     expected_origin: u32,
     expected_path: Vec<u32>,

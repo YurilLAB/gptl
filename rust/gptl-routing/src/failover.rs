@@ -7,14 +7,14 @@
 //! - Updates relay health status in the registry
 //! - Maintains circuit continuity during relay switches
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn, error, trace};
 
-use gptl_core::relay_registry::{RelayRegistry, RelayInfo, HealthStatus, RelayCriteria, RegistryError};
-use gptl_core::relay_selector::{RelaySelector, SelectionStrategy, SelectionResult, SelectorError};
+use gptl_core::relay_registry::{RelayRegistry, RelayInfo, HealthStatus, RelayCriteria};
+use gptl_core::relay_selector::RelaySelector;
 
 /// Convert local FailureType to gptl-core FailureType
 fn to_selector_failure_type(ft: FailureType) -> gptl_core::relay_selector::FailureType {
@@ -44,12 +44,15 @@ pub struct FailoverManager<R: RelayRegistry + 'static> {
     /// Minimum backup pool size
     min_backup_pool_size: usize,
     /// Maximum retry attempts per relay
+    #[allow(dead_code)]
     max_retries: u32,
     /// Circuit recovery timeout
+    #[allow(dead_code)]
     recovery_timeout: Duration,
     /// Event sender for failover events
     event_sender: Option<mpsc::Sender<FailoverEvent>>,
     /// Whether to enable automatic recovery
+    #[allow(dead_code)]
     auto_recovery: bool,
 }
 
@@ -89,6 +92,7 @@ pub enum CircuitStatus {
 
 /// Failure information for a relay
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct FailureInfo {
     relay_id: String,
     failure_count: u32,
@@ -174,6 +178,7 @@ impl Default for FailoverConfig {
 
 /// Failover result
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum FailoverResult {
     /// Failover succeeded
     Success { new_relay: RelayInfo },
@@ -667,6 +672,7 @@ pub struct FailoverCircuit {
     /// Current relay
     pub relay: RelayInfo,
     /// Failover manager reference
+    #[allow(dead_code)]
     manager: Arc<dyn FailoverManagerTrait>,
 }
 

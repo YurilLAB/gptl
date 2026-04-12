@@ -18,6 +18,7 @@ pub struct FlowCorrelationDefense {
     /// Flow table
     flows: Arc<RwLock<HashMap<u32, FlowInfo>>>,
     /// Multi-path routing state
+    #[allow(dead_code)]
     multipath_state: Arc<RwLock<MultiPathState>>,
     /// Cover traffic generator
     cover_traffic: Arc<RwLock<CoverTrafficGen>>,
@@ -26,8 +27,10 @@ pub struct FlowCorrelationDefense {
 /// Flow information
 #[derive(Debug, Clone)]
 struct FlowInfo {
+    #[allow(dead_code)]
     flow_id: u32,
     /// Associated circuits
+    #[allow(dead_code)]
     circuits: Vec<u32>,
     /// Start time
     start_time: Instant,
@@ -37,6 +40,7 @@ struct FlowInfo {
 
 /// Multi-path routing state
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MultiPathState {
     /// Number of active paths
     num_paths: usize,
@@ -310,6 +314,12 @@ struct PatternInserter {
     patterns: Vec<Vec<u8>>,
 }
 
+impl Default for DeepCorrDefense {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeepCorrDefense {
     /// Create new DeepCorr defense
     pub fn new() -> Self {
@@ -432,7 +442,7 @@ impl MultiPathCoordinator {
         let mut assignments = self.assignments.write().await;
         let mut rng = rand::thread_rng();
         
-        for (flow_id, current_path) in assignments.iter_mut() {
+        for (_flow_id, current_path) in assignments.iter_mut() {
             // Select different path
             if let Some(new_path) = self.paths.iter()
                 .filter(|p| p.path_id != *current_path)

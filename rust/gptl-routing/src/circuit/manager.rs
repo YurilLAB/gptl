@@ -17,7 +17,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use super::health::{CircuitHealthMonitor, FailureType, HealthMonitorConfig, HealthStatistics, HealthStatus};
 use super::pool::{CircuitId, CircuitPool, CircuitPoolConfig, PoolStatistics, RetireReason};
-use super::rotation::{RotationEvent, RotationPolicy, RotationStatistics, RotationTrigger};
+use super::rotation::{RotationPolicy, RotationStatistics, RotationTrigger};
 
 /// Circuit manager configuration
 #[derive(Debug, Clone)]
@@ -70,6 +70,7 @@ pub struct CircuitHandle {
 
 /// Active circuit information
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ActiveCircuit {
     /// Circuit ID
     id: CircuitId,
@@ -142,10 +143,12 @@ pub struct CircuitManager<B: super::pool::CircuitBuilder + 'static> {
     /// Active circuits
     active_circuits: Arc<RwLock<HashMap<CircuitId, ActiveCircuit>>>,
     /// Next stream ID
+    #[allow(dead_code)]
     next_stream_id: Arc<RwLock<u64>>,
     /// Event sender
     event_sender: Option<mpsc::Sender<CircuitManagerEvent>>,
     /// Circuit builder
+    #[allow(dead_code)]
     builder: Arc<B>,
     /// Total circuits created counter
     total_created: Arc<RwLock<u64>>,
@@ -452,6 +455,7 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
     }
 
     /// Handle all circuits failed scenario
+    #[allow(dead_code)]
     async fn handle_all_circuits_failed(&self) {
         error!("All circuits have failed!");
         

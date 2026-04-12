@@ -14,30 +14,26 @@ use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// Security level for relays
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SecurityLevel {
     /// Standard security (basic encryption)
     Standard,
     /// Enhanced security (forward secrecy, additional protections)
+    #[default]
     Enhanced,
     /// Maximum security (all protections enabled)
     Maximum,
 }
 
-impl Default for SecurityLevel {
-    fn default() -> Self {
-        SecurityLevel::Enhanced
-    }
-}
-
 /// Health status of a relay
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum HealthStatus {
     /// Relay is healthy and accepting connections
+    #[default]
     Healthy,
     /// Relay is experiencing issues
     Degraded,
@@ -47,12 +43,6 @@ pub enum HealthStatus {
     Maintenance,
     /// Relay has been banned
     Banned,
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        HealthStatus::Healthy
-    }
 }
 
 impl HealthStatus {
@@ -200,13 +190,8 @@ impl RelayInfo {
     pub fn matches_criteria(&self, criteria: &RelayCriteria) -> bool {
         // Check security level
         if let Some(min_level) = criteria.min_security_level {
-            let level_ord = match (self.security_level, min_level) {
-                (SecurityLevel::Maximum, _) => true,
-                (SecurityLevel::Enhanced, SecurityLevel::Standard) |
-                (SecurityLevel::Enhanced, SecurityLevel::Enhanced) => true,
-                (SecurityLevel::Standard, SecurityLevel::Standard) => true,
-                _ => false,
-            };
+            let level_ord = matches!((self.security_level, min_level), (SecurityLevel::Maximum, _) | (SecurityLevel::Enhanced, SecurityLevel::Standard) |
+                (SecurityLevel::Enhanced, SecurityLevel::Enhanced) | (SecurityLevel::Standard, SecurityLevel::Standard));
             if !level_ord {
                 return false;
             }
@@ -780,7 +765,7 @@ impl SignedRelayList {
         to_sign.authority_key.clear();
         
         let message = serde_json::to_vec(&to_sign)
-            .map_err(|e| RegistryError::SerializationError(e))?;
+            .map_err(RegistryError::SerializationError)?;
         
         use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
         
@@ -824,7 +809,7 @@ impl SignedRelayList {
         to_verify.authority_key.clear();
         
         let message = serde_json::to_vec(&to_verify)
-            .map_err(|e| RegistryError::SerializationError(e))?;
+            .map_err(RegistryError::SerializationError)?;
 
         match verifying_key.verify(&message, &signature) {
             Ok(_) => Ok(true),

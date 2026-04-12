@@ -4,7 +4,6 @@
 //! and related padding defenses against website fingerprinting attacks.
 
 use super::{AntiSurveillanceConfig, AntiSurveillanceError, Cell, CellCommand};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -22,6 +21,7 @@ pub struct PaddingEngine {
 
 /// Padding state machine (similar to WTF-PAD)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PaddingStateMachine {
     circuit_id: u32,
     /// Current state
@@ -35,6 +35,7 @@ struct PaddingStateMachine {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum PaddingState {
     /// Waiting for burst to start
     Idle,
@@ -136,7 +137,7 @@ impl PaddingEngine {
             // Sample target window size from histogram
             let target_size = if let Ok(exp) = Exp::new(0.5) {
                 let sample: f64 = exp.sample(&mut rng);
-                (sample * 10.0).min(50.0).max(5.0) as usize
+                (sample * 10.0).clamp(5.0, 50.0) as usize
             } else {
                 20
             };

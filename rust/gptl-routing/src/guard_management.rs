@@ -3,7 +3,7 @@
 //! Implements countermeasures against guard discovery attacks (Overlier-Syverson)
 //! including vanguards, layered guards, and rotation policies.
 
-use super::{GuardInfo, GuardLayer, ProofOfWork, RoutingConfig, RoutingError};
+use super::{GuardInfo, GuardLayer, RoutingConfig, RoutingError};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,6 +28,7 @@ pub struct GuardManager {
 
 /// Guard entry with metadata
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct GuardEntry {
     info: GuardInfo,
     added_at: Instant,
@@ -39,6 +40,7 @@ struct GuardEntry {
 
 /// Guard statistics
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 struct GuardStats {
     total_circuits: u64,
     failed_circuits: u64,
@@ -312,6 +314,7 @@ pub struct PredecessorDefense {
 
 /// Circuit construction record
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CircuitConstruction {
     timestamp: Instant,
     first_hop: String,

@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 /// DNS guard for preventing DNS leaks
 pub struct DnsGuard {
+    #[allow(dead_code)]
     config: Arc<RwLock<RoutingConfig>>,
     /// DoH resolver
     doh_resolver: Arc<RwLock<DoHResolver>>,
@@ -20,6 +21,7 @@ pub struct DnsGuard {
     /// Firewall rules
     firewall: Arc<RwLock<DnsFirewall>>,
     /// IPv6 policy
+    #[allow(dead_code)]
     ipv6_policy: Arc<RwLock<Ipv6Policy>>,
 }
 
@@ -51,6 +53,7 @@ struct CacheEntry {
 
 /// DNS firewall
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DnsFirewall {
     /// Blocked DNS servers
     blocked_servers: Vec<IpAddr>,
@@ -62,12 +65,14 @@ struct DnsFirewall {
 
 /// Intercept rule
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct InterceptRule {
     pattern: String,
     action: InterceptAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum InterceptAction {
     Block,
     Redirect,
@@ -76,7 +81,8 @@ enum InterceptAction {
 
 /// IPv6 policy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ipv6Policy {
+#[allow(dead_code)]
+pub(crate) enum Ipv6Policy {
     Allow,
     Block,
     Prefer,
@@ -267,7 +273,7 @@ impl DnsGuard {
 
     /// Configure DNS leak prevention
     pub async fn configure_leak_prevention(&self) -> Result<(), RoutingError> {
-        let firewall = self.firewall.write().await;
+        let _firewall = self.firewall.write().await;
         
         // Block all non-tunneled DNS
         // This would interface with system firewall
@@ -292,7 +298,8 @@ impl DnsGuard {
     }
 
     /// Update IPv6 policy
-    pub async fn set_ipv6_policy(&self, policy: Ipv6Policy) {
+    #[allow(dead_code)]
+    pub(crate) async fn set_ipv6_policy(&self, policy: Ipv6Policy) {
         let mut ipv6 = self.ipv6_policy.write().await;
         *ipv6 = policy;
     }
@@ -311,11 +318,13 @@ impl DnsFirewall {
     }
 
     /// Block ISP DNS servers
+    #[allow(dead_code)]
     pub fn block_isp_dns(&mut self, isp_servers: Vec<IpAddr>) {
         self.blocked_servers.extend(isp_servers);
     }
 
     /// Allow only VPN DNS
+    #[allow(dead_code)]
     pub fn allow_only_vpn(&mut self, vpn_servers: Vec<IpAddr>) {
         self.allowed_servers = vpn_servers;
     }
@@ -526,15 +535,23 @@ pub struct DoTResolver {
     /// Resolver endpoints
     endpoints: Vec<String>,
     /// TLS configuration
+    #[allow(dead_code)]
     tls_config: TlsConfig,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct TlsConfig {
     /// Certificate pinning hashes
     pinned_certs: Vec<String>,
     /// ALPN protocols
     alpn: Vec<String>,
+}
+
+impl Default for DoTResolver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DoTResolver {
@@ -647,7 +664,14 @@ pub enum DnsError {
 /// Transparent DNS proxy detector
 pub struct TransparentProxyDetector {
     /// Known proxy indicators
+    #[allow(dead_code)]
     indicators: Vec<String>,
+}
+
+impl Default for TransparentProxyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TransparentProxyDetector {

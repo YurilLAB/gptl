@@ -12,6 +12,7 @@ use sha2::{Sha256, Digest};
 
 /// Resource guard for protecting against resource exhaustion
 pub struct ResourceGuard {
+    #[allow(dead_code)]
     config: Arc<RwLock<RoutingConfig>>,
     /// Memory pool
     memory_pool: Arc<RwLock<MemoryPool>>,
@@ -27,6 +28,7 @@ pub struct ResourceGuard {
 
 /// Memory pool
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MemoryPool {
     total_available: usize,
     allocated: usize,
@@ -35,6 +37,7 @@ struct MemoryPool {
 
 /// Circuit quota
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CircuitQuota {
     max_memory: usize,
     max_bandwidth: u64,
@@ -44,6 +47,7 @@ struct CircuitQuota {
 
 /// Proof-of-work verifier
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PowVerifier {
     /// Current difficulty
     difficulty: u32,
@@ -53,6 +57,7 @@ struct PowVerifier {
 
 /// Rate limiter for circuit creation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RateLimiter {
     /// Max circuits per client per minute
     max_per_minute: u32,
@@ -62,6 +67,7 @@ struct RateLimiter {
 
 /// Out-of-memory handler
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct OomHandler {
     /// Memory threshold (percentage)
     threshold: f64,
@@ -153,7 +159,7 @@ impl ResourceGuard {
         
         // Check rate limits
         {
-            let limiter = self.rate_limiter.read().await;
+            let _limiter = self.rate_limiter.read().await;
             // Rate limit check would go here
         }
         
@@ -282,6 +288,7 @@ impl PowVerifier {
     }
 
     /// Update difficulty based on network conditions
+    #[allow(dead_code)]
     pub fn adjust_difficulty(&mut self, target_allocation_rate: f64, actual_rate: f64) {
         if actual_rate > target_allocation_rate * 1.2 {
             // Too many allocations, increase difficulty
@@ -350,6 +357,7 @@ pub struct SniperDetector {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SniperStats {
     cells_received: usize,
     cells_acked: usize,

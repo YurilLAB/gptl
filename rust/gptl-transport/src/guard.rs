@@ -562,4 +562,80 @@ mod tests {
             .unwrap();
         assert_eq!(entry.consecutive_failures, 2);
     }
+
+    // ── select_entry_relay fallback ───────────────────────────────────────────
+
+    /// When all guards have reached `max_failures` the manager must fall back to
+    /// picking from the full available relay list rather than returning `None`.
+    #[tokio::test]
+    async fn test_all_guards_unusable_triggers_fallback() {
+        let relays = make_relays(5);
+        // Single guard, low failure threshold so we can exhaust it easily.
+        let config = GuardConfig {
+            num_guards: 1,
+            min_guards: 1,
+            max_failures: 2,
+            ..Default::default()
+        };
+        let mut manager = GuardManager::new(config, None);
+        manager.initialize(&relays).await.unwrap();
+
+        // Drive the sole guard past its failure threshold.
+        let nickname = manager.guard_set().guards[0].descriptor.nickname.clone();
+        manager.report_failure(&nickname);
+        manager.report_failure(&nickname);
+
+        // Now no guards are usable; select_entry_relay should fall back to the
+        // full available list and return *some* relay.
+        let chosen = manager.select_entry_relay(&relays);
+        assert!(
+            chosen.is_some(),
+            "select_entry_relay must return a relay from the fallback list when all guards are unusable"
+        );
+    }
+
+    /// `mark_success` (via `report_success`) must reset `consecutive_failures`
+    /// to exactly 0, not merely decrement it.
+    #[tokio::test]
+    async fn test_guard_success_resets_failure_count_correctly() {
+        let relays = make_relays(3);
+        let config = GuardConfig {
+            num_guards: 1,
+            max_failures: 10,
+            ..Default::default()
+        };
+        let mut manager = GuardManager::new(config, None);
+        manager.initialize(&relays).await.unwrap();
+
+        let nickname = manager.guard_set().guards[0].descriptor.nickname.clone();
+
+        // Accumulate several failures.
+        manager.report_failure(&nickname);
+        manager.report_failure(&nickname);
+        manager.report_failure(&nickname);
+
+        {
+            let entry = manager
+                .guard_set()
+                .guards
+                .iter()
+                .find(|g| g.descriptor.nickname == nickname)
+                .unwrap();
+            assert_eq!(entry.consecutive_failures, 3, "should have 3 failures before success");
+        }
+
+        // A single success must drive consecutive_failures to 0.
+        manager.report_success(&nickname);
+
+        let entry = manager
+            .guard_set()
+            .guards
+            .iter()
+            .find(|g| g.descriptor.nickname == nickname)
+            .unwrap();
+        assert_eq!(
+            entry.consecutive_failures, 0,
+            "consecutive_failures must be 0 after mark_success, not just decremented"
+        );
+    }
 }

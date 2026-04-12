@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 
 /// Sybil shield for detecting and preventing Sybil attacks
 pub struct SybilShield {
+    #[allow(dead_code)]
     config: Arc<RwLock<RoutingConfig>>,
     /// Relay reputation database
     reputation_db: Arc<RwLock<ReputationDB>>,
@@ -27,6 +28,7 @@ pub struct SybilShield {
 
 /// Relay reputation database
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ReputationDB {
     /// Relay entries
     entries: HashMap<String, ReputationEntry>,
@@ -36,6 +38,7 @@ struct ReputationDB {
 
 /// Reputation entry
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ReputationEntry {
     identity: String,
     /// Current reputation score (0.0 - 1.0)
@@ -54,6 +57,7 @@ struct ReputationEntry {
 
 /// Sybil detection engine
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct SybilDetector {
     /// Detection heuristics
     heuristics: Vec<SybilHeuristic>,
@@ -63,6 +67,7 @@ struct SybilDetector {
 
 /// Sybil detection heuristic
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum SybilHeuristic {
     /// Same IP subnet
     SameSubnet { prefix_len: u8 },
@@ -78,7 +83,8 @@ enum SybilHeuristic {
 
 /// Detected Sybil group
 #[derive(Debug, Clone)]
-struct SybilGroup {
+#[allow(dead_code)]
+pub(crate) struct SybilGroup {
     /// Group identifier
     group_id: String,
     /// Member relays
@@ -91,6 +97,7 @@ struct SybilGroup {
 
 /// Economic stake verifier
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct StakeVerifier {
     /// Stake requirements by relay type
     stake_requirements: HashMap<RelayType, u64>,
@@ -99,7 +106,7 @@ struct StakeVerifier {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum RelayType {
+pub(crate) enum RelayType {
     Guard,
     Middle,
     Exit,
@@ -107,6 +114,7 @@ enum RelayType {
 
 /// Stake proof
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct StakeProof {
     identity: String,
     amount: u64,
@@ -116,6 +124,7 @@ struct StakeProof {
 
 /// Geographic diversity checker
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DiversityChecker {
     /// Required AS diversity
     min_as_diversity: usize,
@@ -126,6 +135,7 @@ struct DiversityChecker {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct AsInfo {
     asn: u32,
     country: String,
@@ -188,7 +198,7 @@ impl SybilShield {
                 interval.tick().await;
                 
                 // Run detection
-                let mut detector = engine.write().await;
+                let detector = engine.write().await;
                 // Detection logic here
                 
                 // Block detected Sybils
@@ -238,10 +248,8 @@ impl SybilShield {
         {
             let engine = self.detection_engine.read().await;
             for group in &engine.sybil_groups {
-                if group.members.contains(&identity.to_string()) {
-                    if group.confidence > 0.8 {
-                        return Ok(false);
-                    }
+                if group.members.contains(&identity.to_string()) && group.confidence > 0.8 {
+                    return Ok(false);
                 }
             }
         }
@@ -266,7 +274,7 @@ impl SybilShield {
         // Check geographic diversity
         {
             let checker = self.diversity_checker.read().await;
-            if let Some(as_info) = checker.as_cache.get(&info.address) {
+            if let Some(_as_info) = checker.as_cache.get(&info.address) {
                 // Verify diversity requirements
             }
         }
@@ -312,7 +320,8 @@ impl SybilShield {
     }
 
     /// Detect Sybil groups
-    pub async fn detect_sybils(&self) -> Vec<SybilGroup> {
+    #[allow(dead_code)]
+    pub(crate) async fn detect_sybils(&self) -> Vec<SybilGroup> {
         let engine = self.detection_engine.read().await;
         engine.sybil_groups.clone()
     }
@@ -324,6 +333,7 @@ impl SybilShield {
     }
 }
 
+#[allow(dead_code)]
 impl ReputationDB {
     /// Update reputation based on age
     fn age_based_reputation(&self, entry: &ReputationEntry) -> f64 {
@@ -340,6 +350,7 @@ impl ReputationDB {
     }
 }
 
+#[allow(dead_code)]
 impl SybilDetector {
     /// Run detection heuristics
     fn detect_same_subnet(&self, relays: &[RelayInfo], prefix_len: u8) -> Vec<SybilGroup> {
@@ -375,7 +386,7 @@ impl SybilDetector {
     fn detect_coordinated_behavior(
         &self,
         relays: &[RelayInfo],
-        window: Duration,
+        _window: Duration,
     ) -> Vec<SybilGroup> {
         // Group by similar behavior patterns
         // Look for simultaneous join/leave patterns
@@ -563,7 +574,7 @@ pub struct RelayInfo {
     pub identity: String,
     pub address: IpAddr,
     pub bandwidth: u64,
-    pub relay_type: RelayType,
+    pub(crate) relay_type: RelayType,
     pub stake_amount: u64,
     pub nickname: String,
     pub fingerprint: String,
@@ -585,10 +596,17 @@ pub struct BandwidthAuthority {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BandwidthMeasurement {
     claimed: u64,
     measured: u64,
     measurement_time: Instant,
+}
+
+impl Default for BandwidthAuthority {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BandwidthAuthority {
@@ -630,7 +648,14 @@ pub struct TrustNetwork {
     /// Trust edges
     edges: HashMap<String, HashSet<String>>,
     /// Trust scores
+    #[allow(dead_code)]
     scores: HashMap<String, f64>,
+}
+
+impl Default for TrustNetwork {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TrustNetwork {

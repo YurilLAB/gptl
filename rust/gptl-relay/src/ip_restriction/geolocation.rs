@@ -49,8 +49,8 @@ impl GeoBlocker {
 
     /// Load GeoIP2 database
     pub async fn load_database(&self, _path: &str) -> crate::Result<()> {
-        // In production, this would load the MaxMind GeoIP2 database
-        // For now, we create an empty database placeholder
+        // No bundled GeoIP2 database — in production, load a MaxMind DB2 file.
+        // Returns Ok(()) with an empty database that allows all IPs.
         let mut db = self.db.write().await;
         *db = Some(GeoIpDatabase::new());
         Ok(())

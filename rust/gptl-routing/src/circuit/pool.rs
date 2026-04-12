@@ -7,9 +7,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock, Semaphore};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
-use super::health::{CircuitHealthMonitor, FailureType, HealthStatus};
+use super::health::CircuitHealthMonitor;
 
 /// Unique circuit identifier
 pub type CircuitId = u64;
@@ -736,9 +736,9 @@ impl CircuitPool {
             loop {
                 interval.tick().await;
                 
-                let now = Instant::now();
+                let _now = Instant::now();
                 let mut to_refresh = Vec::new();
-                
+
                 // Find circuits needing refresh
                 {
                     let circuits_guard = circuits.read().await;
