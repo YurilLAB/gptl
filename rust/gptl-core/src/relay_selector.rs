@@ -144,6 +144,17 @@ impl Default for SelectorConfig {
 }
 
 impl<R: RelayRegistry> RelaySelector<R> {
+    /// Borrow the underlying registry — used by pool-aware callers that
+    /// need to re-check the health of a cached relay ID before reusing it.
+    pub fn registry(&self) -> &Arc<R> {
+        &self.registry
+    }
+
+    /// Currently configured selection strategy.
+    pub fn strategy(&self) -> SelectionStrategy {
+        self.strategy
+    }
+
     /// Create a new relay selector
     pub fn new(registry: Arc<R>) -> Self {
         Self::with_config(registry, SelectorConfig::default())
@@ -761,28 +772,42 @@ impl<R: RelayRegistry + 'static> RelayPool<R> {
         Ok(())
     }
 
-    /// Get a relay from the pool
+    /// Get a relay from the pool.
+    ///
+    /// Iterates the pre-selected `preferred_relays` in random order and
+    /// returns the first one that is still `is_usable()` in the registry.
+    /// Falls back to a fresh `selector.select()` when none of the cached
+    /// relays still resolve (network churn, removals) or the pool is empty.
+    ///
+    /// The previous body iterated `preferred` but did nothing inside the
+    /// loop — every call hit the fallback path, making the entire pool
+    /// pre-selection logic dead code.
     pub async fn get_relay(&self) -> Result<SelectionResult, SelectorError> {
         let preferred = self.preferred_relays.read().await;
-        
+
         if preferred.is_empty() {
             drop(preferred);
             return self.selector.select().await;
         }
-        
-        // Try preferred relays in random order
+
         let mut rng = rand::thread_rng();
         let mut indices: Vec<_> = (0..preferred.len()).collect();
         indices.shuffle(&mut rng);
-        
+
         for idx in indices {
-            let _relay_id = &preferred[idx];
-            // Check if relay is still healthy
-            // In a real implementation, you'd check the registry
-            // For now, just return the first one
-            // This is a simplified implementation
+            let relay_id = &preferred[idx];
+            if let Ok(relay) = self.selector.registry().get_relay(relay_id).await {
+                if relay.health_status.is_usable() {
+                    return Ok(SelectionResult {
+                        relay,
+                        strategy: self.selector.strategy(),
+                        score: Some(1.0),
+                        estimated_latency: None,
+                    });
+                }
+            }
         }
-        
+
         drop(preferred);
         self.selector.select().await
     }

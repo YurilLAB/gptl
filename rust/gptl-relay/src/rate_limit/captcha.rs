@@ -43,6 +43,13 @@ impl CaptchaChallenge {
         self
     }
 
+    /// Override the hCaptcha verify URL.  Used by tests to point at a
+    /// local mock server; production callers should not touch this.
+    pub fn with_verify_url(mut self, url: impl Into<String>) -> Self {
+        self.verify_url = url.into();
+        self
+    }
+
     /// Get the site key (for client-side rendering)
     pub fn site_key(&self) -> &str {
         &self.site_key
@@ -64,11 +71,31 @@ impl CaptchaChallenge {
         challenge_id
     }
 
-    /// Verify a CAPTCHA response
+    /// Verify a CAPTCHA response.
+    ///
+    /// Equivalent to [`verify_with_ip`] with no remote IP — callers
+    /// SHOULD provide the user's IP when known since hCaptcha uses it
+    /// for risk scoring and replay protection.
     pub async fn verify(
         &self,
         challenge_id: &str,
         response_token: &str,
+    ) -> crate::Result<CaptchaVerification> {
+        self.verify_with_ip(challenge_id, response_token, None).await
+    }
+
+    /// Verify a CAPTCHA response with an optional `remoteip`.
+    ///
+    /// The remote IP is forwarded to hCaptcha as documented at
+    /// https://docs.hcaptcha.com/#verify-the-user-response-server-side.
+    /// hCaptcha uses it to detect replay across different clients —
+    /// including it whenever possible meaningfully reduces false
+    /// positives.
+    pub async fn verify_with_ip(
+        &self,
+        challenge_id: &str,
+        response_token: &str,
+        remote_ip: Option<std::net::IpAddr>,
     ) -> crate::Result<CaptchaVerification> {
         // Check if challenge exists and is valid
         {
@@ -99,7 +126,9 @@ impl CaptchaChallenge {
         }
 
         // Verify with hCaptcha API
-        let result = self.verify_with_hcaptcha(response_token).await?;
+        let result = self
+            .verify_with_hcaptcha(response_token, remote_ip)
+            .await?;
 
         if result.success {
             // Mark challenge as verified
@@ -129,10 +158,17 @@ impl CaptchaChallenge {
         challenges.remove(challenge_id);
     }
 
-    /// Verify response with hCaptcha API
+    /// Verify response with hCaptcha API.
+    ///
+    /// Per the upstream spec, the request is a POST with an
+    /// x-www-form-urlencoded body containing `secret`, `response`, and
+    /// optionally `remoteip`.  The response is JSON conforming to
+    /// [`CaptchaVerification`].  HTTP timeout 10s — production hCaptcha
+    /// usually responds in well under a second.
     async fn verify_with_hcaptcha(
         &self,
         response_token: &str,
+        remote_ip: Option<std::net::IpAddr>,
     ) -> crate::Result<CaptchaVerification> {
         // hCaptcha siteverify API: https://docs.hcaptcha.com/#verify-the-user-response-server-side
         let client = reqwest::Client::builder()
@@ -140,10 +176,13 @@ impl CaptchaChallenge {
             .build()
             .map_err(|e| crate::RelayError::Internal(format!("HTTP client error: {}", e)))?;
 
-        let params = [
-            ("secret", self.secret_key.as_str()),
-            ("response", response_token),
+        let mut params: Vec<(&str, String)> = vec![
+            ("secret", self.secret_key.clone()),
+            ("response", response_token.to_string()),
         ];
+        if let Some(ip) = remote_ip {
+            params.push(("remoteip", ip.to_string()));
+        }
 
         let response = client
             .post(&self.verify_url)
@@ -361,6 +400,130 @@ mod tests {
         let result = captcha.verify(&challenge_id, "test_token").await;
         // Result depends on whether reqwest is available
         assert!(result.is_ok() || result.is_err());
+    }
+
+    /// Tiny mock hCaptcha server.  Listens on a free localhost port,
+    /// asserts the POST body matches the expected hCaptcha schema, and
+    /// returns the JSON body provided by the caller.
+    async fn spawn_mock_hcaptcha(
+        expected_body_contains: &'static str,
+        response_json: &'static str,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Handle exactly one request.
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let mut total = 0usize;
+                // Read until we see the end of the headers and have
+                // consumed enough body bytes.  HTTP/1.1 from reqwest
+                // sends Content-Length; we just slurp until close or
+                // until the request body is unmistakably present.
+                while total < buf.len() {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        stream.read(&mut buf[total..]),
+                    )
+                    .await
+                    {
+                        Ok(Ok(0)) | Err(_) => break,
+                        Ok(Ok(n)) => {
+                            total += n;
+                            // If we have headers + a non-empty body
+                            // chunk, stop reading.
+                            let s = String::from_utf8_lossy(&buf[..total]);
+                            if s.contains("\r\n\r\n") && s.split("\r\n\r\n").nth(1).map(|b| !b.is_empty()).unwrap_or(false) {
+                                break;
+                            }
+                        }
+                        Ok(Err(_)) => break,
+                    }
+                }
+                let body = String::from_utf8_lossy(&buf[..total]);
+                assert!(
+                    body.contains(expected_body_contains),
+                    "POST body must contain {:?}, got: {}",
+                    expected_body_contains,
+                    body
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response_json.len(),
+                    response_json
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn test_verify_with_hcaptcha_success_path() {
+        let url = spawn_mock_hcaptcha(
+            "secret=test_secret",
+            r#"{"success":true,"hostname":"example.com","error-codes":[]}"#,
+        )
+        .await;
+        let captcha =
+            CaptchaChallenge::new("test_secret", "site_key").with_verify_url(url);
+        let challenge_id = captcha.create_challenge().await;
+
+        let result = captcha
+            .verify(&challenge_id, "test_token")
+            .await
+            .expect("HTTP verify must succeed");
+        assert!(result.success, "mock returned success:true");
+        assert_eq!(result.hostname.as_deref(), Some("example.com"));
+        assert!(result.error_codes.is_empty());
+
+        // Subsequent is_verified call now returns true.
+        assert!(captcha.is_verified(&challenge_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_verify_with_hcaptcha_failure_path_returns_error_codes() {
+        let url = spawn_mock_hcaptcha(
+            "response=bad_token",
+            r#"{"success":false,"error-codes":["invalid-input-response","missing-input-secret"]}"#,
+        )
+        .await;
+        let captcha = CaptchaChallenge::new("secret", "site_key").with_verify_url(url);
+        let challenge_id = captcha.create_challenge().await;
+
+        let result = captcha
+            .verify(&challenge_id, "bad_token")
+            .await
+            .expect("HTTP must succeed; the API returned a structured failure");
+        assert!(!result.success);
+        assert_eq!(result.error_codes.len(), 2);
+        assert!(result
+            .error_codes
+            .iter()
+            .any(|c| c == "invalid-input-response"));
+        assert!(!captcha.is_verified(&challenge_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_verify_with_ip_includes_remoteip_in_post_body() {
+        let url = spawn_mock_hcaptcha(
+            "remoteip=203.0.113.4",
+            r#"{"success":true,"error-codes":[]}"#,
+        )
+        .await;
+        let captcha = CaptchaChallenge::new("secret", "site_key").with_verify_url(url);
+        let challenge_id = captcha.create_challenge().await;
+        let ip: std::net::IpAddr = "203.0.113.4".parse().unwrap();
+
+        let result = captcha
+            .verify_with_ip(&challenge_id, "any_token", Some(ip))
+            .await
+            .expect("HTTP verify must succeed");
+        assert!(result.success);
     }
 
     #[tokio::test]

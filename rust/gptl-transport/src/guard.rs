@@ -105,10 +105,14 @@ impl GuardSet {
     /// exist so the first-run case is handled transparently.
     pub fn load(path: &Path) -> Result<Self, TransportError> {
         match std::fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|e| TransportError::Bootstrap(format!("parse guard state {}: {}", path.display(), e))),
+            Ok(contents) => serde_json::from_str(&contents).map_err(|e| {
+                TransportError::Bootstrap(format!("parse guard state {}: {}", path.display(), e))
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                debug!("guard state file not found at {}, starting fresh", path.display());
+                debug!(
+                    "guard state file not found at {}, starting fresh",
+                    path.display()
+                );
                 Ok(GuardSet::default())
             }
             Err(e) => Err(TransportError::Bootstrap(format!(
@@ -127,8 +131,9 @@ impl GuardSet {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| TransportError::Bootstrap(format!("serialize guard state: {}", e)))?;
-        std::fs::write(path, json)
-            .map_err(|e| TransportError::Bootstrap(format!("write guard state {}: {}", path.display(), e)))
+        std::fs::write(path, json).map_err(|e| {
+            TransportError::Bootstrap(format!("write guard state {}: {}", path.display(), e))
+        })
     }
 
     // ── Selection ─────────────────────────────────────────────────────────────
@@ -185,11 +190,7 @@ impl GuardSet {
     }
 
     /// Replace guards that are either expired or no longer present in `available`.
-    pub fn rotate_if_expired(
-        &mut self,
-        available: &[RelayDescriptor],
-        config: &GuardConfig,
-    ) {
+    pub fn rotate_if_expired(&mut self, available: &[RelayDescriptor], config: &GuardConfig) {
         let known: std::collections::HashSet<&str> =
             available.iter().map(|r| r.pubkey_hex.as_str()).collect();
 
@@ -201,15 +202,21 @@ impl GuardSet {
                 info!("rotating expired guard '{}'", g.descriptor.nickname);
             }
             if gone {
-                warn!("dropping guard '{}' — no longer in relay list", g.descriptor.nickname);
+                warn!(
+                    "dropping guard '{}' — no longer in relay list",
+                    g.descriptor.nickname
+                );
             }
             !expired && !gone
         });
 
         // Top-up to the desired count.
         if self.guards.len() < config.num_guards {
-            let existing_keys: std::collections::HashSet<&str> =
-                self.guards.iter().map(|g| g.descriptor.pubkey_hex.as_str()).collect();
+            let existing_keys: std::collections::HashSet<&str> = self
+                .guards
+                .iter()
+                .map(|g| g.descriptor.pubkey_hex.as_str())
+                .collect();
 
             let mut candidates: Vec<RelayDescriptor> = available
                 .iter()
@@ -234,13 +241,21 @@ impl GuardSet {
     // ── Mutation helpers ──────────────────────────────────────────────────────
 
     fn mark_success(&mut self, nickname: &str) {
-        if let Some(g) = self.guards.iter_mut().find(|g| g.descriptor.nickname == nickname) {
+        if let Some(g) = self
+            .guards
+            .iter_mut()
+            .find(|g| g.descriptor.nickname == nickname)
+        {
             g.mark_success();
         }
     }
 
     fn mark_failure(&mut self, nickname: &str) {
-        if let Some(g) = self.guards.iter_mut().find(|g| g.descriptor.nickname == nickname) {
+        if let Some(g) = self
+            .guards
+            .iter_mut()
+            .find(|g| g.descriptor.nickname == nickname)
+        {
             g.mark_failure();
         }
     }
@@ -276,7 +291,10 @@ impl GuardManager {
 
     /// Load persisted state (if any) and ensure at least `min_guards` guards
     /// are selected from `available`.
-    pub async fn initialize(&mut self, available: &[RelayDescriptor]) -> Result<(), TransportError> {
+    pub async fn initialize(
+        &mut self,
+        available: &[RelayDescriptor],
+    ) -> Result<(), TransportError> {
         // Load from disk if we have a persist path.
         if let Some(ref path) = self.persist_path {
             self.guard_set = GuardSet::load(path)?;
@@ -302,7 +320,10 @@ impl GuardManager {
     ///
     /// Falls back to the full `available` list when fewer than `min_guards`
     /// usable guards remain.
-    pub fn select_entry_relay<'a>(&'a self, available: &'a [RelayDescriptor]) -> Option<&'a RelayDescriptor> {
+    pub fn select_entry_relay<'a>(
+        &'a self,
+        available: &'a [RelayDescriptor],
+    ) -> Option<&'a RelayDescriptor> {
         let usable_count = self
             .guard_set
             .guards
@@ -369,7 +390,10 @@ mod tests {
     #[test]
     fn test_guard_selection_picks_correct_count() {
         let relays = make_relays(10);
-        let config = GuardConfig { num_guards: 3, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 3,
+            ..Default::default()
+        };
         let gs = GuardSet::select_guards(&relays, &config);
         assert_eq!(gs.guard_count(), 3);
     }
@@ -377,7 +401,10 @@ mod tests {
     #[test]
     fn test_guard_selection_with_fewer_relays_than_num_guards() {
         let relays = make_relays(2);
-        let config = GuardConfig { num_guards: 5, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 5,
+            ..Default::default()
+        };
         let gs = GuardSet::select_guards(&relays, &config);
         assert_eq!(gs.guard_count(), 2);
     }
@@ -391,7 +418,10 @@ mod tests {
             address: "10.0.5.1:9001".into(),
             pubkey_hex: "a".repeat(64),
         });
-        let config = GuardConfig { num_guards: 6, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 6,
+            ..Default::default()
+        };
         let gs = GuardSet::select_guards(&relays, &config);
         // At most 5 valid relays can be picked.
         assert!(gs.guard_count() <= 5);
@@ -431,7 +461,11 @@ mod tests {
     #[test]
     fn test_rotation_replaces_expired_guards() {
         let relays = make_relays(10);
-        let config = GuardConfig { num_guards: 3, rotation_days: 30, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 3,
+            rotation_days: 30,
+            ..Default::default()
+        };
         let mut gs = GuardSet::select_guards(&relays, &config);
 
         // Artificially age all guards beyond the rotation window.
@@ -459,7 +493,10 @@ mod tests {
     #[test]
     fn test_rotation_drops_guards_not_in_available() {
         let relays = make_relays(5);
-        let config = GuardConfig { num_guards: 3, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 3,
+            ..Default::default()
+        };
         let mut gs = GuardSet::select_guards(&relays, &config);
 
         // Pass an empty available list — all guards should be dropped.
@@ -472,19 +509,28 @@ mod tests {
     #[test]
     fn test_failure_tracking_marks_guard_unusable() {
         let mut entry = GuardEntry::new(make_relays(1).remove(0));
-        let config = GuardConfig { max_failures: 5, ..Default::default() };
+        let config = GuardConfig {
+            max_failures: 5,
+            ..Default::default()
+        };
 
         for _ in 0..5 {
             assert!(entry.is_usable(&config), "should still be usable");
             entry.mark_failure();
         }
-        assert!(!entry.is_usable(&config), "should be unusable after max_failures");
+        assert!(
+            !entry.is_usable(&config),
+            "should be unusable after max_failures"
+        );
     }
 
     #[test]
     fn test_mark_success_resets_failures() {
         let mut entry = GuardEntry::new(make_relays(1).remove(0));
-        let config = GuardConfig { max_failures: 3, ..Default::default() };
+        let config = GuardConfig {
+            max_failures: 3,
+            ..Default::default()
+        };
 
         entry.mark_failure();
         entry.mark_failure();
@@ -499,7 +545,10 @@ mod tests {
     #[test]
     fn test_get_usable_guard_returns_valid_entry() {
         let relays = make_relays(5);
-        let config = GuardConfig { num_guards: 3, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 3,
+            ..Default::default()
+        };
         let gs = GuardSet::select_guards(&relays, &config);
 
         let guard = gs.get_usable_guard(&relays, &config);
@@ -514,7 +563,10 @@ mod tests {
     #[test]
     fn test_get_usable_guard_none_when_not_in_available() {
         let relays = make_relays(3);
-        let config = GuardConfig { num_guards: 3, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 3,
+            ..Default::default()
+        };
         let gs = GuardSet::select_guards(&relays, &config);
 
         // Pass an empty available list.
@@ -530,7 +582,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("guards.json");
 
-        let config = GuardConfig { num_guards: 2, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 2,
+            ..Default::default()
+        };
         let mut manager = GuardManager::new(config.clone(), Some(path.clone()));
         manager.initialize(&relays).await.unwrap();
         assert_eq!(manager.guard_set().guard_count(), 2);
@@ -546,7 +601,11 @@ mod tests {
     #[tokio::test]
     async fn test_manager_report_failure_propagates() {
         let relays = make_relays(5);
-        let config = GuardConfig { num_guards: 1, max_failures: 2, ..Default::default() };
+        let config = GuardConfig {
+            num_guards: 1,
+            max_failures: 2,
+            ..Default::default()
+        };
         let mut manager = GuardManager::new(config, None);
         manager.initialize(&relays).await.unwrap();
 
@@ -621,7 +680,10 @@ mod tests {
                 .iter()
                 .find(|g| g.descriptor.nickname == nickname)
                 .unwrap();
-            assert_eq!(entry.consecutive_failures, 3, "should have 3 failures before success");
+            assert_eq!(
+                entry.consecutive_failures, 3,
+                "should have 3 failures before success"
+            );
         }
 
         // A single success must drive consecutive_failures to 0.
@@ -637,5 +699,85 @@ mod tests {
             entry.consecutive_failures, 0,
             "consecutive_failures must be 0 after mark_success, not just decremented"
         );
+    }
+
+    #[test]
+    fn test_corrupt_guard_state_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad-guards.json");
+        std::fs::write(&path, "this is not valid json{{{").unwrap();
+        let result = GuardSet::load(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_guard_entry_mark_failure_saturates() {
+        let mut entry = GuardEntry::new(make_relays(1).remove(0));
+        entry.consecutive_failures = u32::MAX - 1;
+        entry.mark_failure();
+        assert_eq!(entry.consecutive_failures, u32::MAX);
+        entry.mark_failure();
+        assert_eq!(entry.consecutive_failures, u32::MAX);
+    }
+
+    #[test]
+    fn test_guard_entry_last_used_set_on_success() {
+        let mut entry = GuardEntry::new(make_relays(1).remove(0));
+        assert!(entry.last_used.is_none());
+        entry.mark_success();
+        assert!(entry.last_used.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_failure_counts_persist_across_restart() {
+        // Regression: gptl-client used to only call save() ONCE at startup,
+        // so every report_failure/report_success was forgotten on restart.
+        // The fix is a periodic flusher in main(); this test verifies the
+        // primitive that the flusher relies on — that save() → load()
+        // preserves consecutive_failures.
+        let relays = make_relays(3);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("guards.json");
+        let config = GuardConfig {
+            num_guards: 1,
+            max_failures: 5,
+            ..Default::default()
+        };
+
+        let nickname = {
+            let mut mgr = GuardManager::new(config.clone(), Some(path.clone()));
+            mgr.initialize(&relays).await.unwrap();
+            let nick = mgr.guard_set().guards[0].descriptor.nickname.clone();
+            mgr.report_failure(&nick);
+            mgr.report_failure(&nick);
+            mgr.report_failure(&nick);
+            mgr.save().await.unwrap();
+            nick
+        };
+
+        // Fresh manager loads the persisted state.
+        let mut mgr2 = GuardManager::new(config, Some(path));
+        mgr2.initialize(&relays).await.unwrap();
+        let entry = mgr2
+            .guard_set()
+            .guards
+            .iter()
+            .find(|g| g.descriptor.nickname == nickname)
+            .expect("the same guard should be loaded");
+        assert_eq!(
+            entry.consecutive_failures, 3,
+            "consecutive_failures must survive save+load; got {}",
+            entry.consecutive_failures
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_without_persist_path_works() {
+        let relays = make_relays(3);
+        let config = GuardConfig::default();
+        let mut manager = GuardManager::new(config, None);
+        manager.initialize(&relays).await.unwrap();
+        manager.save().await.unwrap();
+        assert!(manager.guard_set().guard_count() > 0);
     }
 }

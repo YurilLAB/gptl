@@ -18,6 +18,8 @@ pub mod webrtc_protection;
 pub mod sybil_defense;
 pub mod failover;
 pub mod circuit;
+pub mod rpki_rtr;
+pub mod transport_bridge;
 
 // Re-export failover types
 pub use failover::{
@@ -266,8 +268,16 @@ pub enum GuardLayer {
 /// Proof of work for resource allocation
 #[derive(Debug, Clone)]
 pub struct ProofOfWork {
+    /// Target difficulty (number of required leading zero bits in `hash`).
     pub difficulty: u32,
+    /// Caller-chosen circuit identifier mixed into the hash input.
+    /// The verifier recomputes `SHA256(circuit_id || nonce)` and rejects any
+    /// PoW whose submitted `hash` does not match — without this binding,
+    /// an attacker can submit `hash: vec![0; 32]` and pass verification.
+    pub circuit_id: u32,
+    /// Brute-force counter found by the prover.
     pub nonce: u64,
+    /// `SHA256(circuit_id.to_le_bytes() || nonce.to_le_bytes())`.
     pub hash: Vec<u8>,
 }
 

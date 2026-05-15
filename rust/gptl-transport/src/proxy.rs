@@ -23,8 +23,7 @@ use crate::{
     handshake::{client_finish, client_initiate},
     path::RelayPath,
     relay_conn::RelayConn,
-    socks5,
-    TransportError,
+    socks5, TransportError,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -49,6 +48,16 @@ pub struct ProxyConfig {
     /// `None`), the guard relay is used for first-hop selection; success/failure
     /// is reported back after each circuit completes.
     pub guard_manager: Option<Arc<Mutex<GuardManager>>>,
+    /// Optional circuit lifecycle observer.  Implementations in
+    /// `gptl-routing` wire this to the `CircuitHealthMonitor` and
+    /// `FailoverManager` so circuit success/failure events actually
+    /// drive selection.  Defaults to a no-op observer.
+    pub observer: crate::observer::SharedObserver,
+    /// Optional client-side metrics.  When `Some`, the accept loop
+    /// and SOCKS5 negotiator increment counters here directly.  The
+    /// observer / metrics-observer combo handles circuit-level
+    /// counters separately; see `MetricsObserver`.
+    pub metrics: Option<Arc<crate::metrics::ClientMetrics>>,
 }
 
 impl ProxyConfig {
@@ -60,7 +69,16 @@ impl ProxyConfig {
             hop_count: 1,
             pool_manager: None,
             guard_manager: None,
+            observer: crate::observer::noop_observer(),
+            metrics: None,
         }
+    }
+
+    /// Replace the circuit observer.  Chain after `new_single_hop` to
+    /// install monitoring without rebuilding the whole config.
+    pub fn with_observer(mut self, observer: crate::observer::SharedObserver) -> Self {
+        self.observer = observer;
+        self
     }
 }
 
@@ -68,7 +86,8 @@ impl ProxyConfig {
 ///
 /// This function runs forever (until the process exits or a fatal listener error).
 pub async fn run(config: ProxyConfig) -> Result<(), TransportError> {
-    let listener = TcpListener::bind(config.listen_addr).await
+    let listener = TcpListener::bind(config.listen_addr)
+        .await
         .map_err(|e| TransportError::Io(format!("bind {}: {}", config.listen_addr, e)))?;
 
     info!("GPTL SOCKS5 proxy listening on {}", config.listen_addr);
@@ -84,6 +103,10 @@ pub async fn run(config: ProxyConfig) -> Result<(), TransportError> {
             Err(e) => return Err(TransportError::Io(format!("accept failed: {}", e))),
         };
         debug!("SOCKS5 connection from {}", peer);
+        if let Some(ref m) = config.metrics {
+            m.socks5_accepted_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
 
         let cfg = config.clone();
         tokio::spawn(async move {
@@ -99,12 +122,58 @@ pub async fn run(config: ProxyConfig) -> Result<(), TransportError> {
 
 /// Handle one SOCKS5 client connection.
 async fn handle_connection(
-    mut client: TcpStream,
+    client: TcpStream,
     config: ProxyConfig,
 ) -> Result<(), TransportError> {
+    // Observer bookkeeping: classify each failure into a `FailureKind`,
+    // emit register/unregister/success/failure around the call to the
+    // real handler.  Tracking lives here (not inside the inner fn) so
+    // every early-return automatically reports the right event.
+    use crate::observer::FailureKind;
+    use std::time::Instant;
+    let observer = config.observer.clone();
+    let started = Instant::now();
+    let mut tracked: Option<(u32, String)> = None;
+    let stage_at_failure = std::sync::Arc::new(std::sync::Mutex::new(FailureKind::Other));
+    let stage_for_inner = stage_at_failure.clone();
+
+    let result =
+        handle_connection_inner(client, config, &mut tracked, stage_for_inner).await;
+
+    if let Some((circuit_id, entry_label)) = tracked {
+        match &result {
+            Ok(()) => {
+                observer.record_success(circuit_id, started.elapsed(), 0);
+                debug!("circuit {} via {} completed cleanly", circuit_id, entry_label);
+            }
+            Err(e) => {
+                let kind = *stage_at_failure.lock().unwrap();
+                observer.record_failure(circuit_id, kind, &e.to_string());
+            }
+        }
+        observer.unregister(circuit_id);
+    }
+    result
+}
+
+async fn handle_connection_inner(
+    mut client: TcpStream,
+    config: ProxyConfig,
+    tracked: &mut Option<(u32, String)>,
+    stage_at_failure: std::sync::Arc<std::sync::Mutex<crate::observer::FailureKind>>,
+) -> Result<(), TransportError> {
+    use crate::observer::FailureKind;
+    let set_stage = |k: FailureKind| {
+        *stage_at_failure.lock().unwrap() = k;
+    };
     // ── Step 1: SOCKS5 negotiation ────────────────────────────────────────────
     let request = socks5::negotiate(&mut client).await?;
+    if let Some(ref m) = config.metrics {
+        m.socks5_completed_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     debug!("SOCKS5 CONNECT {}:{}", request.host, request.port);
+    set_stage(FailureKind::Handshake);
 
     // ── Step 2: Acquire or build a circuit ───────────────────────────────────
     //
@@ -169,7 +238,10 @@ async fn handle_connection(
                     return Err(e);
                 }
             };
-            debug!("handshake complete with guard relay '{}'", relay_desc.nickname);
+            debug!(
+                "handshake complete with guard relay '{}'",
+                relay_desc.nickname
+            );
 
             let mut circuit = Circuit::new(circuit_id, keys, relay_conn);
 
@@ -183,17 +255,23 @@ async fn handle_connection(
                     })?
                     .clone();
 
+                set_stage(FailureKind::Extend);
                 if let Err(e) = circuit.extend(&relay2).await {
                     let mut gm = gm_arc.lock().await;
                     gm.report_failure(&relay_desc.nickname);
                     socks5::send_general_failure(&mut client).await;
                     return Err(e);
                 }
-                debug!("circuit {} extended to relay2 '{}'", circuit_id, relay2.nickname);
+                debug!(
+                    "circuit {} extended to relay2 '{}'",
+                    circuit_id, relay2.nickname
+                );
             }
 
             // Record the guard nickname in the path so we can report success later.
-            let path = RelayPath { hops: vec![relay_desc] };
+            let path = RelayPath {
+                hops: vec![relay_desc],
+            };
             (circuit, Some(path))
         } else {
             // ── (c) Legacy random-relay path ──────────────────────────────────
@@ -239,11 +317,15 @@ async fn handle_connection(
                     })?
                     .clone();
 
+                set_stage(FailureKind::Extend);
                 if let Err(e) = circuit.extend(&relay2).await {
                     socks5::send_general_failure(&mut client).await;
                     return Err(e);
                 }
-                debug!("circuit {} extended to relay2 '{}'", circuit_id, relay2.nickname);
+                debug!(
+                    "circuit {} extended to relay2 '{}'",
+                    circuit_id, relay2.nickname
+                );
             }
 
             (circuit, None)
@@ -251,41 +333,68 @@ async fn handle_connection(
 
     let circuit_id = circuit.circuit_id;
 
+    // Notify the observer that a circuit is now active.  We use the
+    // entry-relay nickname when we know it (pool / guard paths).
+    let entry_label = circuit_path_opt
+        .as_ref()
+        .map(|p| p.entry().nickname.clone())
+        .unwrap_or_else(|| "<random>".to_string());
+    config.observer.register(circuit_id, &entry_label);
+    *tracked = Some((circuit_id, entry_label));
+
+    // From here on, any failure is at the Stream stage.
+    set_stage(FailureKind::Stream);
+
     // ── Step 3: Open a stream to the destination ──────────────────────────────
     let mut stream = circuit.open_stream(&request.host, request.port).await?;
 
     // Bug 1 fix: use select! to race circuit stepping against wait_connected(),
     // instead of the double-timeout polling anti-pattern.
-    let connect_result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        async {
-            loop {
-                tokio::select! {
-                    result = circuit.step() => {
-                        result?;
-                    }
-                    result = stream.wait_connected() => {
-                        return result;
-                    }
+    let connect_result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                result = circuit.step() => {
+                    result?;
+                }
+                result = stream.wait_connected() => {
+                    return result;
                 }
             }
-        },
-    )
+        }
+    })
     .await
     .map_err(|_| TransportError::Protocol("relay connect timed out".into()));
 
-    if connect_result.is_err() {
-        // Report guard failure if we used one.
-        if let Some(ref gm_arc) = config.guard_manager {
-            if let Some(ref path) = circuit_path_opt {
-                let mut gm = gm_arc.lock().await;
-                gm.report_failure(&path.entry().nickname);
+    // `connect_result` is `Result<Result<(), TransportError>, _>`:
+    //   * outer Err → 30-second timeout fired
+    //   * inner Err → relay actively rejected the stream (e.g. RELAY_END
+    //     because the destination violates the relay exit policy:
+    //     loopback / RFC1918 / .local hostnames / unresolvable hostnames).
+    //
+    // Both paths MUST send a SOCKS5 failure reply before closing the TCP
+    // connection — otherwise curl sees `proxy closed connection` instead
+    // of a proper SOCKS5 status code.  The previous code only handled the
+    // outer Err and bare `??` propagated the inner Err without replying.
+    let inner = match connect_result {
+        Err(_timeout) => {
+            if let Some(ref gm_arc) = config.guard_manager {
+                if let Some(ref path) = circuit_path_opt {
+                    let mut gm = gm_arc.lock().await;
+                    gm.report_failure(&path.entry().nickname);
+                }
             }
+            socks5::send_general_failure(&mut client).await;
+            return Err(TransportError::Protocol("relay connect timed out".into()));
         }
-        socks5::send_general_failure(&mut client).await;
-        return connect_result.map_err(|_| TransportError::Protocol("relay connect timed out".into()))?;
+        Ok(inner) => inner,
+    };
+    if let Err(e) = inner {
+        // Reply BEFORE bubbling the error so the SOCKS5 client doesn't see
+        // a half-open TCP connection.  ConnectionRefused is the closest
+        // SOCKS5 reply code (0x05) for "upstream said no."
+        socks5::send_connection_refused(&mut client).await;
+        return Err(e);
     }
-    connect_result??;
 
     // Report guard success.
     if let Some(ref gm_arc) = config.guard_manager {
@@ -335,20 +444,54 @@ async fn splice(
 ) -> Result<(), TransportError> {
     let (circuit_error_tx, mut circuit_error_rx) = mpsc::channel::<TransportError>(1);
 
+    // Grab the padding-cell trigger BEFORE moving `circuit` into the step task.
+    let padding_trigger = circuit.padding_trigger();
+
+    // Cancellation signal for the step task — without this, every SOCKS5
+    // client disconnect leaked a circuit + TCP connection + tokio task
+    // because `step()` blocks on `conn.recv()` forever waiting for cells
+    // that will never come.  After ~200 requests on Windows the handle
+    // count grew by ~200; this fix tears the step loop down explicitly.
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown_step = shutdown.clone();
+
     // Run circuit.step() in its own task so it can always make progress.
     tokio::spawn(async move {
         loop {
-            match circuit.step().await {
-                Ok(()) => {}
-                Err(TransportError::CircuitClosed) => break,
-                Err(TransportError::ConnectionClosed) => break,
-                Err(e) => {
-                    let _ = circuit_error_tx.send(e).await;
-                    break;
+            tokio::select! {
+                _ = shutdown_step.notified() => break,
+                result = circuit.step() => {
+                    match result {
+                        Ok(()) => {}
+                        Err(TransportError::CircuitClosed) => break,
+                        Err(TransportError::ConnectionClosed) => break,
+                        Err(e) => {
+                            let _ = circuit_error_tx.send(e).await;
+                            break;
+                        }
+                    }
                 }
             }
         }
         circuit.destroy().await;
+    });
+
+    // Padding injection: trigger wire-level PADDING cells (random payload,
+    // consumed by the first hop) at random intervals to resist traffic
+    // analysis.  The cells flow through `Circuit::step()` via the dedicated
+    // padding_trigger channel, NOT through outbound_tx — that channel
+    // carries RelayCells which would arrive at the relay as garbage on an
+    // unknown stream and be discarded with a log warning.
+    let padding_task = tokio::spawn(async move {
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        loop {
+            let delay_ms = rng.gen_range(50..500);
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            if padding_trigger.send(()).await.is_err() {
+                break;
+            }
+        }
     });
 
     let mut client_buf = vec![0u8; 16384];
@@ -385,6 +528,11 @@ async fn splice(
         }
     }
 
+    padding_task.abort();
+    // Tell the step task to break out of its select so the circuit and its
+    // underlying TCP connection get torn down.  Without this every splice
+    // exit leaks the circuit task forever.
+    shutdown.notify_one();
     Ok(())
 }
 
@@ -410,7 +558,10 @@ mod tests {
         handshake::{relay_respond, RelayStaticKey},
         path::{PathConfig, PathSelector},
     };
-    use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
     use std::time::Duration;
     use tokio::net::TcpListener;
 
@@ -494,6 +645,8 @@ mod tests {
             hop_count: 1,
             pool_manager: None,
             guard_manager: Some(guard_manager),
+            observer: crate::observer::noop_observer(),
+            metrics: None,
         };
 
         // handle_connection requires a TcpStream.  Use a real loopback pair.
@@ -511,7 +664,10 @@ mod tests {
             use tokio::io::AsyncReadExt;
             let _ = stream.read_exact(&mut buf).await;
             // CONNECT to 127.0.0.1:80
-            stream.write_all(&[0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 80]).await.unwrap();
+            stream
+                .write_all(&[0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(500)).await;
         });
 
@@ -588,15 +744,26 @@ mod tests {
         });
         {
             // Build directly through the underlying pool so we can inspect size.
-            let pool_config2 = PoolConfig { size: 1, ..Default::default() };
+            let pool_config2 = PoolConfig {
+                size: 1,
+                ..Default::default()
+            };
             let mut pool = CircuitPool::new(pool_config2);
             pool.refill(&bootstrap, &selector, None).await;
-            assert_eq!(pool.available_count(), 1, "pool should have 1 circuit after refill");
+            assert_eq!(
+                pool.available_count(),
+                1,
+                "pool should have 1 circuit after refill"
+            );
 
             // Acquire removes it from the pool.
             let acquired = pool.acquire().await;
             assert!(acquired.is_some(), "should acquire a circuit");
-            assert_eq!(pool.available_count(), 0, "pool should be empty after acquire");
+            assert_eq!(
+                pool.available_count(),
+                0,
+                "pool should be empty after acquire"
+            );
 
             // Return the circuit back.
             let (circuit, path) = acquired.unwrap();
@@ -611,13 +778,18 @@ mod tests {
         }
 
         // Also verify through CircuitPoolManager API: acquire then return.
-        let (circuit, path) = manager.acquire_circuit().await
+        let (circuit, path) = manager
+            .acquire_circuit()
+            .await
             .expect("manager should build on-demand when pool is empty");
         manager.return_circuit(circuit, path).await;
         // After return_circuit the pool should have 1 circuit available.
         // (The manager wraps the pool in Arc<Mutex>; check via a second acquire.)
         let second = manager.acquire_circuit().await;
-        assert!(second.is_ok(), "second acquire should succeed after return_circuit");
+        assert!(
+            second.is_ok(),
+            "second acquire should succeed after return_circuit"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -641,7 +813,10 @@ mod tests {
 
         // pool_size = 0 means the pool stays empty and the manager falls back to
         // on-demand circuit construction via `acquire_circuit`.
-        let pool_config = PoolConfig { size: 0, ..Default::default() };
+        let pool_config = PoolConfig {
+            size: 0,
+            ..Default::default()
+        };
 
         let manager = Arc::new(CircuitPoolManager::new(
             pool_config,

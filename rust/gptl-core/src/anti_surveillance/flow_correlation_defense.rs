@@ -93,16 +93,30 @@ impl FlowCorrelationDefense {
         // Prevent unbounded growth - limit to 10,000 flows
         const MAX_FLOWS: usize = 10_000;
         if flows.len() >= MAX_FLOWS {
-            // Remove oldest flows (simple cleanup strategy)
-            let oldest_flows: Vec<u32> = flows
+            // First pass: evict flows older than 1 hour.
+            let stale: Vec<u32> = flows
                 .iter()
                 .filter(|(_, info)| info.start_time.elapsed() > Duration::from_secs(3600))
                 .map(|(id, _)| *id)
                 .take(MAX_FLOWS / 10)
                 .collect();
-
-            for id in oldest_flows {
+            for id in stale {
                 flows.remove(&id);
+            }
+
+            // Second pass: if still at the cap (no stale flows existed),
+            // evict the absolute oldest flows by start_time so the bound
+            // actually holds under sustained load.
+            if flows.len() >= MAX_FLOWS {
+                let mut by_age: Vec<(u32, std::time::Instant)> = flows
+                    .iter()
+                    .map(|(id, info)| (*id, info.start_time))
+                    .collect();
+                by_age.sort_by_key(|(_, t)| *t);
+                let evict = flows.len() - MAX_FLOWS + 1;
+                for (id, _) in by_age.into_iter().take(evict) {
+                    flows.remove(&id);
+                }
             }
         }
 

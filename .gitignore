@@ -25,5 +25,6 @@ desktop.ini
 # Logs
 *.log
 
-# Claude Code internal
+# Local scratchpads (never committed)
 CLAUDE.md
+gptl-skill.md

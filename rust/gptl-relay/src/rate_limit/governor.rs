@@ -1,31 +1,81 @@
-//! Governor-based Rate Limiting
+//! Governor-style Token Bucket Rate Limiting
 //!
-//! Token bucket rate limiting using the governor crate:
-//! - Burst capacity
-//! - Sustainable rate
-//! - Per-key rate limiting
+//! A self-contained token-bucket rate limiter with:
+//!   * sustainable rate (`replenish_per_second`),
+//!   * burst capacity,
+//!   * per-key (`KeyedRateLimiter`) buckets.
+//!
+//! The previous implementation was a stub: `check()` always returned
+//! `Ok(())`, meaning every caller bypassed rate limiting entirely. This
+//! version computes a real bucket level using a continuous-time refill
+//! model so it tolerates clock skips and idle periods.
 
-use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
-/// Simplified governor-based rate limiter wrapper
-/// Note: This is a simplified implementation for governor 0.2.0 compatibility
-#[derive(Debug, Clone)]
+/// Token-bucket rate limiter.
+#[derive(Debug)]
 pub struct GovernorRateLimiter {
-    /// Quota configuration
     quota: Quota,
+    state: Mutex<BucketState>,
+}
+
+#[derive(Debug)]
+struct BucketState {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+impl Clone for GovernorRateLimiter {
+    fn clone(&self) -> Self {
+        let s = self.state.lock().expect("bucket lock poisoned");
+        Self {
+            quota: self.quota,
+            state: Mutex::new(BucketState {
+                tokens: s.tokens,
+                last_refill: s.last_refill,
+            }),
+        }
+    }
 }
 
 impl GovernorRateLimiter {
-    /// Create a new rate limiter with the given quota
+    /// Create a new rate limiter with the given quota.  The bucket starts
+    /// full (one full burst available immediately).
     pub fn new(quota: Quota) -> Self {
-        Self { quota }
+        Self {
+            quota,
+            state: Mutex::new(BucketState {
+                tokens: quota.burst as f64,
+                last_refill: Instant::now(),
+            }),
+        }
     }
 
-    /// Check if a request can proceed (simplified - always allows for now)
+    /// Check (and consume) one token.  Returns `Err` with the retry-after
+    /// hint if the bucket is empty.
     pub fn check(&self) -> Result<(), RateLimitError> {
-        // Simplified implementation - in production, integrate with governor properly
-        Ok(())
+        let mut state = self.state.lock().expect("bucket lock poisoned");
+        let now = Instant::now();
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+        state.tokens = (state.tokens + elapsed * self.quota.replenish_per_second as f64)
+            .min(self.quota.burst as f64);
+        state.last_refill = now;
+
+        if state.tokens >= 1.0 {
+            state.tokens -= 1.0;
+            Ok(())
+        } else {
+            // How long until at least one full token replenishes.
+            let deficit = 1.0 - state.tokens;
+            let seconds = if self.quota.replenish_per_second == 0 {
+                u64::MAX
+            } else {
+                (deficit / self.quota.replenish_per_second as f64).ceil() as u64
+            };
+            Err(RateLimitError { retry_after: seconds.max(1) })
+        }
     }
 
     /// Get the quota configuration
@@ -40,7 +90,7 @@ impl GovernorRateLimiter {
         Self::new(quota)
     }
 
-    /// Create a strict rate limiter (no burst)
+    /// Create a strict rate limiter (burst == replenish rate).
     pub fn strict(requests_per_second: u32) -> Self {
         let quota = Quota::per_second(requests_per_second);
         Self::new(quota)
@@ -65,14 +115,14 @@ impl std::error::Error for RateLimitError {}
 /// Rate limit quota configuration
 #[derive(Debug, Clone, Copy)]
 pub struct Quota {
-    /// Burst capacity
+    /// Burst capacity (max tokens in the bucket)
     pub burst: u32,
-    /// Replenish rate (per second)
+    /// Replenish rate (tokens added per second)
     pub replenish_per_second: u32,
 }
 
 impl Quota {
-    /// Create a quota with the given replenish rate
+    /// Create a quota with the given replenish rate (burst == rate by default).
     pub fn per_second(replenish_per_second: u32) -> Self {
         Self {
             burst: replenish_per_second,
@@ -80,7 +130,7 @@ impl Quota {
         }
     }
 
-    /// Set burst capacity
+    /// Set burst capacity.
     pub fn with_burst(mut self, burst: u32) -> Self {
         self.burst = burst;
         self
@@ -156,18 +206,39 @@ mod tests {
     }
 
     #[test]
-    fn test_governor_rate_limiter() {
-        let limiter = GovernorRateLimiter::strict(10);
-        
-        // Simplified implementation always returns Ok
-        assert!(limiter.check().is_ok());
+    fn test_governor_burst_then_throttle() {
+        // burst=3, refill=1/s: first 3 requests pass, 4th fails.
+        let limiter = GovernorRateLimiter::new(Quota { burst: 3, replenish_per_second: 1 });
+        assert!(limiter.check().is_ok(), "1st request must pass (burst)");
+        assert!(limiter.check().is_ok(), "2nd request must pass (burst)");
+        assert!(limiter.check().is_ok(), "3rd request must pass (burst)");
+        assert!(limiter.check().is_err(), "4th request must be rate-limited");
     }
 
     #[test]
-    fn test_burst_rate_limiter() {
-        let limiter = GovernorRateLimiter::burst(5, 1);
-        
-        // Simplified implementation always returns Ok
+    fn test_governor_strict_rejects_second_request() {
+        let limiter = GovernorRateLimiter::strict(1);
         assert!(limiter.check().is_ok());
+        assert!(limiter.check().is_err(),
+            "strict(1) must reject a second back-to-back request");
+    }
+
+    #[test]
+    fn test_governor_replenishes_over_time() {
+        let limiter = GovernorRateLimiter::new(Quota { burst: 1, replenish_per_second: 1000 });
+        assert!(limiter.check().is_ok());
+        // 5ms is well over 1/1000s — bucket should refill.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(limiter.check().is_ok(),
+            "must allow after enough time has elapsed for a refill");
+    }
+
+    #[tokio::test]
+    async fn test_keyed_rate_limiter_independent_buckets() {
+        let kl: KeyedRateLimiter<&'static str> =
+            KeyedRateLimiter::new(Quota { burst: 1, replenish_per_second: 0 });
+        assert!(kl.check(&"a").await.is_ok());
+        assert!(kl.check(&"b").await.is_ok(), "different keys must have independent buckets");
+        assert!(kl.check(&"a").await.is_err(), "same key must reuse the bucket");
     }
 }

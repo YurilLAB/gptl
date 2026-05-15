@@ -16,8 +16,12 @@ pub mod crypto;
 pub mod guard;
 pub mod handshake;
 pub mod path;
+pub mod metrics;
+pub mod observer;
 pub mod proxy;
 pub mod relay_conn;
+pub mod relay_node;
+pub mod selftest;
 pub mod socks5;
 
 pub use bootstrap::{BootstrapConfig, RelayDescriptor};
@@ -28,8 +32,13 @@ pub use crypto::{CellCipher, CircuitCiphers, RelayCiphers};
 pub use guard::{GuardConfig, GuardManager, GuardSet};
 pub use handshake::{RelayStaticKey, SessionKeys};
 pub use path::{PathConfig, PathSelector, RelayPath};
-pub use proxy::{ProxyConfig, run as run_proxy};
+pub use metrics::{serve_metrics, ClientMetrics, RelayMetrics};
+pub use observer::{
+    noop_observer, CircuitObserver, CompositeObserver, FailureKind, NoopObserver, SharedObserver,
+};
+pub use proxy::{run as run_proxy, ProxyConfig};
 pub use relay_conn::RelayConn;
+pub use relay_node::{RelayNode, RelayOptions};
 pub use socks5::ConnectRequest;
 
 /// Top-level error type for the transport layer.

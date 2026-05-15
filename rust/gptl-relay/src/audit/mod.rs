@@ -226,7 +226,11 @@ impl AuditLogger {
             last_verified_sequence: 0,
         };
 
-        let mut expected_sequence = 0u64;
+        // After `archive_old_entries()` drops the oldest entries, the first
+        // remaining entry's sequence is no longer 0.  Anchor `expected_sequence`
+        // to that first sequence so verify_integrity() doesn't immediately
+        // flag broken_chain_at: 0 on every well-formed archived log.
+        let mut expected_sequence = storage.entries.front().map(|e| e.sequence).unwrap_or(0);
         let mut last_hash: Option<Vec<u8>> = None;
 
         for entry in &storage.entries {
@@ -360,8 +364,18 @@ impl AuditLogger {
 }
 
 impl Default for AuditLogger {
+    /// Build an audit logger with a freshly generated random 32-byte HMAC key.
+    ///
+    /// The previous implementation used `vec![0u8; 32]` — meaning any
+    /// code path that constructed `AuditLogger::default()` silently produced
+    /// HMAC signatures with an all-zero key, and any attacker aware of the
+    /// default could forge log entries whose `verify_integrity()` would
+    /// return true.  We now refuse to start with a predictable key.
     fn default() -> Self {
-        Self::new(vec![0u8; 32])
+        use rand::RngCore;
+        let mut key = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut key);
+        Self::new(key)
     }
 }
 
@@ -404,9 +418,23 @@ impl LogStorage {
             return;
         }
 
-        // Build leaf hashes
+        // RFC 6962 Certificate-Transparency-style domain separation:
+        //   leaf hash     = SHA256(0x00 || entry.hash)
+        //   internal node = SHA256(0x01 || left || right)
+        //
+        // Without these prefixes, the raw 32-byte concatenation of two leaf
+        // hashes is indistinguishable from a single internal-node input,
+        // letting an attacker forge a membership proof for a non-existent
+        // log entry by constructing an internal node whose preimage looks
+        // like a leaf.
         let mut hashes: Vec<Vec<u8>> = self.entries.iter()
-            .map(|e| hex_decode(&e.hash).unwrap_or_default())
+            .map(|e| {
+                let raw = hex_decode(&e.hash).unwrap_or_default();
+                let mut hasher = Sha256::new();
+                hasher.update([0x00u8]);
+                hasher.update(&raw);
+                hasher.finalize().to_vec()
+            })
             .collect();
 
         // Build tree bottom-up
@@ -414,16 +442,19 @@ impl LogStorage {
 
         while hashes.len() > 1 {
             let mut next_level = Vec::new();
-            
+
             for chunk in hashes.chunks(2) {
-                let combined = if chunk.len() == 2 {
-                    [chunk[0].as_slice(), chunk[1].as_slice()].concat()
+                let (left, right) = if chunk.len() == 2 {
+                    (chunk[0].as_slice(), chunk[1].as_slice())
                 } else {
-                    [chunk[0].as_slice(), chunk[0].as_slice()].concat()
+                    // Last odd node is duplicated.
+                    (chunk[0].as_slice(), chunk[0].as_slice())
                 };
 
                 let mut hasher = Sha256::new();
-                hasher.update(&combined);
+                hasher.update([0x01u8]);
+                hasher.update(left);
+                hasher.update(right);
                 next_level.push(hasher.finalize().to_vec());
             }
 
@@ -734,6 +765,40 @@ mod tests {
         assert_eq!(report.total_entries, 5);
         assert_eq!(report.valid_entries, 5);
         assert!(report.broken_chain_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_integrity_verification_survives_archival() {
+        // Regression: before fix, `verify_integrity()` anchored
+        // `expected_sequence` to 0, so once `archive_old_entries()` dropped
+        // the first entries, EVERY subsequent call reported
+        // `broken_chain_at: Some(0)`.  Now it anchors to the first remaining
+        // entry's sequence.
+        //
+        // Use a low max_memory_entries cap so archival fires quickly.
+        let logger = AuditLogger::new(vec![1u8; 32]).with_max_memory_entries(50);
+        let ctx = crate::SecurityContext::new("192.168.1.1".parse().unwrap());
+
+        for i in 0..1200usize {
+            let event = AuthEvent {
+                user_id: Some(format!("user{}", i)),
+                username: Some(format!("user{}", i)),
+                auth_method: "password".to_string(),
+                success: true,
+                failure_reason: None,
+                mfa_used: false,
+                client_cert: false,
+            };
+            logger.log_auth_attempt(event, &ctx).await.unwrap();
+        }
+
+        let report = logger.verify_integrity().await;
+        assert!(report.total_entries > 0 && report.total_entries <= 1000,
+            "archive must have trimmed; got total={}", report.total_entries);
+        assert!(report.broken_chain_at.is_none(),
+            "integrity must NOT flag a broken chain on a well-formed archived log; \
+             got broken_chain_at={:?} valid={} invalid={}",
+            report.broken_chain_at, report.valid_entries, report.invalid_entries);
     }
 
     #[tokio::test]

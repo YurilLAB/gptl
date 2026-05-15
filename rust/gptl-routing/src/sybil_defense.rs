@@ -617,18 +617,54 @@ impl BandwidthAuthority {
         }
     }
 
-    /// Measure relay bandwidth
+    /// Record a simulated measurement (50% of claimed) — kept for
+    /// backward compatibility with call sites that don't have a relay
+    /// address.  Prefer [`probe`] when an address is available.
     pub async fn measure(&mut self, identity: &str, claimed: u64) -> u64 {
-        // In production, actual bandwidth measurement
-        // For now, use conservative estimate
         let measured = claimed / 2;
-        
-        self.measurements.insert(identity.to_string(), BandwidthMeasurement {
-            claimed,
-            measured,
-            measurement_time: Instant::now(),
-        });
-        
+        self.measurements.insert(
+            identity.to_string(),
+            BandwidthMeasurement {
+                claimed,
+                measured,
+                measurement_time: Instant::now(),
+            },
+        );
+        measured
+    }
+
+    /// Probe a relay's actual bandwidth and record the measurement.
+    ///
+    /// Opens a TCP connection to `target` and pushes a known-size
+    /// payload, timing how long it takes to flush.  This is a
+    /// transport-level probe — it does NOT speak the GPTL circuit
+    /// protocol — so it captures the upper-bound throughput the relay
+    /// can advertise.  A relay claiming 1 Gbps that can only deliver
+    /// 50 Mbps over raw TCP is definitively inflating.
+    ///
+    /// On probe failure (connect refused, timeout) the measurement is
+    /// recorded as `0` so [`check_inflation`] will flag it.
+    ///
+    /// Returns the observed bytes-per-second.
+    pub async fn probe(
+        &mut self,
+        identity: &str,
+        target: std::net::SocketAddr,
+        claimed: u64,
+        probe_bytes: usize,
+        timeout: Duration,
+    ) -> u64 {
+        let measured = tcp_throughput_probe(target, probe_bytes, timeout)
+            .await
+            .unwrap_or(0);
+        self.measurements.insert(
+            identity.to_string(),
+            BandwidthMeasurement {
+                claimed,
+                measured,
+                measurement_time: Instant::now(),
+            },
+        );
         measured
     }
 
@@ -640,6 +676,41 @@ impl BandwidthAuthority {
         }
         false
     }
+}
+
+/// Open a TCP connection to `target` and push `probe_bytes` to it,
+/// returning the observed throughput in bytes-per-second.
+///
+/// This is the underlying primitive [`BandwidthAuthority::probe`] uses
+/// to detect bandwidth inflation.  We send into the socket and time
+/// until the write completes; this captures the slower of "OS send
+/// buffer + path bandwidth" which is close enough for inflation
+/// detection.  Returns `None` on connect or write failure (which the
+/// caller records as `0` measured bandwidth).
+async fn tcp_throughput_probe(
+    target: std::net::SocketAddr,
+    probe_bytes: usize,
+    timeout: Duration,
+) -> Option<u64> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    let fut = async move {
+        let mut stream = TcpStream::connect(target).await.ok()?;
+        let _ = stream.set_nodelay(true);
+        let payload = vec![0u8; probe_bytes];
+        let started = Instant::now();
+        stream.write_all(&payload).await.ok()?;
+        stream.flush().await.ok()?;
+        let elapsed = started.elapsed();
+        let _ = stream.shutdown().await;
+        if elapsed.is_zero() {
+            return Some(u64::MAX);
+        }
+        let bps = (probe_bytes as f64 / elapsed.as_secs_f64()) as u64;
+        Some(bps)
+    };
+    tokio::time::timeout(timeout, fut).await.ok().flatten()
 }
 
 /// Social trust network
@@ -891,6 +962,76 @@ mod tests {
 
         // Check for inflation
         assert!(authority.check_inflation("test-relay", 1.5));
+    }
+
+    #[tokio::test]
+    async fn test_probe_against_local_sink_records_realistic_throughput() {
+        // Spawn a TCP "sink" that just drains everything quickly.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            loop {
+                let (mut s, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 65536];
+                    loop {
+                        if s.read(&mut buf).await.unwrap_or(0) == 0 {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let mut authority = BandwidthAuthority::new();
+        // Push 64 KB; loopback should drain it well under 1 s.
+        let measured = authority
+            .probe(
+                "local-sink",
+                addr,
+                100_000_000, // claimed: 100 MB/s
+                64 * 1024,
+                Duration::from_secs(2),
+            )
+            .await;
+
+        assert!(measured > 0, "loopback probe must observe nonzero throughput");
+        // Loopback can EASILY exceed any reasonable claim; we just want
+        // a real (non-zero, non-stub) measurement here.
+        let recorded = authority
+            .measurements
+            .get("local-sink")
+            .expect("measurement must be recorded");
+        assert_eq!(recorded.measured, measured);
+    }
+
+    #[tokio::test]
+    async fn test_probe_unreachable_target_records_zero() {
+        // Bind then drop so the port is definitely refused.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut authority = BandwidthAuthority::new();
+        let measured = authority
+            .probe(
+                "dead-relay",
+                addr,
+                100_000_000,
+                4096,
+                Duration::from_millis(500),
+            )
+            .await;
+        assert_eq!(measured, 0, "unreachable target must produce zero measurement");
+        // And `check_inflation` should fire because claimed/measured.max(1) > threshold.
+        assert!(
+            authority.check_inflation("dead-relay", 2.0),
+            "unreachable relay claiming 100 MB/s must be flagged as inflated"
+        );
     }
 
     #[test]

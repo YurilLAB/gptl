@@ -31,7 +31,10 @@ impl CellCipher {
     /// Encrypt a 491-byte plaintext into a 507-byte payload (in-place + appended tag).
     ///
     /// The returned array is exactly `CELL_PAYLOAD_LEN` (507) bytes.
-    pub fn encrypt(&mut self, plaintext: &[u8; RELAY_PLAINTEXT_LEN]) -> Result<[u8; CELL_PAYLOAD_LEN], TransportError> {
+    pub fn encrypt(
+        &mut self,
+        plaintext: &[u8; RELAY_PLAINTEXT_LEN],
+    ) -> Result<[u8; CELL_PAYLOAD_LEN], TransportError> {
         let nonce = self.next_nonce()?;
         let mut buf = plaintext.to_vec();
         self.cipher
@@ -44,12 +47,17 @@ impl CellCipher {
     }
 
     /// Decrypt a 507-byte cell payload into a 491-byte plaintext.
-    pub fn decrypt(&mut self, ciphertext: &[u8; CELL_PAYLOAD_LEN]) -> Result<[u8; RELAY_PLAINTEXT_LEN], TransportError> {
+    pub fn decrypt(
+        &mut self,
+        ciphertext: &[u8; CELL_PAYLOAD_LEN],
+    ) -> Result<[u8; RELAY_PLAINTEXT_LEN], TransportError> {
         let nonce = self.next_nonce()?;
         let mut buf = ciphertext.to_vec();
         self.cipher
             .decrypt_in_place(&nonce, b"", &mut buf)
-            .map_err(|_| TransportError::Crypto("decryption failed — authentication tag mismatch".into()))?;
+            .map_err(|_| {
+                TransportError::Crypto("decryption failed — authentication tag mismatch".into())
+            })?;
         // buf is now 507 - 16 = 491 bytes
         let mut out = [0u8; RELAY_PLAINTEXT_LEN];
         out.copy_from_slice(&buf);
@@ -85,9 +93,11 @@ impl CellCipher {
         let mut buf = ciphertext.to_vec();
         self.cipher
             .decrypt_in_place(&nonce, b"", &mut buf)
-            .map_err(|_| TransportError::Crypto(
-                "inner decryption failed — authentication tag mismatch".into(),
-            ))?;
+            .map_err(|_| {
+                TransportError::Crypto(
+                    "inner decryption failed — authentication tag mismatch".into(),
+                )
+            })?;
         // buf is now 486 - 16 = 470 bytes
         let mut out = [0u8; RELAY_INNER_PLAINTEXT_LEN];
         out.copy_from_slice(&buf);
@@ -101,7 +111,9 @@ impl CellCipher {
 
     fn next_nonce(&mut self) -> Result<Nonce, TransportError> {
         let c = self.counter;
-        self.counter = self.counter.checked_add(1)
+        self.counter = self
+            .counter
+            .checked_add(1)
             .ok_or_else(|| TransportError::Crypto("nonce counter exhausted (2^64 cells)".into()))?;
         let mut nonce = [0u8; 12];
         nonce[0..8].copy_from_slice(&c.to_be_bytes());
@@ -361,7 +373,38 @@ mod tests {
         assert_eq!(enc.counter(), 0);
         let _ = enc.encrypt(&[0u8; RELAY_PLAINTEXT_LEN]).unwrap();
         assert_eq!(enc.counter(), 1);
-        let _ = enc.encrypt_inner(&[0u8; RELAY_INNER_PLAINTEXT_LEN]).unwrap();
+        let _ = enc
+            .encrypt_inner(&[0u8; RELAY_INNER_PLAINTEXT_LEN])
+            .unwrap();
         assert_eq!(enc.counter(), 2);
+    }
+
+    #[test]
+    fn test_circuit_ciphers_client_relay_roundtrip() {
+        let fwd_key = random_key();
+        let bwd_key = random_key();
+        let mut client = CircuitCiphers::new(&fwd_key, &bwd_key);
+        let mut relay = RelayCiphers::new(&fwd_key, &bwd_key);
+
+        let plaintext = random_plaintext();
+        let ct = client.outbound.encrypt(&plaintext).unwrap();
+        let recovered = relay.inbound.decrypt(&ct).unwrap();
+        assert_eq!(plaintext, recovered);
+
+        let plaintext2 = random_plaintext();
+        let ct2 = relay.outbound.encrypt(&plaintext2).unwrap();
+        let recovered2 = client.inbound.decrypt(&ct2).unwrap();
+        assert_eq!(plaintext2, recovered2);
+    }
+
+    #[test]
+    fn test_cross_direction_decrypt_fails() {
+        let fwd_key = random_key();
+        let bwd_key = random_key();
+        let mut client = CircuitCiphers::new(&fwd_key, &bwd_key);
+
+        let plaintext = random_plaintext();
+        let ct = client.outbound.encrypt(&plaintext).unwrap();
+        assert!(client.inbound.decrypt(&ct).is_err());
     }
 }

@@ -25,17 +25,22 @@ pub struct RelayDescriptor {
 impl RelayDescriptor {
     /// Parse the hex pubkey into 32 bytes.
     pub fn pubkey_bytes(&self) -> Result<[u8; 32], TransportError> {
-        let bytes = hex::decode(&self.pubkey_hex)
-            .map_err(|e| TransportError::Bootstrap(format!("invalid pubkey hex in '{}': {}", self.nickname, e)))?;
-        bytes.try_into().map_err(|_| TransportError::Bootstrap(
-            format!("pubkey for '{}' must be 32 bytes (64 hex chars)", self.nickname),
-        ))
+        let bytes = hex::decode(&self.pubkey_hex).map_err(|e| {
+            TransportError::Bootstrap(format!("invalid pubkey hex in '{}': {}", self.nickname, e))
+        })?;
+        bytes.try_into().map_err(|_| {
+            TransportError::Bootstrap(format!(
+                "pubkey for '{}' must be 32 bytes (64 hex chars)",
+                self.nickname
+            ))
+        })
     }
 
     /// Parse and resolve the socket address.
     pub fn socket_addr(&self) -> Result<SocketAddr, TransportError> {
-        self.address.parse::<SocketAddr>()
-            .map_err(|e| TransportError::Bootstrap(format!("invalid address '{}': {}", self.address, e)))
+        self.address.parse::<SocketAddr>().map_err(|e| {
+            TransportError::Bootstrap(format!("invalid address '{}': {}", self.address, e))
+        })
     }
 }
 
@@ -80,8 +85,11 @@ impl BootstrapConfig {
     ///
     /// Used when building multi-hop circuits to ensure relay1 ≠ relay2.
     pub fn pick_relay_excluding(&self, excluded: &str) -> Option<&RelayDescriptor> {
-        let candidates: Vec<&RelayDescriptor> =
-            self.relays.iter().filter(|r| r.nickname != excluded).collect();
+        let candidates: Vec<&RelayDescriptor> = self
+            .relays
+            .iter()
+            .filter(|r| r.nickname != excluded)
+            .collect();
         if candidates.is_empty() {
             return None;
         }
@@ -93,7 +101,9 @@ impl BootstrapConfig {
     /// Validate all descriptors (parseable addresses, well-formed pubkeys, no duplicates).
     pub fn validate(&self) -> Result<(), TransportError> {
         if self.relays.is_empty() {
-            return Err(TransportError::Bootstrap("directory is empty — add at least one relay".into()));
+            return Err(TransportError::Bootstrap(
+                "directory is empty — add at least one relay".into(),
+            ));
         }
 
         let mut seen_nicknames = std::collections::HashSet::new();
@@ -104,14 +114,16 @@ impl BootstrapConfig {
             r.socket_addr()?;
 
             if !seen_nicknames.insert(r.nickname.as_str()) {
-                return Err(TransportError::Bootstrap(
-                    format!("duplicate relay nickname '{}'", r.nickname),
-                ));
+                return Err(TransportError::Bootstrap(format!(
+                    "duplicate relay nickname '{}'",
+                    r.nickname
+                )));
             }
             if !seen_pubkeys.insert(r.pubkey_hex.as_str()) {
-                return Err(TransportError::Bootstrap(
-                    format!("duplicate relay pubkey in entry '{}'", r.nickname),
-                ));
+                return Err(TransportError::Bootstrap(format!(
+                    "duplicate relay pubkey in entry '{}'",
+                    r.nickname
+                )));
             }
         }
         Ok(())
@@ -321,5 +333,48 @@ mod tests {
         save_bootstrap(&config, &path).unwrap();
         let loaded = BootstrapConfig::from_json_file(&path).unwrap();
         assert_eq!(loaded.relays[0].pubkey_hex, config.relays[0].pubkey_hex);
+    }
+
+    #[test]
+    fn test_pick_relay_excluding_returns_different_relay() {
+        let key1 = RelayStaticKey::generate();
+        let key2 = RelayStaticKey::generate();
+        let config = BootstrapConfig {
+            relays: vec![
+                RelayDescriptor {
+                    nickname: "relay-a".into(),
+                    address: "127.0.0.1:9001".into(),
+                    pubkey_hex: hex::encode(key1.public),
+                },
+                RelayDescriptor {
+                    nickname: "relay-b".into(),
+                    address: "127.0.0.1:9002".into(),
+                    pubkey_hex: hex::encode(key2.public),
+                },
+            ],
+        };
+        for _ in 0..20 {
+            let picked = config.pick_relay_excluding("relay-a").unwrap();
+            assert_eq!(picked.nickname, "relay-b");
+        }
+    }
+
+    #[test]
+    fn test_pick_relay_excluding_all_returns_none() {
+        let key = RelayStaticKey::generate();
+        let config = BootstrapConfig {
+            relays: vec![RelayDescriptor {
+                nickname: "only-one".into(),
+                address: "127.0.0.1:9001".into(),
+                pubkey_hex: hex::encode(key.public),
+            }],
+        };
+        assert!(config.pick_relay_excluding("only-one").is_none());
+    }
+
+    #[test]
+    fn test_from_json_str_invalid_json_returns_error() {
+        let result = BootstrapConfig::from_json_str("not json");
+        assert!(result.is_err());
     }
 }

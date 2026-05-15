@@ -26,9 +26,9 @@ pub struct ConnectRequest {
 /// SOCKS5 reply codes (RFC 1928 §6).
 #[repr(u8)]
 enum ReplyCode {
-    Succeeded           = 0x00,
-    GeneralFailure      = 0x01,
-    ConnectionRefused   = 0x05,
+    Succeeded = 0x00,
+    GeneralFailure = 0x01,
+    ConnectionRefused = 0x05,
     CommandNotSupported = 0x07,
     AddressNotSupported = 0x08,
 }
@@ -43,7 +43,10 @@ pub async fn negotiate(stream: &mut TcpStream) -> Result<ConnectRequest, Transpo
     // Client: VER(1) NMETHODS(1) METHODS(N)
     let ver = stream.read_u8().await.map_err(io_err)?;
     if ver != 0x05 {
-        return Err(TransportError::Socks5(format!("unsupported SOCKS version {}", ver)));
+        return Err(TransportError::Socks5(format!(
+            "unsupported SOCKS version {}",
+            ver
+        )));
     }
     let n_methods = stream.read_u8().await.map_err(io_err)? as usize;
     if n_methods == 0 {
@@ -56,7 +59,9 @@ pub async fn negotiate(stream: &mut TcpStream) -> Result<ConnectRequest, Transpo
     if !methods.contains(&0x00) {
         // Tell client: no acceptable methods
         stream.write_all(&[0x05, 0xFF]).await.map_err(io_err)?;
-        return Err(TransportError::Socks5("client offered no supported auth methods".into()));
+        return Err(TransportError::Socks5(
+            "client offered no supported auth methods".into(),
+        ));
     }
     // Select NO_AUTH
     stream.write_all(&[0x05, 0x00]).await.map_err(io_err)?;
@@ -72,7 +77,10 @@ pub async fn negotiate(stream: &mut TcpStream) -> Result<ConnectRequest, Transpo
     if header[1] != 0x01 {
         // Only CONNECT is supported
         send_reply(stream, ReplyCode::CommandNotSupported).await;
-        return Err(TransportError::Socks5(format!("unsupported command 0x{:02x}", header[1])));
+        return Err(TransportError::Socks5(format!(
+            "unsupported command 0x{:02x}",
+            header[1]
+        )));
     }
     // header[2] is RSV — ignored
 
@@ -108,7 +116,10 @@ pub async fn negotiate(stream: &mut TcpStream) -> Result<ConnectRequest, Transpo
         }
         atyp => {
             send_reply(stream, ReplyCode::AddressNotSupported).await;
-            return Err(TransportError::Socks5(format!("unsupported address type 0x{:02x}", atyp)));
+            return Err(TransportError::Socks5(format!(
+                "unsupported address type 0x{:02x}",
+                atyp
+            )));
         }
     };
 
@@ -139,12 +150,12 @@ async fn send_reply(stream: &mut TcpStream, code: ReplyCode) {
     // REP format: VER RSV REP RSV ATYP BND.ADDR(4) BND.PORT(2)
     // We bind to 0.0.0.0:0 since we're a proxy
     let reply = [
-        0x05,         // VER
-        code as u8,   // REP
-        0x00,         // RSV
-        0x01,         // ATYP: IPv4
-        0, 0, 0, 0,   // BND.ADDR: 0.0.0.0
-        0, 0,         // BND.PORT: 0
+        0x05,       // VER
+        code as u8, // REP
+        0x00,       // RSV
+        0x01,       // ATYP: IPv4
+        0, 0, 0, 0, // BND.ADDR: 0.0.0.0
+        0, 0, // BND.PORT: 0
     ];
     if let Err(e) = stream.write_all(&reply).await {
         debug!("SOCKS5 send_reply: write failed: {}", e);
@@ -180,8 +191,13 @@ mod tests {
 
     fn socks5_domain_request(domain: &str, port: u16) -> Vec<u8> {
         let mut buf = vec![
-            0x05, 0x01, 0x00, // VER NMETHODS METHODS[NO_AUTH]
-            0x05, 0x01, 0x00, 0x03, // VER CMD RSV ATYP=domain
+            0x05,
+            0x01,
+            0x00, // VER NMETHODS METHODS[NO_AUTH]
+            0x05,
+            0x01,
+            0x00,
+            0x03, // VER CMD RSV ATYP=domain
             domain.len() as u8,
         ];
         buf.extend_from_slice(domain.as_bytes());
@@ -239,7 +255,7 @@ mod tests {
             0x05, 0x03, 0x00, 0x01, // CMD=UDP ASSOCIATE
         ];
         bytes.extend_from_slice(&[0, 0, 0, 0]); // addr
-        bytes.extend_from_slice(&[0, 80]);       // port
+        bytes.extend_from_slice(&[0, 80]); // port
         let result = client_sends(bytes).await;
         assert!(result.is_err());
     }
@@ -267,8 +283,8 @@ mod tests {
         let bytes = vec![
             0x05, 0x01, 0x00, // negotiation
             0x05, 0x01, 0x00, 0x03, // ATYP=domain
-            0x00,             // len=0
-            0x01, 0xBB,       // port 443
+            0x00, // len=0
+            0x01, 0xBB, // port 443
         ];
         let result = client_sends(bytes).await;
         assert!(result.is_err());
@@ -302,5 +318,66 @@ mod tests {
         buf.extend_from_slice(&443u16.to_be_bytes());
         let req = client_sends(buf).await.unwrap();
         assert_eq!(req.host, "foo.com");
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_connect_request_parsed() {
+        let mut buf = vec![0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x04];
+        buf.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        buf.extend_from_slice(&8080u16.to_be_bytes());
+        let req = client_sends(buf).await.unwrap();
+        assert_eq!(req.host, "[::1]");
+        assert_eq!(req.port, 8080);
+    }
+
+    #[tokio::test]
+    async fn test_send_connection_refused_writes_socks5_reply_5() {
+        // Regression: on relay-side rejection (exit policy violation, DNS
+        // failure), the proxy must emit a SOCKS5 reply byte with REP=0x05
+        // before closing.  Otherwise curl reports
+        // "Failed to receive SOCKS response, proxy closed connection."
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            send_connection_refused(&mut stream).await;
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        server.await.unwrap();
+
+        let mut buf = [0u8; 10];
+        client.read_exact(&mut buf).await.unwrap();
+        // Format: VER(05) REP(?) RSV(00) ATYP(01 = IPv4) BND.ADDR(4) BND.PORT(2)
+        assert_eq!(buf[0], 0x05, "VER must be 5");
+        assert_eq!(buf[1], 0x05, "REP must be 0x05 (ConnectionRefused)");
+        assert_eq!(buf[2], 0x00, "RSV must be 0");
+        assert_eq!(buf[3], 0x01, "ATYP must be IPv4");
+    }
+
+    #[tokio::test]
+    async fn test_send_general_failure_writes_socks5_reply_1() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            send_general_failure(&mut stream).await;
+        });
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        server.await.unwrap();
+
+        let mut buf = [0u8; 10];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf[0], 0x05);
+        assert_eq!(buf[1], 0x01, "REP must be 0x01 (GeneralFailure)");
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_full_address_parsed() {
+        let mut buf = vec![0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x04];
+        buf.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        let req = client_sends(buf).await.unwrap();
+        assert_eq!(req.host, "[2001:db8::1]");
+        assert_eq!(req.port, 443);
     }
 }

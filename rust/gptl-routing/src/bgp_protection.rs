@@ -229,19 +229,26 @@ impl BgpGuard {
 
 #[allow(dead_code)]
 impl RpkiValidator {
-    /// Validate prefix against ROAs (2025 best practices)
+    /// Look up a prefix in the local ROA cache.
+    ///
+    /// Returns `true` when the prefix has a non-expired ROA, `false`
+    /// otherwise.  The previous implementation returned `true` for any
+    /// prefix (even ones never seen) "to avoid blocking legitimate
+    /// traffic" — that's a vacuous validator.  Callers should treat
+    /// "not in cache" as `RpkiValidationState::NotFound` (via the
+    /// `validate_route_origin` method below) rather than as an implicit
+    /// pass.  Refresh the cache periodically via `fetch_roas`.
     async fn validate_prefix(&self, prefix: &str) -> bool {
-        // Check if prefix has valid ROA
         if let Some(roa) = self.roa_cache.get(prefix) {
             if roa.valid_until > Instant::now() {
                 return true;
             }
         }
-
-        // In production, query RPKI validators via RTR protocol (RFC 8210)
-        // For now, return true to avoid blocking legitimate traffic
-        tracing::debug!("RPKI validation performed");
-        true
+        tracing::debug!(
+            "RPKI cache miss for {} (refresh via fetch_roas)",
+            prefix
+        );
+        false
     }
 
     /// Update ROA cache from RPKI validator
@@ -252,35 +259,55 @@ impl RpkiValidator {
         self.last_update = Instant::now();
     }
 
-    /// Fetch ROAs from RPKI validator (RFC 8210 RTR protocol)
+    /// Fetch ROAs from an RPKI validator over the RTR protocol (RFC 8210).
+    ///
+    /// `validator_url` accepts either `"host:port"` or a bare hostname
+    /// (in which case the standard RTR port 8282 is used).  Well-known
+    /// public RTR caches:
+    ///   * `rtr.rpki.cloudflare.com:8282`
+    ///   * `rpki-validator.ripe.net:8323`
+    ///   * `rpki.arin.net:8282`
     pub async fn fetch_roas(&mut self, validator_url: &str) -> Result<(), String> {
-        // 2025 best practice: Use multiple RPKI validators for redundancy
-        // Recommended validators:
-        // - Cloudflare: rtr.rpki.cloudflare.com:8282
-        // - RIPE NCC: rpki-validator.ripe.net:8323
-        // - ARIN: rpki.arin.net:8282
+        use crate::rpki_rtr::{fetch_snapshot, RtrError};
+        tracing::info!("RTR fetch_snapshot from {}", validator_url);
 
-        // In production, implement RTR protocol client
-        // For now, simulate ROA fetch
-        tracing::info!("Fetching ROAs from RPKI validator: {}", validator_url);
+        let (host, port) = match validator_url.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(8282)),
+            None => (validator_url.to_string(), 8282u16),
+        };
 
-        // Example ROA entries (would come from validator)
-        let example_roas = vec![
-            RoaEntry {
-                prefix: "1.0.0.0/24".to_string(),
-                origin_as: 13335, // Cloudflare
-                max_length: 24,
-                valid_until: Instant::now() + Duration::from_secs(86400),
-            },
-            RoaEntry {
-                prefix: "8.8.8.0/24".to_string(),
-                origin_as: 15169, // Google
-                max_length: 24,
-                valid_until: Instant::now() + Duration::from_secs(86400),
-            },
-        ];
+        let snapshot = fetch_snapshot(&host, port, Duration::from_secs(60))
+            .await
+            .map_err(|e: RtrError| format!("RTR fetch from {}: {}", validator_url, e))?;
 
-        self.update_roa_cache(example_roas).await;
+        tracing::info!(
+            "RTR snapshot: session {} serial {} ({} prefixes, version {})",
+            snapshot.session_id,
+            snapshot.serial,
+            snapshot.prefixes.len(),
+            snapshot.version,
+        );
+
+        // Convert wire-format prefixes into the internal RoaEntry cache.
+        // Withdrawal records (announce == false) are ignored on a Reset-
+        // Query snapshot — the validator is sending us the complete current
+        // state.  Validity window: ROAs are valid until the next refresh
+        // (typically 1 hour); cap entries at 24 h so a missed refresh
+        // doesn't keep stale routes pinned indefinitely.
+        let valid_until = Instant::now() + Duration::from_secs(86400);
+        let entries: Vec<RoaEntry> = snapshot
+            .prefixes
+            .into_iter()
+            .filter(|p| p.announce)
+            .map(|p| RoaEntry {
+                prefix: format!("{}/{}", p.prefix, p.prefix_len),
+                origin_as: p.origin_as,
+                max_length: p.max_length,
+                valid_until,
+            })
+            .collect();
+
+        self.update_roa_cache(entries).await;
         Ok(())
     }
 

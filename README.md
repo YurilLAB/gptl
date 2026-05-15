@@ -161,6 +161,21 @@ User-facing command-line interface (`gptl` binary):
 - User profiles: `~/.config/gptl/profiles/<name>.toml`
 - Security-sensitive changes require confirmation; use `-y`/`--yes` for scripting
 
+### `gptl-transport`
+Wire-level transport layer:
+
+- **Cell protocol** — Fixed 512-byte cells resist traffic-size analysis
+- **ntor-lite handshake** — X25519 + HKDF-SHA256 key agreement with HMAC key confirmation
+- **Per-circuit encryption** — ChaCha20-Poly1305 with counter-based nonces (replay-immune)
+- **Multi-hop circuits** — Two-hop layered encryption via circuit extension
+- **SOCKS5 proxy** — RFC 1928 client interface with IPv4, IPv6, and domain support
+- **Guard persistence** — Persistent entry guards with rotation and failure tracking
+- **Circuit pool** — Pre-built circuits with age/stream expiration and background refill
+- **Exit policy** — Blocks connections to private/localhost addresses and SMTP ports
+- **Resource limits** — Per-relay caps on concurrent circuits, streams per circuit, and circuit lifetime
+- **Padding injection** — Random-interval padding cells during data transfer for traffic analysis resistance
+- **Constant-time comparison** — All cryptographic comparisons use the `subtle` crate
+
 ### `gptl-relay`
 Enterprise relay server with multi-layer security:
 
@@ -315,6 +330,10 @@ cargo test sybil_defense
 - **Forward secrecy**: Double Ratchet ratcheting ensures past sessions remain secure
 - **Bounded resource usage**: All data structures have growth limits to prevent DoS
 - **Tamper-evident logging**: Merkle tree-backed audit log with cryptographic integrity
+- **Relay exit policy**: Private addresses (127.0.0.0/8, 10.0.0.0/8, 192.168.0.0/16, etc.) and SMTP ports blocked
+- **Relay resource limits**: Concurrent circuit cap, per-circuit stream cap, handshake timeout, circuit lifetime limit
+- **Traffic padding**: Random-interval padding cells injected during active connections
+- **Key material hygiene**: Session keys are non-cloneable and zeroized on drop
 
 ## Contributing
 

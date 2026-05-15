@@ -199,11 +199,13 @@ impl KeyRatchet {
 
         *self.root_key = new_root_key;
         *self.send_chain_key = new_chain_key;
-        // recv_chain_key is updated when the next DH ratchet from the other side is processed
-        *self.recv_chain_key = Self::hkdf_derive(&dh_output.0, &new_root_key, b"ratchet-recv-key");
-
+        // recv_chain_key is updated when a NEW DH public key is received from the
+        // remote party (the receiving-side ratchet step). Updating it here from
+        // our own DH output would break the symmetric chain — the remote's
+        // send chain (derived from the same dh_output with the same KDF inputs)
+        // would not match our recv chain.
         self.send_count = 0;
-        self.recv_count = 0;
+        // recv_count is reset on the receiving-side DH step, not here.
 
         Ok(())
     }

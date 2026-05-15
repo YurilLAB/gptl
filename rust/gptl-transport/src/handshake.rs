@@ -23,18 +23,21 @@
 //!   forward_key  = okm[0..32]   (client→relay AE key)
 //!   backward_key = okm[32..64]  (relay→client AE key)
 
-use crate::{cell::{Cell, CellType}, TransportError};
+use crate::{
+    cell::{Cell, CellType},
+    TransportError,
+};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public, StaticSecret};
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Derived session keys for one circuit direction.
-#[derive(Clone)]
 pub struct SessionKeys {
     /// Client→relay ChaCha20Poly1305 key (32 bytes)
     pub forward_key: Zeroizing<[u8; 32]>,
@@ -133,7 +136,9 @@ pub fn client_finish(
     let relay_ephemeral_pub = X25519Public::from(relay_ephemeral_pub_bytes);
 
     // Two ECDH computations — client uses ephemeral priv against both relay keys
-    let ephemeral_priv = state.client_ephemeral_priv.take()
+    let ephemeral_priv = state
+        .client_ephemeral_priv
+        .take()
         .ok_or_else(|| TransportError::Handshake("handshake already consumed".into()))?;
 
     let dh2_shared = ephemeral_priv.diffie_hellman(&relay_ephemeral_pub);
@@ -156,7 +161,7 @@ pub fn client_finish(
 
     // Verify key confirmation
     let expected = compute_confirmation(&keys.forward_key)?;
-    if !constant_time_eq(&expected, &received_confirmation) {
+    if expected.ct_eq(&received_confirmation).unwrap_u8() != 1 {
         return Err(TransportError::Handshake(
             "key confirmation mismatch — relay authentication failed".into(),
         ));
@@ -225,18 +230,18 @@ pub fn relay_respond(
     }
 
     // Parse CREATE payload — use map_err instead of unwrap for untrusted input
-    let client_fp: [u8; 32] = create.payload[0..32]
-        .try_into()
-        .map_err(|_| TransportError::Handshake("fingerprint field truncated in CREATE cell".into()))?;
-    let client_ephemeral_pub_bytes: [u8; 32] = create.payload[32..64]
-        .try_into()
-        .map_err(|_| TransportError::Handshake("ephemeral pubkey field truncated in CREATE cell".into()))?;
-    let client_nonce: [u8; 32] = create.payload[64..96]
-        .try_into()
-        .map_err(|_| TransportError::Handshake("client nonce field truncated in CREATE cell".into()))?;
+    let client_fp: [u8; 32] = create.payload[0..32].try_into().map_err(|_| {
+        TransportError::Handshake("fingerprint field truncated in CREATE cell".into())
+    })?;
+    let client_ephemeral_pub_bytes: [u8; 32] = create.payload[32..64].try_into().map_err(|_| {
+        TransportError::Handshake("ephemeral pubkey field truncated in CREATE cell".into())
+    })?;
+    let client_nonce: [u8; 32] = create.payload[64..96].try_into().map_err(|_| {
+        TransportError::Handshake("client nonce field truncated in CREATE cell".into())
+    })?;
 
     // Verify that the fingerprint matches our static key
-    if !constant_time_eq(&client_fp, &static_key.fingerprint) {
+    if client_fp.ct_eq(&static_key.fingerprint).unwrap_u8() != 1 {
         return Err(TransportError::Handshake(
             "CREATE cell fingerprint does not match this relay's identity".into(),
         ));
@@ -322,18 +327,6 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
 
-/// Constant-time comparison of two equal-length byte slices.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,8 +363,7 @@ mod tests {
     #[test]
     fn test_wrong_fingerprint_in_create_cell_rejected() {
         let relay_key = RelayStaticKey::generate();
-        let (mut create_cell, _pending) =
-            client_initiate(1, &relay_key.public).unwrap();
+        let (mut create_cell, _pending) = client_initiate(1, &relay_key.public).unwrap();
         // Corrupt the fingerprint in the CREATE payload
         create_cell.payload[0] ^= 0xFF;
         assert!(relay_respond(&create_cell, &relay_key).is_err());
@@ -438,5 +430,30 @@ mod tests {
         let (client_keys, _) = run_handshake(&relay_key);
         // forward and backward keys must be different
         assert_ne!(*client_keys.forward_key, *client_keys.backward_key);
+    }
+
+    #[test]
+    fn test_handshake_cannot_be_finished_twice() {
+        let relay_key = RelayStaticKey::generate();
+        let (create_cell, pending) = client_initiate(1, &relay_key.public).unwrap();
+        let (created_cell, _) = relay_respond(&create_cell, &relay_key).unwrap();
+        let _keys = client_finish(pending, &created_cell).unwrap();
+        // pending is consumed (moved), so a second call is impossible at compile time.
+    }
+
+    #[test]
+    fn test_each_handshake_produces_unique_keys() {
+        let relay_key = RelayStaticKey::generate();
+        let (keys1, _) = run_handshake(&relay_key);
+        let (keys2, _) = run_handshake(&relay_key);
+        assert_ne!(*keys1.forward_key, *keys2.forward_key);
+        assert_ne!(*keys1.backward_key, *keys2.backward_key);
+    }
+
+    #[test]
+    fn test_relay_respond_rejects_created_cell_type() {
+        let relay_key = RelayStaticKey::generate();
+        let cell = Cell::new(1, CellType::Created);
+        assert!(relay_respond(&cell, &relay_key).is_err());
     }
 }

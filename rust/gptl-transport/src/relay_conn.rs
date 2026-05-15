@@ -2,9 +2,9 @@
 
 use crate::cell::{Cell, CELL_SIZE};
 use crate::TransportError;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use std::net::SocketAddr;
 
 /// A TCP connection that speaks the GPTL cell protocol.
 ///
@@ -21,7 +21,8 @@ impl RelayConn {
 
     /// Connect to a relay at `addr` and return a wrapped connection.
     pub async fn connect(addr: SocketAddr) -> Result<Self, TransportError> {
-        let stream = TcpStream::connect(addr).await
+        let stream = TcpStream::connect(addr)
+            .await
             .map_err(|e| TransportError::Io(format!("connect to {}: {}", addr, e)))?;
         // Disable Nagle — we always send full 512-byte cells.
         let _ = stream.set_nodelay(true);
@@ -31,21 +32,22 @@ impl RelayConn {
     /// Send one cell.
     pub async fn send(&mut self, cell: &Cell) -> Result<(), TransportError> {
         let bytes = cell.to_bytes();
-        self.stream.write_all(&bytes).await
+        self.stream
+            .write_all(&bytes)
+            .await
             .map_err(|e| TransportError::Io(format!("write cell: {}", e)))
     }
 
     /// Receive one cell (blocks until exactly 512 bytes arrive).
     pub async fn recv(&mut self) -> Result<Cell, TransportError> {
         let mut buf = [0u8; CELL_SIZE];
-        self.stream.read_exact(&mut buf).await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    TransportError::ConnectionClosed
-                } else {
-                    TransportError::Io(format!("read cell: {}", e))
-                }
-            })?;
+        self.stream.read_exact(&mut buf).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                TransportError::ConnectionClosed
+            } else {
+                TransportError::Io(format!("read cell: {}", e))
+            }
+        })?;
         Cell::from_bytes(&buf)
     }
 
@@ -146,5 +148,33 @@ mod tests {
 
         let conn = RelayConn::connect(addr).await.unwrap();
         assert!(conn.peer_addr().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_partial_write_then_close_returns_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            stream.write_all(&[0u8; 100]).await.unwrap();
+            drop(stream);
+        });
+
+        let mut client = RelayConn::connect(addr).await.unwrap();
+        let result = client.recv().await;
+        assert!(result.is_err(), "partial cell read must return an error");
+    }
+
+    #[tokio::test]
+    async fn test_into_inner_returns_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = listener.accept().await.unwrap();
+        });
+        let conn = RelayConn::connect(addr).await.unwrap();
+        let _tcp = conn.into_inner();
     }
 }

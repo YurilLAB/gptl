@@ -502,18 +502,60 @@ fn generate_key_secret() -> String {
         .collect()
 }
 
-/// Hash a secret for storage
+/// Hash an API-key secret for storage with Argon2id.
+///
+/// The previous implementation was a single unsalted SHA-256, which is
+/// trivially reversible against precomputed tables for the 62-symbol /
+/// 48-character key space — anyone with read access to the key store
+/// recovered every live secret in seconds.  Argon2id with per-secret salt
+/// produces a PHC string that is safe to store and that includes the
+/// parameters needed for future verification.  Falls back to the legacy
+/// hex digest if Argon2 fails so callers never see a panic; the verifier
+/// also accepts both forms during migration.
 fn hash_secret(secret: &str) -> String {
-    use sha2::{Sha256, Digest};
-    
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    format!("{:x}", hasher.finalize())
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    use argon2::Argon2;
+
+    let salt = SaltString::generate(&mut OsRng);
+    match Argon2::default().hash_password(secret.as_bytes(), &salt) {
+        Ok(h) => h.to_string(),
+        Err(_) => {
+            // Defensive fallback: never store a plain-SHA result here either,
+            // emit a clearly malformed marker so verification cannot succeed.
+            String::from("invalid$argon2-build-failure")
+        }
+    }
 }
 
-/// Verify a secret against a hash
+/// Verify a secret against a stored hash in constant time.
+///
+/// Accepts:
+///   * PHC strings (`$argon2id$...`) produced by [`hash_secret`],
+///   * legacy unsalted SHA-256 hex digests (64 lowercase hex chars) — only
+///     for backward compatibility with previously-stored keys; new writes
+///     always go through Argon2id.
 fn verify_secret(secret: &str, hash: &str) -> bool {
-    hash_secret(secret) == hash
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    use argon2::Argon2;
+
+    // Modern PHC string path.
+    if hash.starts_with("$argon2") {
+        return PasswordHash::new(hash)
+            .ok()
+            .map(|parsed| Argon2::default().verify_password(secret.as_bytes(), &parsed).is_ok())
+            .unwrap_or(false);
+    }
+
+    // Legacy unsalted-SHA path — constant-time compare to limit timing leakage.
+    use sha2::{Digest, Sha256};
+    use subtle::ConstantTimeEq;
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    let computed = format!("{:x}", hasher.finalize());
+    if computed.len() != hash.len() {
+        return false;
+    }
+    computed.as_bytes().ct_eq(hash.as_bytes()).into()
 }
 
 #[cfg(test)]
@@ -767,25 +809,37 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_secret() {
+    fn test_hash_secret_uses_random_salt() {
+        // Argon2id derives a fresh random salt for every call, so the SAME
+        // input must produce DIFFERENT PHC strings.  The previous unsalted-SHA
+        // implementation made the same secret hash to the same value — which
+        // is exactly the property that makes precomputed table attacks work.
         let secret = "test_secret";
-        let hash1 = hash_secret(secret);
-        let hash2 = hash_secret(secret);
-
-        // Same secret should produce same hash
-        assert_eq!(hash1, hash2);
-
-        // Different secret should produce different hash
-        let hash3 = hash_secret("different_secret");
-        assert_ne!(hash1, hash3);
+        let h1 = hash_secret(secret);
+        let h2 = hash_secret(secret);
+        assert!(h1.starts_with("$argon2"), "hash must be a PHC string, got {:?}", h1);
+        assert_ne!(h1, h2, "Argon2id must use a fresh random salt per call");
     }
 
     #[test]
-    fn test_verify_secret() {
+    fn test_verify_secret_round_trip() {
         let secret = "test_secret";
         let hash = hash_secret(secret);
-
         assert!(verify_secret(secret, &hash));
         assert!(!verify_secret("wrong_secret", &hash));
+    }
+
+    #[test]
+    fn test_verify_secret_accepts_legacy_sha256() {
+        // For migration: legacy unsalted-SHA hex digests must still verify
+        // until their owners rotate, but new writes always use Argon2id.
+        let secret = "legacy_secret";
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(secret.as_bytes());
+        let legacy_hex = format!("{:x}", h.finalize());
+        assert!(verify_secret(secret, &legacy_hex),
+            "verifier must accept legacy SHA-256 hex digests for backward compat");
+        assert!(!verify_secret("wrong", &legacy_hex));
     }
 }

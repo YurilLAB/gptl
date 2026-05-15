@@ -14,7 +14,10 @@ use tokio::sync::RwLock;
 /// GeoIP-based blocker
 #[derive(Debug)]
 pub struct GeoBlocker {
-    /// Database reader (simplified - would use maxminddb crate)
+    /// Database reader.  `None` when no `.mmdb` file has been loaded —
+    /// in that mode `lookup()` returns a `XX`/`Unknown` placeholder so
+    /// the rest of the security pipeline still runs (the operator
+    /// presumably has other guards in place).
     db: Arc<RwLock<Option<GeoIpDatabase>>>,
     /// Blocked country codes (ISO 3166-1 alpha-2)
     blocked_countries: Arc<RwLock<HashSet<String>>>,
@@ -47,12 +50,22 @@ impl GeoBlocker {
         }
     }
 
-    /// Load GeoIP2 database
-    pub async fn load_database(&self, _path: &str) -> crate::Result<()> {
-        // No bundled GeoIP2 database — in production, load a MaxMind DB2 file.
-        // Returns Ok(()) with an empty database that allows all IPs.
+    /// Load a MaxMind GeoLite2 / GeoIP2 `.mmdb` database from disk.
+    ///
+    /// `path` must point at one of MaxMind's binary database files
+    /// (`GeoLite2-Country.mmdb`, `GeoLite2-City.mmdb`, or
+    /// `GeoLite2-ASN.mmdb`).  The reader auto-detects which schema is
+    /// present and exposes the fields it can parse via [`lookup`].
+    ///
+    /// Returns `Err` if the file is missing or fails to parse so
+    /// callers can choose between "no GeoIP" (skip the feature) and
+    /// "abort startup" (security-required deployments).
+    pub async fn load_database(&self, path: &str) -> crate::Result<()> {
+        let reader = maxminddb::Reader::open_readfile(path).map_err(|e| {
+            crate::RelayError::ConfigError(format!("GeoIP DB '{}': {}", path, e))
+        })?;
         let mut db = self.db.write().await;
-        *db = Some(GeoIpDatabase::new());
+        *db = Some(GeoIpDatabase::with_reader(reader));
         Ok(())
     }
 
@@ -230,26 +243,43 @@ impl Default for GeoBlocker {
     }
 }
 
-/// GeoIP database (simplified)
-#[derive(Debug, Clone)]
+/// GeoIP database — a thin wrapper around a [`maxminddb::Reader`] that
+/// translates between MaxMind's schema and our `GeoLocation` struct.
+///
+/// One of three MaxMind database schemas is expected at runtime:
+///   * `GeoLite2-Country` → fills country fields, leaves city/region blank
+///   * `GeoLite2-City`    → fills country + city + lat/lon
+///   * `GeoLite2-ASN`     → fills `asn` + `asn_organization`
+///
+/// Combining ASN data with country/city data requires loading two
+/// databases; for now we only consult whichever one was passed to
+/// [`GeoBlocker::load_database`].
 pub struct GeoIpDatabase {
-    // In production, this would wrap maxminddb::Reader
-    entries: Vec<GeoEntry>,
+    reader: maxminddb::Reader<Vec<u8>>,
+}
+
+impl std::fmt::Debug for GeoIpDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeoIpDatabase")
+            .field("metadata", &self.reader.metadata)
+            .finish()
+    }
 }
 
 impl GeoIpDatabase {
-    /// Create a new empty database
-    pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+    /// Wrap a previously-opened MaxMind reader.  Most callers go
+    /// through [`GeoBlocker::load_database`] rather than building this
+    /// directly.
+    pub fn with_reader(reader: maxminddb::Reader<Vec<u8>>) -> Self {
+        Self { reader }
     }
 
-    /// Lookup an IP in the database
+    /// Look up an IP in the bound MaxMind database.  Returns a
+    /// `GeoLocation` filled in with whatever fields the underlying
+    /// schema exposes; missing fields are left at their default
+    /// (`"XX"` for country code, `None` for optional fields).
     pub fn lookup(&self, ip: IpAddr) -> GeoLocation {
-        // In production, this would query the MaxMind database
-        // For now, return unknown
-        GeoLocation {
+        let mut loc = GeoLocation {
             ip,
             country_code: "XX".to_string(),
             country_name: "Unknown".to_string(),
@@ -264,22 +294,77 @@ impl GeoIpDatabase {
             is_proxy: false,
             is_tor: false,
             is_hosting: false,
+        };
+
+        // Try the City schema first (richest data); fall back to
+        // Country, then ASN.  Each lookup is independent and silently
+        // skipped if it doesn't match the loaded DB.  maxminddb 0.24's
+        // `lookup` returns `Result<T, MaxMindDBError>` — the
+        // `AddressNotFoundError` variant signals a clean miss.
+        if let Ok(city) = self.reader.lookup::<maxminddb::geoip2::City>(ip) {
+            if let Some(country) = city.country {
+                if let Some(code) = country.iso_code {
+                    loc.country_code = code.to_string();
+                }
+                if let Some(names) = country.names {
+                    if let Some(name) = names.get("en") {
+                        loc.country_name = name.to_string();
+                    }
+                }
+            }
+            if let Some(continent) = city.continent {
+                if let Some(code) = continent.code {
+                    loc.continent_code = code.to_string();
+                }
+            }
+            if let Some(city_data) = city.city {
+                if let Some(names) = city_data.names {
+                    if let Some(name) = names.get("en") {
+                        loc.city = Some(name.to_string());
+                    }
+                }
+            }
+            if let Some(location) = city.location {
+                if let Some(lat) = location.latitude {
+                    loc.latitude = lat;
+                }
+                if let Some(lon) = location.longitude {
+                    loc.longitude = lon;
+                }
+            }
+            if let Some(subdivs) = city.subdivisions {
+                if let Some(first) = subdivs.first() {
+                    if let Some(names) = &first.names {
+                        if let Some(name) = names.get("en") {
+                            loc.region = Some(name.to_string());
+                        }
+                    }
+                }
+            }
+        } else if let Ok(country) = self.reader.lookup::<maxminddb::geoip2::Country>(ip) {
+            if let Some(country) = country.country {
+                if let Some(code) = country.iso_code {
+                    loc.country_code = code.to_string();
+                }
+                if let Some(names) = country.names {
+                    if let Some(name) = names.get("en") {
+                        loc.country_name = name.to_string();
+                    }
+                }
+            }
         }
-    }
-}
 
-impl Default for GeoIpDatabase {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+        // ASN database can be the same file or a separate one; only
+        // overwrites if a lookup succeeds.
+        if let Ok(asn) = self.reader.lookup::<maxminddb::geoip2::Asn>(ip) {
+            loc.asn = asn.autonomous_system_number;
+            loc.asn_organization = asn
+                .autonomous_system_organization
+                .map(|s| s.to_string());
+        }
 
-/// GeoIP database entry
-#[derive(Debug, Clone)]
-struct GeoEntry {
-    start_ip: IpAddr,
-    end_ip: IpAddr,
-    country_code: String,
+        loc
+    }
 }
 
 /// Geolocation information for an IP
@@ -325,9 +410,7 @@ impl GeoLocation {
             GeoRiskLevel::Critical
         } else if self.is_tor || self.is_vpn {
             GeoRiskLevel::High
-        } else if self.is_proxy {
-            GeoRiskLevel::Medium
-        } else if self.is_hosting {
+        } else if self.is_proxy || self.is_hosting {
             GeoRiskLevel::Medium
         } else {
             GeoRiskLevel::Low
@@ -381,9 +464,44 @@ mod tests {
     async fn test_block_country() {
         let blocker = GeoBlocker::new();
         blocker.block_country("CN").await.unwrap();
-        
+
         let blocked = blocker.get_blocked_countries().await;
         assert!(blocked.contains(&"CN".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_load_database_missing_file_returns_config_error() {
+        let blocker = GeoBlocker::new();
+        let result = blocker
+            .load_database("nonexistent_path_to_geolite.mmdb")
+            .await;
+        assert!(
+            matches!(result, Err(crate::RelayError::ConfigError(_))),
+            "missing GeoIP DB must yield ConfigError, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_lookup_without_database_returns_xx() {
+        // Before any load_database call, lookups return the placeholder
+        // "XX" country.  The rest of the security pipeline still runs.
+        let blocker = GeoBlocker::new();
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        let loc = blocker.lookup(ip).await.unwrap();
+        assert_eq!(loc.country_code, "XX");
+        assert_eq!(loc.country_name, "Unknown");
+    }
+
+    #[tokio::test]
+    async fn test_check_ip_passes_when_no_database_loaded() {
+        // No DB → no country info → no country block can fire.  The
+        // check_ip pipeline must still return Ok so the legacy
+        // "GeoBlocker added but no DB available" deployments don't
+        // suddenly reject every connection.
+        let blocker = GeoBlocker::new();
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(blocker.check_ip(ip).await.is_ok());
     }
 
     #[test]

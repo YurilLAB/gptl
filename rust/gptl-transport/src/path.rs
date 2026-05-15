@@ -87,7 +87,9 @@ impl PathSelector {
         guard: Option<&RelayDescriptor>,
     ) -> Result<RelayPath, TransportError> {
         if available.is_empty() && guard.is_none() {
-            return Err(TransportError::Bootstrap("insufficient relays for path selection".into()));
+            return Err(TransportError::Bootstrap(
+                "insufficient relays for path selection".into(),
+            ));
         }
 
         let target_hops = self.config.num_hops.max(1);
@@ -98,9 +100,9 @@ impl PathSelector {
             hops.push(g.clone());
         } else {
             // Pick randomly from available.
-            let pick = available
-                .choose(&mut rand::thread_rng())
-                .ok_or_else(|| TransportError::Bootstrap("insufficient relays for path selection".into()))?;
+            let pick = available.choose(&mut rand::thread_rng()).ok_or_else(|| {
+                TransportError::Bootstrap("insufficient relays for path selection".into())
+            })?;
             hops.push(pick.clone());
         }
 
@@ -127,10 +129,16 @@ impl PathSelector {
                     }
                     // Nickname-prefix diversity.
                     if self.config.exclude_same_nickname_prefix {
-                        let prefix: &str = r.nickname.get(..8.min(r.nickname.len())).unwrap_or(&r.nickname);
+                        let prefix: &str = r
+                            .nickname
+                            .get(..8.min(r.nickname.len()))
+                            .unwrap_or(&r.nickname);
                         if !prefix.is_empty() {
                             for h in &hops {
-                                let hp: &str = h.nickname.get(..8.min(h.nickname.len())).unwrap_or(&h.nickname);
+                                let hp: &str = h
+                                    .nickname
+                                    .get(..8.min(h.nickname.len()))
+                                    .unwrap_or(&h.nickname);
                                 if hp == prefix {
                                     return false;
                                 }
@@ -157,10 +165,16 @@ impl PathSelector {
         }
 
         if hops.is_empty() {
-            return Err(TransportError::Bootstrap("insufficient relays for path selection".into()));
+            return Err(TransportError::Bootstrap(
+                "insufficient relays for path selection".into(),
+            ));
         }
 
-        debug!("selected {}-hop path: {:?}", hops.len(), hops.iter().map(|h| &h.nickname).collect::<Vec<_>>());
+        debug!(
+            "selected {}-hop path: {:?}",
+            hops.len(),
+            hops.iter().map(|h| &h.nickname).collect::<Vec<_>>()
+        );
         Ok(RelayPath { hops })
     }
 }
@@ -212,11 +226,11 @@ mod tests {
 
     fn diverse_relays() -> Vec<RelayDescriptor> {
         vec![
-            make_relay("alpha",   "10.0.1.1", 1),
-            make_relay("bravo",   "10.0.2.1", 2),
+            make_relay("alpha", "10.0.1.1", 1),
+            make_relay("bravo", "10.0.2.1", 2),
             make_relay("charlie", "10.0.3.1", 3),
-            make_relay("delta",   "10.0.4.1", 4),
-            make_relay("echo",    "10.0.5.1", 5),
+            make_relay("delta", "10.0.4.1", 4),
+            make_relay("echo", "10.0.5.1", 5),
         ]
     }
 
@@ -244,7 +258,10 @@ mod tests {
     #[test]
     fn test_single_hop_path() {
         let relays = diverse_relays();
-        let config = PathConfig { num_hops: 1, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 1,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         let path = selector.select_path(&relays, None).unwrap();
         assert_eq!(path.len(), 1);
@@ -253,7 +270,10 @@ mod tests {
     #[test]
     fn test_two_hop_path_different_relays() {
         let relays = diverse_relays();
-        let config = PathConfig { num_hops: 2, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 2,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         let path = selector.select_path(&relays, None).unwrap();
         assert_eq!(path.len(), 2);
@@ -264,7 +284,10 @@ mod tests {
     fn test_guard_pinned_as_entry() {
         let relays = diverse_relays();
         let guard = &relays[2]; // charlie
-        let config = PathConfig { num_hops: 2, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 2,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         let path = selector.select_path(&relays, Some(guard)).unwrap();
         assert_eq!(path.entry().nickname, "charlie");
@@ -276,7 +299,7 @@ mod tests {
         let relays = vec![
             make_relay("same1", "192.168.1.10", 10),
             make_relay("same2", "192.168.1.20", 20),
-            make_relay("other", "10.0.0.1",     30),
+            make_relay("other", "10.0.0.1", 30),
         ];
         let config = PathConfig {
             num_hops: 2,
@@ -299,16 +322,25 @@ mod tests {
 
     #[test]
     fn test_insufficient_relays_returns_error() {
-        let config = PathConfig { num_hops: 1, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 1,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         let result = selector.select_path(&[], None);
-        assert!(result.is_err(), "should fail with 0 available relays and no guard");
+        assert!(
+            result.is_err(),
+            "should fail with 0 available relays and no guard"
+        );
     }
 
     #[test]
     fn test_path_with_only_one_relay_caps_at_one_hop() {
         let relays = vec![make_relay("solo", "10.0.0.1", 1)];
-        let config = PathConfig { num_hops: 2, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 2,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         let path = selector.select_path(&relays, None).unwrap();
         // Can only build 1 hop.
@@ -318,7 +350,10 @@ mod tests {
     #[test]
     fn test_path_entry_exit_accessors() {
         let relays = diverse_relays();
-        let config = PathConfig { num_hops: 2, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 2,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         let path = selector.select_path(&relays, None).unwrap();
         // entry() and exit() must always resolve to valid descriptors.
@@ -332,7 +367,10 @@ mod tests {
     #[test]
     fn test_no_duplicate_relays_in_path() {
         let relays = diverse_relays(); // 5 relays on distinct subnets
-        let config = PathConfig { num_hops: 2, ..Default::default() };
+        let config = PathConfig {
+            num_hops: 2,
+            ..Default::default()
+        };
         let selector = PathSelector::new(config);
         for _ in 0..50 {
             let path = selector.select_path(&relays, None).unwrap();
@@ -349,6 +387,26 @@ mod tests {
 
     // ── nickname prefix exclusion ─────────────────────────────────────────────
 
+    #[test]
+    fn test_guard_only_path_when_no_available() {
+        let guard = make_relay("guard", "10.0.0.1", 1);
+        let config = PathConfig {
+            num_hops: 1,
+            ..Default::default()
+        };
+        let selector = PathSelector::new(config);
+        let path = selector.select_path(&[], Some(&guard)).unwrap();
+        assert_eq!(path.len(), 1);
+        assert_eq!(path.entry().nickname, "guard");
+    }
+
+    #[test]
+    fn test_parse_subnet_24_garbage_returns_none() {
+        assert_eq!(parse_subnet_24("not-an-ip"), None);
+        assert_eq!(parse_subnet_24(""), None);
+        assert_eq!(parse_subnet_24("999.999.999.999:80"), None);
+    }
+
     /// Two relays whose nicknames share the same 8-char prefix must never both
     /// appear in a 2-hop path when `exclude_same_nickname_prefix` is enabled.
     #[test]
@@ -357,10 +415,10 @@ mod tests {
         // Actually the prefix check is first 8 chars: "guardxxx" vs "guardyyy" — different.
         // Let's use exactly the same 8-char prefix: "relay001a" vs "relay001b" → prefix = "relay001"
         let relays = vec![
-            make_relay("relay001a", "10.0.1.1", 1),  // prefix "relay001"
-            make_relay("relay001b", "10.0.2.1", 2),  // prefix "relay001" (same!)
-            make_relay("relay002a", "10.0.3.1", 3),  // prefix "relay002"
-            make_relay("relay003a", "10.0.4.1", 4),  // prefix "relay003"
+            make_relay("relay001a", "10.0.1.1", 1), // prefix "relay001"
+            make_relay("relay001b", "10.0.2.1", 2), // prefix "relay001" (same!)
+            make_relay("relay002a", "10.0.3.1", 3), // prefix "relay002"
+            make_relay("relay003a", "10.0.4.1", 4), // prefix "relay003"
         ];
         let config = PathConfig {
             num_hops: 2,
@@ -377,7 +435,8 @@ mod tests {
             let entry_prefix: String = path.entry().nickname.chars().take(8).collect();
             let exit_prefix: String = path.exit().nickname.chars().take(8).collect();
             assert_ne!(
-                entry_prefix, exit_prefix,
+                entry_prefix,
+                exit_prefix,
                 "two relays with the same nickname prefix appeared in the same path: {} and {}",
                 path.entry().nickname,
                 path.exit().nickname,

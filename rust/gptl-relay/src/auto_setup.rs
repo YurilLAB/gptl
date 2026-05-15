@@ -248,8 +248,9 @@ impl FirewallAutomation {
         protocol: &str,
         description: &str,
     ) -> Result<FirewallResult, FirewallError> {
-        // Validate inputs
-        if port == 0 || port > 65535 {
+        // Validate inputs.  `port` is u16, so the upper bound is enforced by
+        // the type system — only `port == 0` can fail this check.
+        if port == 0 {
             return Err(FirewallError::InvalidPort(port));
         }
         

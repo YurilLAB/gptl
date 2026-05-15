@@ -22,6 +22,7 @@ use crate::{
     audit::AuditLogger,
     SecurityContext,
 };
+use gptl_transport::relay_node::RelayNode;
 
 /// Secure relay server
 #[derive(Debug)]
@@ -40,6 +41,13 @@ pub struct RelayServer {
     api_key_manager: Arc<RwLock<ApiKeyManager>>,
     /// Audit logger
     audit_logger: Arc<RwLock<AuditLogger>>,
+    /// Backing relay node — handles the actual GPTL relay protocol once
+    /// the security layers above have approved an inbound connection.
+    /// Configured via [`with_relay_node`].  When `None`, accepted
+    /// connections still pass the IP / rate-limit checks and emit an
+    /// audit event but the TCP stream is dropped (the legacy "log-only"
+    /// behavior, retained for use cases that only want the audit layer).
+    relay_node: Option<Arc<RelayNode>>,
     /// Server state
     state: Arc<RwLock<ServerState>>,
 }
@@ -58,8 +66,18 @@ impl RelayServer {
             session_manager: Arc::new(RwLock::new(SessionManager::new(&[0u8; 32]))),
             api_key_manager: Arc::new(RwLock::new(ApiKeyManager::default())),
             audit_logger: Arc::new(RwLock::new(AuditLogger::default())),
+            relay_node: None,
             state: Arc::new(RwLock::new(ServerState::Stopped)),
         }
+    }
+
+    /// Plug in the GPTL relay-protocol handler.  Once set, accepted
+    /// connections that pass the security gates are handed off to
+    /// `RelayNode::handle_connection` so the secure relay actually
+    /// carries circuits instead of just logging connections.
+    pub fn with_relay_node(mut self, node: Arc<RelayNode>) -> Self {
+        self.relay_node = Some(node);
+        self
     }
 
     /// Configure MFA authenticator
@@ -161,7 +179,16 @@ impl RelayServer {
         }
     }
 
-    /// Handle a client connection
+    /// Handle a client connection.
+    ///
+    /// Pipeline (each step short-circuits with an audit event on failure):
+    ///   1. IP allowlist / blocklist / CIDR rule check
+    ///   2. Per-IP rate-limit consume
+    ///   3. Audit-log the accepted connection
+    ///   4. Hand the TCP stream off to the configured `RelayNode` which
+    ///      runs the actual GPTL relay protocol (handshake → circuit).
+    ///      When no relay node is configured, the stream is closed at
+    ///      step 3 (the legacy "log-only" mode).
     async fn handle_connection(
         &self,
         stream: tokio::net::TcpStream,
@@ -181,12 +208,11 @@ impl RelayServer {
             limiter.check_ip(client_ip).await?;
         }
 
-        // Connection is now accepted
-        // In a real implementation, this would handle the protocol
-        // For now, we just log the connection
-
         let ctx = SecurityContext::new(client_ip);
-        
+
+        // 3. Audit log the acceptance (BEFORE handing off to the relay
+        //    node, so we still have a record if the protocol layer
+        //    panics or hangs).
         {
             let logger = self.audit_logger.read().await;
             let event = crate::audit::SecurityEventType {
@@ -196,6 +222,25 @@ impl RelayServer {
                 details: None,
             };
             logger.log_security_event(event, &ctx).await?;
+        }
+
+        // 4. Hand off to the relay protocol.
+        if let Some(ref node) = self.relay_node {
+            // Errors here are protocol/I/O level — log at warn, don't
+            // surface as a `RelayError` (the security pipeline succeeded;
+            // this is downstream).
+            if let Err(e) = node.handle_connection(stream, peer_addr).await {
+                tracing::warn!(
+                    "relay protocol from {} ended with: {}",
+                    peer_addr, e
+                );
+            }
+        } else {
+            tracing::debug!(
+                "no relay_node configured; dropping accepted connection from {}",
+                peer_addr
+            );
+            drop(stream);
         }
 
         Ok(())
@@ -357,6 +402,7 @@ impl RelayServer {
             session_manager: self.session_manager.clone(),
             api_key_manager: self.api_key_manager.clone(),
             audit_logger: self.audit_logger.clone(),
+            relay_node: self.relay_node.clone(),
             state: self.state.clone(),
         }
     }
@@ -415,4 +461,153 @@ pub struct ServerStatus {
     pub state: ServerState,
     pub uptime: Option<std::time::Duration>,
     pub connections: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gptl_transport::cell::{Cell, CellType, RelayCell, RelayCommand};
+    use gptl_transport::handshake::{client_finish, client_initiate};
+    use gptl_transport::handshake::RelayStaticKey;
+    use gptl_transport::relay_conn::RelayConn;
+    use gptl_transport::relay_node::RelayOptions;
+    use std::io::{Read, Write};
+    use std::net::TcpListener as StdTcpListener;
+    use std::time::Duration;
+
+    /// Full pipeline test: TCP accept → IP allowlist → rate-limit →
+    /// audit-log → relay protocol → echo destination → round-trip.
+    /// Before the wiring fix in this commit, the connection died at the
+    /// "drop(stream)" step in `handle_connection` and never reached any
+    /// relay logic.
+    #[tokio::test]
+    async fn test_secure_relay_actually_carries_circuits_after_security_pipeline() {
+        // Set up an echo destination the relay will exit to.
+        let echo = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for s in echo.incoming() {
+                if let Ok(mut s) = s {
+                    std::thread::spawn(move || {
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match s.read(&mut buf) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if s.write_all(&buf[..n]).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        // Build the secure relay with the protocol handler wired in.
+        let bind = "127.0.0.1:0";
+        let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+
+        let static_key = RelayStaticKey::generate();
+        let static_pub = static_key.public;
+        let relay_node = Arc::new(RelayNode::new(
+            static_key,
+            RelayOptions::default().with_allow_private(true),
+        ));
+
+        let server = Arc::new(
+            RelayServer::new(RelayConfig {
+                bind_address: relay_addr.to_string(),
+                ..RelayConfig::default()
+            })
+            .with_relay_node(relay_node),
+        );
+
+        // Run the accept loop manually so we don't have to expose
+        // RelayServer::run with a custom listener.  We replicate the
+        // accept-and-spawn pattern from `start()`.
+        let server_for_accept = Arc::clone(&server);
+        tokio::spawn(async move {
+            loop {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let s = Arc::clone(&server_for_accept);
+                tokio::spawn(async move {
+                    let _ = s.handle_connection(stream, peer).await;
+                });
+            }
+        });
+
+        // Drive a full circuit handshake + RELAY_BEGIN + RELAY_DATA + echo.
+        let mut conn = RelayConn::connect(relay_addr).await.unwrap();
+        let circuit_id = 0xA5A5_A5A5u32 | 1;
+        let (create, pending) = client_initiate(circuit_id, &static_pub).unwrap();
+        conn.send(&create).await.unwrap();
+        let created =
+            tokio::time::timeout(Duration::from_secs(5), conn.recv())
+                .await
+                .expect("CREATED must arrive within 5s")
+                .unwrap();
+        let session = client_finish(pending, &created).unwrap();
+        let mut ciphers = gptl_transport::crypto::CircuitCiphers::new(
+            &session.forward_key,
+            &session.backward_key,
+        );
+
+        // RELAY_BEGIN to the echo server.
+        let begin = RelayCell {
+            command: RelayCommand::Begin,
+            stream_id: 1,
+            data: format!("127.0.0.1:{}", echo_addr.port()).into_bytes(),
+        };
+        let pt = begin.encode().unwrap();
+        let ct = ciphers.outbound.encrypt(&pt).unwrap();
+        let mut cell = Cell::new(circuit_id, CellType::Relay);
+        cell.payload.copy_from_slice(&ct);
+        conn.send(&cell).await.unwrap();
+
+        // Round-trip a payload.
+        let mut got_connected = false;
+        let mut echoed = Vec::new();
+        for _ in 0..10 {
+            let resp = conn.recv().await.unwrap();
+            if !matches!(resp.cell_type, CellType::Relay) {
+                continue;
+            }
+            let pt = ciphers.inbound.decrypt(&resp.payload).unwrap();
+            let inner = RelayCell::decode(&pt).unwrap();
+            match inner.command {
+                RelayCommand::Connected => {
+                    got_connected = true;
+                    let data = RelayCell {
+                        command: RelayCommand::Data,
+                        stream_id: 1,
+                        data: b"secure-relay-roundtrip".to_vec(),
+                    };
+                    let pt = data.encode().unwrap();
+                    let ct = ciphers.outbound.encrypt(&pt).unwrap();
+                    let mut cell = Cell::new(circuit_id, CellType::Relay);
+                    cell.payload.copy_from_slice(&ct);
+                    conn.send(&cell).await.unwrap();
+                }
+                RelayCommand::Data if inner.stream_id == 1 => {
+                    echoed.extend_from_slice(&inner.data);
+                    if echoed.len() >= 22 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(got_connected, "secure-relay must complete RELAY_BEGIN");
+        assert_eq!(
+            &echoed[..],
+            b"secure-relay-roundtrip",
+            "secure-relay must round-trip data through the configured RelayNode"
+        );
+    }
 }

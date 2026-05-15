@@ -151,7 +151,10 @@ impl CircuitPool {
                     hop.nickname, e
                 ))
             })?;
-            debug!("pool: extended circuit {} to relay '{}'", circuit_id, hop.nickname);
+            debug!(
+                "pool: extended circuit {} to relay '{}'",
+                circuit_id, hop.nickname
+            );
         }
 
         Ok(circuit)
@@ -170,7 +173,10 @@ impl CircuitPool {
         });
         if let Some(i) = pos {
             let pc = self.circuits.remove(i);
-            debug!("pool: acquired circuit (pool size now {})", self.circuits.len());
+            debug!(
+                "pool: acquired circuit (pool size now {})",
+                self.circuits.len()
+            );
             Some((pc.circuit, pc.path))
         } else {
             None
@@ -190,7 +196,10 @@ impl CircuitPool {
             return;
         }
         self.circuits.push(pc);
-        debug!("pool: circuit returned to pool (size {})", self.circuits.len());
+        debug!(
+            "pool: circuit returned to pool (size {})",
+            self.circuits.len()
+        );
     }
 
     // ── Maintenance ───────────────────────────────────────────────────────────
@@ -271,9 +280,8 @@ impl CircuitPoolManager {
         guard_config: Option<GuardConfig>,
         guard_persist_path: Option<PathBuf>,
     ) -> Self {
-        let guard_manager = guard_config.map(|gc| {
-            Mutex::new(GuardManager::new(gc, guard_persist_path))
-        });
+        let guard_manager =
+            guard_config.map(|gc| Mutex::new(GuardManager::new(gc, guard_persist_path)));
 
         Self {
             pool: Arc::new(Mutex::new(CircuitPool::new(config))),
@@ -408,7 +416,10 @@ mod tests {
             exclude_same_subnet: false,
             exclude_same_nickname_prefix: false,
         };
-        let pool_config = PoolConfig { size: 1, ..Default::default() };
+        let pool_config = PoolConfig {
+            size: 1,
+            ..Default::default()
+        };
 
         let mut pool = CircuitPool::new(pool_config);
         let selector = PathSelector::new(path_config);
@@ -430,7 +441,10 @@ mod tests {
             exclude_same_subnet: false,
             exclude_same_nickname_prefix: false,
         };
-        let pool_config = PoolConfig { size: 1, ..Default::default() };
+        let pool_config = PoolConfig {
+            size: 1,
+            ..Default::default()
+        };
 
         let mut pool = CircuitPool::new(pool_config);
         let selector = PathSelector::new(path_config);
@@ -455,7 +469,10 @@ mod tests {
             exclude_same_subnet: false,
             exclude_same_nickname_prefix: false,
         };
-        let pool_config = PoolConfig { size: 1, ..Default::default() };
+        let pool_config = PoolConfig {
+            size: 1,
+            ..Default::default()
+        };
 
         let mut pool = CircuitPool::new(pool_config);
         let selector = PathSelector::new(path_config);
@@ -496,7 +513,11 @@ mod tests {
         // Use a pool_config that won't try to refill (size 0) just to test eviction.
         pool.config.size = 0;
         pool.maintain(&bootstrap, &selector, None).await;
-        assert_eq!(pool.available_count(), 0, "expired circuit should be evicted");
+        assert_eq!(
+            pool.available_count(),
+            0,
+            "expired circuit should be evicted"
+        );
     }
 
     // ── acquire_circuit falls back to on-demand build ─────────────────────────
@@ -512,7 +533,10 @@ mod tests {
             exclude_same_subnet: false,
             exclude_same_nickname_prefix: false,
         };
-        let pool_config = PoolConfig { size: 0, ..Default::default() }; // pool stays empty
+        let pool_config = PoolConfig {
+            size: 0,
+            ..Default::default()
+        }; // pool stays empty
 
         let manager = Arc::new(CircuitPoolManager::new(
             pool_config,

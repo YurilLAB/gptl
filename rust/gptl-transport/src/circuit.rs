@@ -9,8 +9,8 @@
 use crate::{
     bootstrap::RelayDescriptor,
     cell::{
-        Cell, CellType, RelayCell, RelayCommand,
-        CELL_PAYLOAD_LEN, RELAY_INNER_CT_LEN, RELAY_MAX_DATA,
+        Cell, CellType, RelayCell, RelayCommand, CELL_PAYLOAD_LEN, RELAY_INNER_CT_LEN,
+        RELAY_MAX_DATA,
     },
     crypto::CircuitCiphers,
     handshake::SessionKeys,
@@ -22,6 +22,7 @@ use hmac::{Hmac, Mac};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public};
 use zeroize::Zeroizing;
@@ -80,7 +81,7 @@ impl CircuitStream {
         loop {
             match self.inbound_rx.recv().await? {
                 StreamMessage::Data(d) => return Some(d),
-                StreamMessage::End      => return None,
+                StreamMessage::End => return None,
                 StreamMessage::Connected | StreamMessage::Failed(_) => continue,
             }
         }
@@ -92,11 +93,16 @@ impl CircuitStream {
             match self.inbound_rx.recv().await {
                 Some(StreamMessage::Connected) => return Ok(()),
                 Some(StreamMessage::Failed(reason)) => {
-                    return Err(TransportError::Protocol(format!("relay refused: {}", reason)))
+                    return Err(TransportError::Protocol(format!(
+                        "relay refused: {}",
+                        reason
+                    )))
                 }
                 Some(StreamMessage::Data(_)) => continue, // shouldn't happen before CONNECTED
                 Some(StreamMessage::End) | None => {
-                    return Err(TransportError::Protocol("circuit closed before CONNECTED".into()))
+                    return Err(TransportError::Protocol(
+                        "circuit closed before CONNECTED".into(),
+                    ))
                 }
             }
         }
@@ -104,7 +110,8 @@ impl CircuitStream {
 
     /// Send a RELAY_END to close this stream.
     pub async fn close(&self) -> Result<(), TransportError> {
-        let _ = self.outbound_tx
+        let _ = self
+            .outbound_tx
             .send(RelayCell {
                 command: RelayCommand::End,
                 stream_id: self.stream_id,
@@ -131,6 +138,13 @@ pub struct Circuit {
     /// Outbound relay cells queued by `CircuitStream::write`
     outbound_rx: mpsc::Receiver<RelayCell>,
     outbound_tx: mpsc::Sender<RelayCell>,
+    /// Wire-level PADDING cell trigger.  Sending `()` here causes
+    /// `step()` to emit a `CellType::Padding` cell with a random payload
+    /// directly on the underlying connection — bypassing the relay
+    /// encryption layer (padding is consumed by the first hop and never
+    /// reaches any stream).
+    padding_rx: mpsc::Receiver<()>,
+    padding_tx: mpsc::Sender<()>,
     /// Oneshot sender for routing RELAY_EXTENDED/ExtendFailed back to extend().
     /// Present only while extend() is in progress.
     pending_extend_tx: Option<tokio::sync::oneshot::Sender<Result<RelayCell, TransportError>>>,
@@ -141,6 +155,7 @@ impl Circuit {
     pub fn new(circuit_id: u32, keys: SessionKeys, conn: RelayConn) -> Self {
         let ciphers = CircuitCiphers::new(&keys.forward_key, &keys.backward_key);
         let (tx, rx) = mpsc::channel(64);
+        let (ptx, prx) = mpsc::channel(16);
         Self {
             circuit_id,
             hops: vec![ciphers],
@@ -149,8 +164,16 @@ impl Circuit {
             next_stream_id: 1,
             outbound_rx: rx,
             outbound_tx: tx,
+            padding_rx: prx,
+            padding_tx: ptx,
             pending_extend_tx: None,
         }
+    }
+
+    /// Sender side of the wire-level PADDING-cell trigger channel.
+    /// `splice()` clones this to inject cover traffic.
+    pub fn padding_trigger(&self) -> mpsc::Sender<()> {
+        self.padding_tx.clone()
     }
 
     /// Returns the number of hops in this circuit.
@@ -172,7 +195,7 @@ impl Circuit {
 
         // ── Generate key material ────────────────────────────────────────────
         let ephemeral_priv = EphemeralSecret::random_from_rng(OsRng);
-        let ephemeral_pub  = X25519Public::from(&ephemeral_priv);
+        let ephemeral_pub = X25519Public::from(&ephemeral_priv);
 
         let mut client_nonce = [0u8; 32];
         OsRng.fill_bytes(&mut client_nonce);
@@ -187,7 +210,7 @@ impl Circuit {
         // [off+32..off+64]  client ephemeral X25519 pubkey
         // [off+64..off+96]  client nonce
         let addr_bytes = relay.address.as_bytes();
-        let addr_len   = addr_bytes.len() as u32;
+        let addr_len = addr_bytes.len() as u32;
 
         let payload_len = 4 + addr_bytes.len() + 96;
         if payload_len > RELAY_MAX_DATA {
@@ -265,21 +288,22 @@ impl Circuit {
         hk.expand(b"gptl-transport-v1", okm.as_mut())
             .map_err(|e| TransportError::Handshake(format!("HKDF expand failed: {}", e)))?;
 
-        let mut forward_key  = Zeroizing::new([0u8; 32]);
+        let mut forward_key = Zeroizing::new([0u8; 32]);
         let mut backward_key = Zeroizing::new([0u8; 32]);
         forward_key.copy_from_slice(&okm[0..32]);
         backward_key.copy_from_slice(&okm[32..64]);
 
         // Verify key confirmation — constant-time
         let expected = hmac_sha256_confirm(&forward_key)?;
-        if !constant_time_eq(&expected, &received_confirmation) {
+        if expected.ct_eq(&received_confirmation).unwrap_u8() != 1 {
             return Err(TransportError::Handshake(
                 "RELAY_EXTENDED key confirmation mismatch — relay2 authentication failed".into(),
             ));
         }
 
         // ── Add new hop ──────────────────────────────────────────────────────
-        self.hops.push(CircuitCiphers::new(&forward_key, &backward_key));
+        self.hops
+            .push(CircuitCiphers::new(&forward_key, &backward_key));
         Ok(())
     }
 
@@ -323,6 +347,11 @@ impl Circuit {
             Some(relay_cell) = self.outbound_rx.recv() => {
                 self.send_relay_cell_raw(&relay_cell).await?;
             }
+            // Wire-level PADDING cell with a random payload — first hop drops it.
+            Some(()) = self.padding_rx.recv() => {
+                let pad = Cell::padding(self.circuit_id);
+                self.conn.send(&pad).await?;
+            }
             // Read an inbound cell from the relay
             cell = self.conn.recv() => {
                 let cell = cell?;
@@ -349,9 +378,7 @@ impl Circuit {
     ///   → encode() + encrypt(hops[0].outbound) → RELAY cell
     async fn send_relay_cell_raw(&mut self, inner: &RelayCell) -> Result<(), TransportError> {
         match self.hops.len() {
-            0 => {
-                Err(TransportError::Protocol("circuit has no hops".into()))
-            }
+            0 => Err(TransportError::Protocol("circuit has no hops".into())),
             1 => {
                 let plaintext = inner.encode()?;
                 let ciphertext = self.hops[0].outbound.encrypt(&plaintext)?;
@@ -376,11 +403,10 @@ impl Circuit {
                 cell.payload.copy_from_slice(&outer_ct);
                 self.conn.send(&cell).await
             }
-            n => {
-                Err(TransportError::Protocol(format!(
-                    "send_relay_cell_raw: {} hops not supported (max 2)", n
-                )))
-            }
+            n => Err(TransportError::Protocol(format!(
+                "send_relay_cell_raw: {} hops not supported (max 2)",
+                n
+            ))),
         }
     }
 
@@ -427,19 +453,17 @@ impl Circuit {
                         RELAY_INNER_CT_LEN
                     )));
                 }
-                let inner_ct: [u8; RELAY_INNER_CT_LEN] = inner_ct_slice
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| TransportError::Protocol("inner CT slice conversion failed".into()))?;
+                let inner_ct: [u8; RELAY_INNER_CT_LEN] =
+                    inner_ct_slice.as_slice().try_into().map_err(|_| {
+                        TransportError::Protocol("inner CT slice conversion failed".into())
+                    })?;
                 let inner_pt = self.hops[1].inbound.decrypt_inner(&inner_ct)?;
                 let inner_cell = RelayCell::decode_inner(&inner_pt)?;
                 Ok(DecryptResult::Cell(inner_cell))
             }
             // Circuit-level commands (Extended, ExtendFailed) arrive on the outer layer
             // even in 2-hop mode — pass them through directly
-            RelayCommand::Extended | RelayCommand::ExtendFailed => {
-                Ok(DecryptResult::Cell(outer))
-            }
+            RelayCommand::Extended | RelayCommand::ExtendFailed => Ok(DecryptResult::Cell(outer)),
             other => {
                 tracing::warn!(
                     "circuit {} 2-hop: unexpected outer command {:?} (expected Forward or circuit-level)",
@@ -471,7 +495,10 @@ impl Circuit {
                 if let Some(tx) = self.pending_extend_tx.take() {
                     let result = if inner.command == RelayCommand::ExtendFailed {
                         let reason = String::from_utf8_lossy(&inner.data).into_owned();
-                        Err(TransportError::Handshake(format!("extend failed: {}", reason)))
+                        Err(TransportError::Handshake(format!(
+                            "extend failed: {}",
+                            reason
+                        )))
                     } else {
                         Ok(inner)
                     };
@@ -485,26 +512,30 @@ impl Circuit {
                     );
                 }
             }
-            RelayCommand::Data | RelayCommand::End | RelayCommand::Connected | RelayCommand::BeginFailed => {
+            RelayCommand::Data
+            | RelayCommand::End
+            | RelayCommand::Connected
+            | RelayCommand::BeginFailed => {
                 let stream_id = inner.stream_id;
-                let tx = match self.streams.get(&stream_id) {
-                    Some(tx) => tx.clone(),
-                    None => {
-                        tracing::debug!(
+                let tx =
+                    match self.streams.get(&stream_id) {
+                        Some(tx) => tx.clone(),
+                        None => {
+                            tracing::debug!(
                             "circuit {} stream {} not found (may be already closed), dropping {:?}",
                             self.circuit_id, stream_id, inner.command
                         );
-                        return;
-                    }
-                };
+                            return;
+                        }
+                    };
 
                 let msg = match inner.command {
-                    RelayCommand::Data      => StreamMessage::Data(inner.data),
-                    RelayCommand::End       => {
+                    RelayCommand::Data => StreamMessage::Data(inner.data),
+                    RelayCommand::End => {
                         self.streams.remove(&stream_id);
                         StreamMessage::End
                     }
-                    RelayCommand::Connected   => StreamMessage::Connected,
+                    RelayCommand::Connected => StreamMessage::Connected,
                     RelayCommand::BeginFailed => {
                         let reason = String::from_utf8_lossy(&inner.data).to_string();
                         StreamMessage::Failed(reason)
@@ -559,7 +590,9 @@ impl Circuit {
         // Stream IDs are odd on the client side (Tor convention).
         // Max 32767 odd values in [1, 65535].
         if self.streams.len() >= 32767 {
-            return Err(TransportError::Protocol("all stream IDs exhausted on circuit".into()));
+            return Err(TransportError::Protocol(
+                "all stream IDs exhausted on circuit".into(),
+            ));
         }
 
         // Walk through odd IDs until we find one that is not currently open.
@@ -603,17 +636,6 @@ fn hmac_sha256_confirm(key: &[u8; 32]) -> Result<[u8; 32], TransportError> {
         .map_err(|e| TransportError::Crypto(format!("HMAC init: {}", e)))?;
     mac.update(b"gptl-v1-confirm");
     Ok(mac.finalize().into_bytes().into())
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -759,7 +781,7 @@ mod tests {
         // ── Setup relay1 ─────────────────────────────────────────────────────
         let relay1_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay1_addr = relay1_listener.local_addr().unwrap();
-        let relay1_key  = RelayStaticKey::generate();
+        let relay1_key = RelayStaticKey::generate();
 
         let relay2_addr_str = relay2_addr.to_string();
         let relay1_task = tokio::spawn({
@@ -787,9 +809,9 @@ mod tests {
                 let data = &extend_cell.data;
                 let addr_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
                 let off = 4 + addr_len;
-                let fp:           [u8; 32] = data[off..off+32].try_into().unwrap();
-                let client_eph:   [u8; 32] = data[off+32..off+64].try_into().unwrap();
-                let client_nonce2:[u8; 32] = data[off+64..off+96].try_into().unwrap();
+                let fp: [u8; 32] = data[off..off + 32].try_into().unwrap();
+                let client_eph: [u8; 32] = data[off + 32..off + 64].try_into().unwrap();
+                let client_nonce2: [u8; 32] = data[off + 64..off + 96].try_into().unwrap();
 
                 // Connect to relay2
                 let mut relay2_rc = RelayConn::connect(relay2_addr).await.unwrap();
@@ -850,8 +872,8 @@ mod tests {
     #[tokio::test]
     async fn test_extend_bad_confirmation_rejected() {
         let relay2_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let relay2_addr     = relay2_listener.local_addr().unwrap();
-        let relay2_key      = RelayStaticKey::generate();
+        let relay2_addr = relay2_listener.local_addr().unwrap();
+        let relay2_key = RelayStaticKey::generate();
 
         // relay2: accept handshake but corrupt the confirmation in Created
         let relay2_task = tokio::spawn({
@@ -871,7 +893,7 @@ mod tests {
         // relay1: proxy CREATE/CREATED without modification
         let relay1_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let relay1_addr = relay1_listener.local_addr().unwrap();
-        let relay1_key  = RelayStaticKey::generate();
+        let relay1_key = RelayStaticKey::generate();
 
         let relay1_task = tokio::spawn({
             let relay1_key = relay1_key.clone();
@@ -893,9 +915,9 @@ mod tests {
                 let data = &extend_cell.data;
                 let addr_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
                 let off = 4 + addr_len;
-                let fp:          [u8; 32] = data[off..off+32].try_into().unwrap();
-                let client_eph:  [u8; 32] = data[off+32..off+64].try_into().unwrap();
-                let client_nc:   [u8; 32] = data[off+64..off+96].try_into().unwrap();
+                let fp: [u8; 32] = data[off..off + 32].try_into().unwrap();
+                let client_eph: [u8; 32] = data[off + 32..off + 64].try_into().unwrap();
+                let client_nc: [u8; 32] = data[off + 64..off + 96].try_into().unwrap();
 
                 let mut r2rc = RelayConn::connect(relay2_addr).await.unwrap();
                 let mut c2 = Cell::new(create.circuit_id, CellType::Create);
@@ -982,7 +1004,8 @@ mod tests {
                 let create = rc.recv().await.unwrap();
                 let (created, keys) = relay_respond(&create, &relay1_key).unwrap();
                 rc.send(&created).await.unwrap();
-                let mut ciphers = crate::crypto::RelayCiphers::new(&keys.forward_key, &keys.backward_key);
+                let mut ciphers =
+                    crate::crypto::RelayCiphers::new(&keys.forward_key, &keys.backward_key);
 
                 let cell = rc.recv().await.unwrap();
                 let ct: [u8; CELL_PAYLOAD_LEN] = cell.payload;
@@ -1073,9 +1096,19 @@ mod tests {
             let (_, rx) = (outbound_tx, circuit.outbound_rx);
             rx
         };
-        let cell = rx.recv().await.expect("expected RELAY_END in outbound channel");
-        assert_eq!(cell.command, RelayCommand::End, "close() must send RELAY_END");
-        assert_eq!(cell.stream_id, sid, "RELAY_END must carry the correct stream_id");
+        let cell = rx
+            .recv()
+            .await
+            .expect("expected RELAY_END in outbound channel");
+        assert_eq!(
+            cell.command,
+            RelayCommand::End,
+            "close() must send RELAY_END"
+        );
+        assert_eq!(
+            cell.stream_id, sid,
+            "RELAY_END must carry the correct stream_id"
+        );
     }
 
     // ── hop_count ─────────────────────────────────────────────────────────────
@@ -1088,5 +1121,37 @@ mod tests {
         // A 2-hop extend is already covered in test_extend_two_hop_completes;
         // this test just verifies the baseline count.
         drop(circuit);
+    }
+
+    #[tokio::test]
+    async fn test_destroy_sends_destroy_cell() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let relay_key = RelayStaticKey::generate();
+
+        let relay_task = tokio::spawn({
+            let relay_key = relay_key.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut rc = RelayConn::new(stream);
+                let create = rc.recv().await.unwrap();
+                let (created, _) = relay_respond(&create, &relay_key).unwrap();
+                rc.send(&created).await.unwrap();
+                let cell = rc.recv().await.unwrap();
+                cell.cell_type
+            }
+        });
+
+        let mut relay_conn = RelayConn::connect(addr).await.unwrap();
+        let (create, pending) = client_initiate(1, &relay_key.public).unwrap();
+        relay_conn.send(&create).await.unwrap();
+        let created = relay_conn.recv().await.unwrap();
+        let keys = client_finish(pending, &created).unwrap();
+        let mut circuit = Circuit::new(1, keys, relay_conn);
+
+        circuit.destroy().await;
+
+        let cell_type = relay_task.await.unwrap();
+        assert!(matches!(cell_type, CellType::Destroy));
     }
 }

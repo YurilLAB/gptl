@@ -8,6 +8,7 @@ repository = "https://github.com/gptl-project/gptl"
 
 [dependencies]
 gptl-core = { path = "../gptl-core" }
+gptl-transport = { path = "../gptl-transport" }
 tokio = { version = "1.35", features = ["full"] }
 thiserror = "1.0"
 tracing = "0.1"

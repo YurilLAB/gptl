@@ -46,14 +46,21 @@ use gptl_relay::{
     config::{ServerConfig, load_config},
     SecurityFeatures,
 };
+use gptl_transport::handshake::RelayStaticKey;
+use gptl_transport::relay_node::{RelayNode, RelayOptions};
+use std::sync::Arc;
 use tracing::{info, warn, error};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter("gptl_relay=info,warn,error")
-        .init();
+    // Initialize logging.  The previous filter `"gptl_relay=info,warn,error"`
+    // excluded the secure-relay binary's own `info!` logs (its target is
+    // `secure_relay`, not `gptl_relay`), so the startup security-features
+    // summary printed nothing.  Honor RUST_LOG when set, default to `info`.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("Starting GPTL Secure Relay Server");
     info!("Version: {}", gptl_relay::VERSION);
@@ -152,10 +159,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         strict_mode: config.security.level == gptl_relay::SecurityLevel::Maximum,
     };
 
+    // ── Build the underlying GPTL relay node ──────────────────────────────
+    // The secure-relay now actually carries circuits: after the IP /
+    // rate-limit / audit checks above pass, accepted connections are
+    // handed to RelayNode for the ntor-lite handshake and per-cell
+    // routing.  Without this the binary just logged connections and
+    // closed them.
+    //
+    // For Phase 1 we generate an ephemeral relay static key on each
+    // startup; persisted keys (so the relay keeps the same identity
+    // across restarts) belong in a future config field — generating
+    // one is more honest than refusing to start.
+    let relay_static_key = RelayStaticKey::generate();
+    info!(
+        "relay identity fingerprint: {}",
+        hex::encode(relay_static_key.fingerprint)
+    );
+    info!(
+        "relay static pubkey:        {}",
+        hex::encode(relay_static_key.public)
+    );
+    let relay_node = Arc::new(RelayNode::new(
+        relay_static_key,
+        RelayOptions::default(),
+    ));
+    info!("  ✓ Relay protocol handler ready (RelayNode)");
+
     let server = RelayServer::new(relay_config)
         .with_auth(auth)
         .with_ip_allowlist(ip_allowlist)
         .with_rate_limiter(rate_limiter)
+        .with_relay_node(relay_node)
         .with_session_manager(session_manager)
         .with_api_key_manager(api_key_manager)
         .with_audit_logger(audit_logger);

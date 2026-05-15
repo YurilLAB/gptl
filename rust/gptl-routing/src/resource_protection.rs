@@ -10,6 +10,19 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use sha2::{Sha256, Digest};
 
+/// Constant-time byte slice equality.  Returns false for mismatched lengths;
+/// for equal lengths runs in time proportional to the slice length.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 /// Resource guard for protecting against resource exhaustion
 pub struct ResourceGuard {
     #[allow(dead_code)]
@@ -51,8 +64,10 @@ struct CircuitQuota {
 struct PowVerifier {
     /// Current difficulty
     difficulty: u32,
-    /// Verification cache
-    verified_cache: HashMap<u64, Instant>,
+    /// Verification cache, keyed by the full PoW hash (not nonce) so
+    /// an attacker cannot replay the same nonce with a different submitted
+    /// hash and pass verification.
+    verified_cache: HashMap<Vec<u8>, Instant>,
 }
 
 /// Rate limiter for circuit creation
@@ -271,16 +286,35 @@ impl ResourceGuard {
 impl PowVerifier {
     /// Verify proof-of-work
     async fn verify(&self, pow: &ProofOfWork) -> bool {
-        // Check cache
-        if let Some(&timestamp) = self.verified_cache.get(&pow.nonce) {
+        // Cache lookup uses the FULL submitted hash so an attacker cannot
+        // replay the same nonce with a forged hash and bypass verification.
+        if let Some(&timestamp) = self.verified_cache.get(&pow.hash) {
             if timestamp.elapsed() < Duration::from_secs(300) {
-                return true;
+                // Still recompute below — a cache hit without recomputation
+                // would let an attacker plant garbage in the cache by
+                // submitting the same hash bytes twice in 5 minutes.
+                // Here we just shortcut difficulty check; recomputation follows.
+                // Fall through.
             }
         }
 
-        // The hash stored in ProofOfWork is already SHA256(circuit_id || nonce).
-        // Verify it directly by counting its leading zero bits.
-        let leading_zeros = pow.hash.iter()
+        // Recompute SHA256(circuit_id || nonce) and constant-time-compare to
+        // the submitted hash. Trusting `pow.hash` blindly lets an attacker
+        // submit ProofOfWork { hash: vec![0; 32], .. } and pass.
+        let mut hasher = Sha256::new();
+        hasher.update(pow.circuit_id.to_le_bytes());
+        hasher.update(pow.nonce.to_le_bytes());
+        let computed = hasher.finalize();
+
+        if pow.hash.len() != computed.len() {
+            return false;
+        }
+        let matches = constant_time_eq(&pow.hash, computed.as_slice());
+        if !matches {
+            return false;
+        }
+
+        let leading_zeros = computed.iter()
             .take_while(|&&b| b == 0)
             .count() * 8;
 
@@ -467,6 +501,7 @@ impl PowGenerator {
             if leading_zeros >= target_zeros {
                 return ProofOfWork {
                     difficulty: self.difficulty,
+                    circuit_id,
                     nonce,
                     hash: result.to_vec(),
                 };
@@ -801,6 +836,7 @@ mod tests {
         // A hash of all 0xFF bytes has 0 leading zeros
         let pow = super::super::ProofOfWork {
             difficulty: 0,
+            circuit_id: 0,
             nonce: 0,
             hash: vec![0xFFu8; 32],
         };

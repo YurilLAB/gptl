@@ -20,11 +20,15 @@ use gptl_transport::{
     bootstrap::{default_bootstrap_path, BootstrapConfig},
     circuit_pool::{CircuitPoolManager, PoolConfig},
     guard::{GuardConfig, GuardManager},
+    metrics::{serve_metrics, ClientMetrics, MetricsObserver},
+    observer::{CompositeObserver, SharedObserver},
     path::PathConfig,
     proxy::{run as run_proxy, ProxyConfig},
+    selftest,
     TransportError,
 };
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::sync::atomic::Ordering;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 #[tokio::main]
@@ -64,6 +68,66 @@ async fn main() {
         relays_path.display()
     );
 
+    // ── Metrics infrastructure ───────────────────────────────────────────────
+    // Always allocate the counters even when `--metrics-addr` is unset
+    // so the observer wiring stays uniform (and a future control-plane
+    // tool can read them via FFI).  Serve them only when bound.
+    let client_metrics = ClientMetrics::new();
+    if let Some(addr) = args.metrics_addr {
+        let m = Arc::clone(&client_metrics);
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(addr, move || m.render_prometheus()).await {
+                tracing::error!("metrics endpoint error: {}", e);
+            }
+        });
+    }
+
+    // ── Startup self-test ────────────────────────────────────────────────────
+    // Probe every relay (TCP connect + ntor-lite handshake) BEFORE
+    // claiming the proxy is ready.  We refuse to start with zero healthy
+    // relays — without one, the very first SOCKS5 request would fail in
+    // a confusing way far from this code.  Skip when --skip-selftest is set.
+    if !args.skip_selftest {
+        let timeout = Duration::from_secs(args.selftest_timeout_secs);
+        tracing::info!(
+            "running startup self-test against {} relay(s) (timeout {}s)…",
+            bootstrap.relays.len(),
+            args.selftest_timeout_secs
+        );
+        let results = selftest::probe_all(&bootstrap.relays, timeout).await;
+        let summary = selftest::format_summary(&results);
+        // One log call so it always prints as a single block.
+        tracing::info!("{}", summary);
+
+        let healthy = results.iter().filter(|r| r.outcome.is_healthy()).count();
+        let unhealthy = results.len() - healthy;
+        client_metrics
+            .selftest_healthy_relays
+            .store(healthy as u64, Ordering::Relaxed);
+        client_metrics
+            .selftest_unhealthy_relays
+            .store(unhealthy as u64, Ordering::Relaxed);
+        if healthy == 0 {
+            eprintln!(
+                "error: startup self-test found ZERO healthy relays — refusing to start.\n\
+                 hint: check that gptl-node is running at the addresses in {}, that the\n\
+                 hint: pubkey_hex values match, and that the listen address is reachable.\n\
+                 hint: re-run with --skip-selftest to bypass this gate."
+                , relays_path.display()
+            );
+            std::process::exit(1);
+        }
+        if healthy < bootstrap.relays.len() {
+            tracing::warn!(
+                "self-test: {} relay(s) failed — proceeding with the {} that passed",
+                bootstrap.relays.len() - healthy,
+                healthy
+            );
+        }
+    } else {
+        tracing::warn!("startup self-test SKIPPED (--skip-selftest)");
+    }
+
     let bootstrap = Arc::new(bootstrap);
 
     // ── Guard manager (optional) ──────────────────────────────────────────────
@@ -77,11 +141,39 @@ async fn main() {
             eprintln!("error initializing guard manager: {}", e);
             std::process::exit(1);
         }
+        // Initial save so a fresh selection survives an immediate restart.
+        if let Err(e) = gm.save().await {
+            tracing::warn!("guard state initial save failed: {}", e);
+        }
         tracing::info!(
-            "guard manager initialized from {}",
-            guards_path.display()
+            "guard manager initialized from {} ({} guards, rotation every {}d)",
+            guards_path.display(),
+            gm.guard_set().guard_count(),
+            args.guard_rotation_days,
         );
-        Some(Arc::new(Mutex::new(gm)))
+        let gm = Arc::new(Mutex::new(gm));
+
+        // Periodic flusher — guard mutations from report_success/report_failure
+        // are in-memory only, so without this every restart loses the
+        // success/failure history accumulated during the previous session.
+        // 30s is short enough that at most one circuit-build's worth of
+        // state is lost on a crash, and the lock is held for milliseconds
+        // (just the JSON serialize + fsync).
+        let flusher_gm = Arc::clone(&gm);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            // Skip the immediate first tick; we already saved above.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let gm = flusher_gm.lock().await;
+                if let Err(e) = gm.save().await {
+                    tracing::warn!("periodic guard state save failed: {}", e);
+                }
+            }
+        });
+
+        Some(gm)
     } else {
         None
     };
@@ -114,7 +206,10 @@ async fn main() {
         let handle = Arc::clone(&manager).start_maintenance();
         // Give the maintenance task a moment to build initial circuits.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        tracing::info!("circuit pool manager started (target size: {})", args.pool_size);
+        tracing::info!(
+            "circuit pool manager started (target size: {})",
+            args.pool_size
+        );
         // Keep the handle alive; leak it intentionally (process will exit on error anyway).
         std::mem::forget(handle);
         Some(manager)
@@ -122,12 +217,22 @@ async fn main() {
         None
     };
 
+    // Build the observer.  Today it's just the metrics observer; the
+    // composite is here so future installers (e.g. a routing-layer
+    // bridge) can be added without touching the proxy wiring again.
+    let observer: SharedObserver = Arc::new(
+        CompositeObserver::new()
+            .push(Arc::new(MetricsObserver::new(Arc::clone(&client_metrics))) as SharedObserver),
+    );
+
     let config = ProxyConfig {
         listen_addr: args.listen,
         bootstrap,
         hop_count: args.hop_count,
         pool_manager,
         guard_manager,
+        observer,
+        metrics: Some(Arc::clone(&client_metrics)),
     };
 
     if let Err(e) = run_proxy(config).await {
@@ -146,6 +251,9 @@ struct Args {
     guards: Option<PathBuf>,
     pool_size: usize,
     guard_rotation_days: u64,
+    skip_selftest: bool,
+    selftest_timeout_secs: u64,
+    metrics_addr: Option<SocketAddr>,
 }
 
 fn parse_args() -> Args {
@@ -156,6 +264,9 @@ fn parse_args() -> Args {
     let mut guards: Option<PathBuf> = None;
     let mut pool_size: usize = 0;
     let mut guard_rotation_days: u64 = 30;
+    let mut skip_selftest = false;
+    let mut selftest_timeout_secs: u64 = 5;
+    let mut metrics_addr: Option<SocketAddr> = None;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -203,6 +314,27 @@ fn parse_args() -> Args {
             "--log" => {
                 log_level = next_arg(&arg, &mut iter);
             }
+            "--skip-selftest" => {
+                skip_selftest = true;
+            }
+            "--selftest-timeout" => {
+                let val = next_arg(&arg, &mut iter);
+                selftest_timeout_secs = val.parse::<u64>().unwrap_or_else(|_| {
+                    eprintln!("error: invalid --selftest-timeout '{}'", val);
+                    std::process::exit(1);
+                });
+                if selftest_timeout_secs == 0 {
+                    eprintln!("error: --selftest-timeout must be > 0");
+                    std::process::exit(1);
+                }
+            }
+            "--metrics-addr" => {
+                let val = next_arg(&arg, &mut iter);
+                metrics_addr = Some(val.parse::<SocketAddr>().unwrap_or_else(|_| {
+                    eprintln!("error: invalid --metrics-addr '{}'", val);
+                    std::process::exit(1);
+                }));
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -215,7 +347,18 @@ fn parse_args() -> Args {
         }
     }
 
-    Args { relays, listen, log_level, hop_count, guards, pool_size, guard_rotation_days }
+    Args {
+        relays,
+        listen,
+        log_level,
+        hop_count,
+        guards,
+        pool_size,
+        guard_rotation_days,
+        skip_selftest,
+        selftest_timeout_secs,
+        metrics_addr,
+    }
 }
 
 fn next_arg(flag: &str, iter: &mut impl Iterator<Item = String>) -> String {
@@ -232,13 +375,26 @@ fn print_usage() {
     println!("  gptl-client [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("  --relays <PATH>             Path to relays.json  (default: ~/.config/gptl/relays.json)");
+    println!(
+        "  --relays <PATH>             Path to relays.json  (default: ~/.config/gptl/relays.json)"
+    );
     println!("  --listen <ADDR>             SOCKS5 listen address (default: 127.0.0.1:1080)");
     println!("  --hops <N>                  Number of hops: 1 (single) or 2 (two-hop, default: 1)");
     println!("  --guards <PATH>             Path to guards.json for persistent guard state");
     println!("  --pool-size <N>             Pre-build N circuits (0 = disabled, default: 0)");
     println!("  --guard-rotation-days <N>   Guard rotation interval in days (default: 30)");
-    println!("  --log <LEVEL>               Log level: error|warn|info|debug|trace (default: info)");
+    println!(
+        "  --skip-selftest             Skip the startup self-test (NOT recommended)"
+    );
+    println!(
+        "  --selftest-timeout <SECS>   Per-relay self-test timeout (default: 5)"
+    );
+    println!(
+        "  --metrics-addr <ADDR>       Bind a Prometheus /metrics endpoint here (e.g. 127.0.0.1:9101)"
+    );
+    println!(
+        "  --log <LEVEL>               Log level: error|warn|info|debug|trace (default: info)"
+    );
     println!("  -h, --help                  Print this help");
     println!();
     println!("EXAMPLE:");

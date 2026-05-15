@@ -98,6 +98,21 @@ impl Cell {
         }
     }
 
+    /// Build a wire-level PADDING cell with a uniformly-random payload.
+    /// Using random bytes (not zeros) prevents trivial pattern matching that
+    /// would otherwise let a passive observer distinguish padding from real
+    /// encrypted traffic by payload content.
+    pub fn padding(circuit_id: u32) -> Self {
+        use rand::RngCore;
+        let mut payload = [0u8; CELL_PAYLOAD_LEN];
+        rand::thread_rng().fill_bytes(&mut payload);
+        Self {
+            circuit_id,
+            cell_type: CellType::Padding,
+            payload,
+        }
+    }
+
     /// Serialize to exactly 512 bytes.
     pub fn to_bytes(&self) -> [u8; CELL_SIZE] {
         let mut out = [0u8; CELL_SIZE];
@@ -110,11 +125,16 @@ impl Cell {
     /// Deserialize from exactly 512 bytes.
     pub fn from_bytes(buf: &[u8; CELL_SIZE]) -> Result<Self, TransportError> {
         let circuit_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let cell_type = CellType::from_u8(buf[4])
-            .ok_or_else(|| TransportError::Protocol(format!("unknown cell type 0x{:02x}", buf[4])))?;
+        let cell_type = CellType::from_u8(buf[4]).ok_or_else(|| {
+            TransportError::Protocol(format!("unknown cell type 0x{:02x}", buf[4]))
+        })?;
         let mut payload = [0u8; CELL_PAYLOAD_LEN];
         payload.copy_from_slice(&buf[5..CELL_SIZE]);
-        Ok(Self { circuit_id, cell_type, payload })
+        Ok(Self {
+            circuit_id,
+            cell_type,
+            payload,
+        })
     }
 
     /// Return a read-only view of the first `n` payload bytes.
@@ -185,16 +205,16 @@ pub enum RelayCommand {
 impl RelayCommand {
     pub fn from_u8(b: u8) -> Option<Self> {
         match b {
-            1  => Some(Self::Begin),
-            2  => Some(Self::Data),
-            3  => Some(Self::End),
-            4  => Some(Self::Connected),
-            5  => Some(Self::BeginFailed),
+            1 => Some(Self::Begin),
+            2 => Some(Self::Data),
+            3 => Some(Self::End),
+            4 => Some(Self::Connected),
+            5 => Some(Self::BeginFailed),
             10 => Some(Self::Extend),
             11 => Some(Self::Extended),
             12 => Some(Self::ExtendFailed),
             13 => Some(Self::Forward),
-            _  => None,
+            _ => None,
         }
     }
 }
@@ -215,7 +235,9 @@ impl RelayCell {
     pub fn encode(&self) -> Result<[u8; RELAY_PLAINTEXT_LEN], TransportError> {
         if self.data.len() > RELAY_MAX_DATA {
             return Err(TransportError::Protocol(format!(
-                "relay data too large: {} > {} bytes", self.data.len(), RELAY_MAX_DATA
+                "relay data too large: {} > {} bytes",
+                self.data.len(),
+                RELAY_MAX_DATA
             )));
         }
         let mut buf = [0u8; RELAY_PLAINTEXT_LEN];
@@ -228,16 +250,22 @@ impl RelayCell {
 
     /// Decode from a `RELAY_PLAINTEXT_LEN` (491-byte) decrypted buffer.
     pub fn decode(buf: &[u8; RELAY_PLAINTEXT_LEN]) -> Result<Self, TransportError> {
-        let command = RelayCommand::from_u8(buf[0])
-            .ok_or_else(|| TransportError::Protocol(format!("unknown relay command 0x{:02x}", buf[0])))?;
+        let command = RelayCommand::from_u8(buf[0]).ok_or_else(|| {
+            TransportError::Protocol(format!("unknown relay command 0x{:02x}", buf[0]))
+        })?;
         let stream_id = u16::from_be_bytes([buf[1], buf[2]]);
         let data_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
         if data_len > RELAY_MAX_DATA {
             return Err(TransportError::Protocol(format!(
-                "relay inner data_len {} exceeds maximum {}", data_len, RELAY_MAX_DATA
+                "relay inner data_len {} exceeds maximum {}",
+                data_len, RELAY_MAX_DATA
             )));
         }
-        Ok(Self { command, stream_id, data: buf[5..5 + data_len].to_vec() })
+        Ok(Self {
+            command,
+            stream_id,
+            data: buf[5..5 + data_len].to_vec(),
+        })
     }
 
     // ── Phase 2 inner-hop encoding ────────────────────────────────────────────
@@ -249,7 +277,8 @@ impl RelayCell {
         if self.data.len() > RELAY_INNER_MAX_DATA {
             return Err(TransportError::Protocol(format!(
                 "inner relay data too large: {} > {} bytes (2-hop limit)",
-                self.data.len(), RELAY_INNER_MAX_DATA
+                self.data.len(),
+                RELAY_INNER_MAX_DATA
             )));
         }
         let mut buf = [0u8; RELAY_INNER_PLAINTEXT_LEN];
@@ -262,16 +291,22 @@ impl RelayCell {
 
     /// Decode from a `RELAY_INNER_PLAINTEXT_LEN` (470-byte) decrypted buffer.
     pub fn decode_inner(buf: &[u8; RELAY_INNER_PLAINTEXT_LEN]) -> Result<Self, TransportError> {
-        let command = RelayCommand::from_u8(buf[0])
-            .ok_or_else(|| TransportError::Protocol(format!("unknown relay command 0x{:02x}", buf[0])))?;
+        let command = RelayCommand::from_u8(buf[0]).ok_or_else(|| {
+            TransportError::Protocol(format!("unknown relay command 0x{:02x}", buf[0]))
+        })?;
         let stream_id = u16::from_be_bytes([buf[1], buf[2]]);
         let data_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
         if data_len > RELAY_INNER_MAX_DATA {
             return Err(TransportError::Protocol(format!(
-                "inner relay data_len {} exceeds maximum {}", data_len, RELAY_INNER_MAX_DATA
+                "inner relay data_len {} exceeds maximum {}",
+                data_len, RELAY_INNER_MAX_DATA
             )));
         }
-        Ok(Self { command, stream_id, data: buf[5..5 + data_len].to_vec() })
+        Ok(Self {
+            command,
+            stream_id,
+            data: buf[5..5 + data_len].to_vec(),
+        })
     }
 }
 
@@ -313,14 +348,22 @@ mod tests {
     fn test_cell_unknown_type_rejected() {
         let mut buf = [0u8; CELL_SIZE];
         buf[4] = 0xFF;
-        assert!(matches!(Cell::from_bytes(&buf).unwrap_err(), TransportError::Protocol(_)));
+        assert!(matches!(
+            Cell::from_bytes(&buf).unwrap_err(),
+            TransportError::Protocol(_)
+        ));
     }
 
     #[test]
     fn test_all_cell_types_roundtrip() {
         for ct in [
-            CellType::Padding, CellType::Create, CellType::Created,
-            CellType::Relay, CellType::Destroy, CellType::Netinfo, CellType::RelayInner,
+            CellType::Padding,
+            CellType::Create,
+            CellType::Created,
+            CellType::Relay,
+            CellType::Destroy,
+            CellType::Netinfo,
+            CellType::RelayInner,
         ] {
             let cell = Cell::new(1, ct);
             let decoded = Cell::from_bytes(&cell.to_bytes().try_into().unwrap()).unwrap();
@@ -335,7 +378,11 @@ mod tests {
 
     #[test]
     fn test_relay_cell_roundtrip() {
-        let inner = RelayCell { command: RelayCommand::Data, stream_id: 7, data: b"hello world".to_vec() };
+        let inner = RelayCell {
+            command: RelayCommand::Data,
+            stream_id: 7,
+            data: b"hello world".to_vec(),
+        };
         let decoded = RelayCell::decode(&inner.encode().unwrap()).unwrap();
         assert_eq!(decoded.stream_id, 7);
         assert_eq!(decoded.data, b"hello world");
@@ -343,19 +390,31 @@ mod tests {
 
     #[test]
     fn test_relay_cell_max_data() {
-        let inner = RelayCell { command: RelayCommand::Data, stream_id: 1, data: vec![0xAA; RELAY_MAX_DATA] };
+        let inner = RelayCell {
+            command: RelayCommand::Data,
+            stream_id: 1,
+            data: vec![0xAA; RELAY_MAX_DATA],
+        };
         assert!(inner.encode().is_ok());
     }
 
     #[test]
     fn test_relay_cell_overflow_rejected() {
-        let inner = RelayCell { command: RelayCommand::Data, stream_id: 1, data: vec![0; RELAY_MAX_DATA + 1] };
+        let inner = RelayCell {
+            command: RelayCommand::Data,
+            stream_id: 1,
+            data: vec![0; RELAY_MAX_DATA + 1],
+        };
         assert!(inner.encode().is_err());
     }
 
     #[test]
     fn test_relay_cell_empty_data() {
-        let inner = RelayCell { command: RelayCommand::End, stream_id: 0, data: vec![] };
+        let inner = RelayCell {
+            command: RelayCommand::End,
+            stream_id: 0,
+            data: vec![],
+        };
         let decoded = RelayCell::decode(&inner.encode().unwrap()).unwrap();
         assert!(decoded.data.is_empty());
     }
@@ -422,8 +481,10 @@ mod tests {
     #[test]
     fn test_phase2_relay_commands_roundtrip() {
         for &cmd in &[
-            RelayCommand::Extend, RelayCommand::Extended,
-            RelayCommand::ExtendFailed, RelayCommand::Forward,
+            RelayCommand::Extend,
+            RelayCommand::Extended,
+            RelayCommand::ExtendFailed,
+            RelayCommand::Forward,
         ] {
             assert_eq!(RelayCommand::from_u8(cmd as u8), Some(cmd));
         }
@@ -433,6 +494,82 @@ mod tests {
     fn test_relay_inner_unknown_command_rejected() {
         let mut buf = [0u8; RELAY_INNER_PLAINTEXT_LEN];
         buf[0] = 0xFE;
+        assert!(RelayCell::decode_inner(&buf).is_err());
+    }
+
+    #[test]
+    fn test_cell_payload_is_zero_padded_by_default() {
+        let cell = Cell::new(1, CellType::Relay);
+        assert!(cell.payload.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_relay_cell_all_commands_roundtrip() {
+        for &cmd in &[
+            RelayCommand::Begin,
+            RelayCommand::Data,
+            RelayCommand::End,
+            RelayCommand::Connected,
+            RelayCommand::BeginFailed,
+            RelayCommand::Extend,
+            RelayCommand::Extended,
+            RelayCommand::ExtendFailed,
+            RelayCommand::Forward,
+        ] {
+            let cell = RelayCell {
+                command: cmd,
+                stream_id: 42,
+                data: b"test-payload".to_vec(),
+            };
+            let encoded = cell.encode().unwrap();
+            let decoded = RelayCell::decode(&encoded).unwrap();
+            assert_eq!(decoded.command, cmd);
+            assert_eq!(decoded.stream_id, 42);
+            assert_eq!(decoded.data, b"test-payload");
+        }
+    }
+
+    #[test]
+    fn test_relay_cell_stream_id_boundaries() {
+        for &sid in &[0u16, 1, u16::MAX] {
+            let cell = RelayCell {
+                command: RelayCommand::Data,
+                stream_id: sid,
+                data: vec![0xAB],
+            };
+            let decoded = RelayCell::decode(&cell.encode().unwrap()).unwrap();
+            assert_eq!(decoded.stream_id, sid);
+        }
+    }
+
+    #[test]
+    fn test_inner_relay_cell_all_commands_roundtrip() {
+        for &cmd in &[
+            RelayCommand::Begin,
+            RelayCommand::Data,
+            RelayCommand::End,
+            RelayCommand::Connected,
+            RelayCommand::BeginFailed,
+        ] {
+            let cell = RelayCell {
+                command: cmd,
+                stream_id: 100,
+                data: b"inner-payload".to_vec(),
+            };
+            let encoded = cell.encode_inner().unwrap();
+            let decoded = RelayCell::decode_inner(&encoded).unwrap();
+            assert_eq!(decoded.command, cmd);
+            assert_eq!(decoded.stream_id, 100);
+            assert_eq!(decoded.data, b"inner-payload");
+        }
+    }
+
+    #[test]
+    fn test_inner_data_len_overflow_rejected() {
+        let mut buf = [0u8; RELAY_INNER_PLAINTEXT_LEN];
+        buf[0] = RelayCommand::Data as u8;
+        let bad_len = (RELAY_INNER_MAX_DATA + 100) as u16;
+        buf[3..5].copy_from_slice(&bad_len.to_be_bytes());
         assert!(RelayCell::decode_inner(&buf).is_err());
     }
 }
