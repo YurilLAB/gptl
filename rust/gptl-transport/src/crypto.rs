@@ -51,13 +51,18 @@ impl CellCipher {
         &mut self,
         ciphertext: &[u8; CELL_PAYLOAD_LEN],
     ) -> Result<[u8; RELAY_PLAINTEXT_LEN], TransportError> {
-        let nonce = self.next_nonce()?;
+        // Use the current counter WITHOUT advancing first: advancing on a failed
+        // decryption would desync from the sender, so a single forged/injected
+        // cell would permanently break the circuit (one-packet DoS). The counter
+        // is only advanced after the tag authenticates.
+        let nonce = Self::nonce_for(self.counter);
         let mut buf = ciphertext.to_vec();
         self.cipher
             .decrypt_in_place(&nonce, b"", &mut buf)
             .map_err(|_| {
                 TransportError::Crypto("decryption failed — authentication tag mismatch".into())
             })?;
+        self.advance()?;
         // buf is now 507 - 16 = 491 bytes
         let mut out = [0u8; RELAY_PLAINTEXT_LEN];
         out.copy_from_slice(&buf);
@@ -89,7 +94,8 @@ impl CellCipher {
         &mut self,
         ciphertext: &[u8; RELAY_INNER_CT_LEN],
     ) -> Result<[u8; RELAY_INNER_PLAINTEXT_LEN], TransportError> {
-        let nonce = self.next_nonce()?;
+        // Advance only after the tag authenticates (see `decrypt`).
+        let nonce = Self::nonce_for(self.counter);
         let mut buf = ciphertext.to_vec();
         self.cipher
             .decrypt_in_place(&nonce, b"", &mut buf)
@@ -98,6 +104,7 @@ impl CellCipher {
                     "inner decryption failed — authentication tag mismatch".into(),
                 )
             })?;
+        self.advance()?;
         // buf is now 486 - 16 = 470 bytes
         let mut out = [0u8; RELAY_INNER_PLAINTEXT_LEN];
         out.copy_from_slice(&buf);
@@ -109,15 +116,27 @@ impl CellCipher {
         self.counter
     }
 
-    fn next_nonce(&mut self) -> Result<Nonce, TransportError> {
-        let c = self.counter;
+    /// Build the 12-byte nonce for a given counter value (no mutation).
+    fn nonce_for(counter: u64) -> Nonce {
+        let mut nonce = [0u8; 12];
+        nonce[0..8].copy_from_slice(&counter.to_be_bytes());
+        *Nonce::from_slice(&nonce)
+    }
+
+    /// Advance the counter, erroring if it would overflow.
+    fn advance(&mut self) -> Result<(), TransportError> {
         self.counter = self
             .counter
             .checked_add(1)
             .ok_or_else(|| TransportError::Crypto("nonce counter exhausted (2^64 cells)".into()))?;
-        let mut nonce = [0u8; 12];
-        nonce[0..8].copy_from_slice(&c.to_be_bytes());
-        Ok(*Nonce::from_slice(&nonce))
+        Ok(())
+    }
+
+    /// Nonce for the current counter, advancing afterwards (encryption path).
+    fn next_nonce(&mut self) -> Result<Nonce, TransportError> {
+        let nonce = Self::nonce_for(self.counter);
+        self.advance()?;
+        Ok(nonce)
     }
 }
 
@@ -269,6 +288,30 @@ mod tests {
         let _ = dec.decrypt(&ct0).unwrap();
         // now replay ct0 again — decoder is at counter=1 and will reject
         assert!(dec.decrypt(&ct0).is_err());
+    }
+
+    #[test]
+    fn test_forged_cell_does_not_desync_counter() {
+        // An attacker injecting a forged/garbage cell must NOT advance the
+        // receiver's nonce counter; otherwise the circuit would permanently
+        // fail to decrypt subsequent legitimate cells (one-packet DoS).
+        let key = random_key();
+        let mut enc = CellCipher::new(&key);
+        let mut dec = CellCipher::new(&key);
+
+        let pt0 = random_plaintext();
+        let pt1 = random_plaintext();
+        let ct0 = enc.encrypt(&pt0).unwrap();
+        let ct1 = enc.encrypt(&pt1).unwrap();
+
+        // Inject a forged cell before the real ones.
+        let forged = [0xABu8; CELL_PAYLOAD_LEN];
+        assert!(dec.decrypt(&forged).is_err());
+        assert_eq!(dec.counter(), 0, "counter must not advance on a failed decrypt");
+
+        // Legitimate cells still decrypt in order.
+        assert_eq!(dec.decrypt(&ct0).unwrap(), pt0);
+        assert_eq!(dec.decrypt(&ct1).unwrap(), pt1);
     }
 
     #[test]
