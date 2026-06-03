@@ -456,7 +456,9 @@ impl MultiPathCoordinator {
             .min_by(|(_, m1), (_, m2)| {
                 let score1 = m1.success_rate - m1.congestion_level;
                 let score2 = m2.success_rate - m2.congestion_level;
-                score2.partial_cmp(&score1).unwrap()
+                // total_cmp never panics; partial_cmp(...).unwrap() would panic
+                // if a metric were NaN (e.g. inf - inf), taking down the task.
+                score2.total_cmp(&score1)
             });
 
         if let Some((path, _)) = best_path {
