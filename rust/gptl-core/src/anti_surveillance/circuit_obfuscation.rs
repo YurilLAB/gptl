@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use rand::Rng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand::seq::SliceRandom;
 
 /// Circuit shield for obfuscating circuit patterns
@@ -143,7 +145,7 @@ impl CircuitShield {
     /// Add preemptive padding to circuit
     async fn add_preemptive_padding(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Standard burst sizes to prevent circuit fingerprinting
         const BURST_SIZES: [usize; 3] = [6, 12, 18];
@@ -164,7 +166,7 @@ impl CircuitShield {
     /// Morph cells to standard sequence
     async fn morph_to_standard(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Use standard handshake pattern
         output.extend(self.standard_sequences.handshake.clone());
@@ -188,7 +190,7 @@ impl CircuitShield {
     /// Generate dummy cell for padding
     fn generate_dummy_cell(&self) -> Cell {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         let mut payload = vec![0u8; 509];
         rng.fill(&mut payload[..]);
 
@@ -379,7 +381,7 @@ impl VanguardManager {
 
     /// Select guards for circuit
     pub fn select_guards(&self) -> Vec<GuardInfo> {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         let mut guards = Vec::new();
         
         // Select one from each layer

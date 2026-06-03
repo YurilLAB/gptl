@@ -221,3 +221,32 @@ pub enum AntiSurveillanceError {
     #[error("Flow correlation defense error: {0}")]
     FlowCorrelationError(String),
 }
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// The full outgoing-protection pipeline must produce a `Send` future so it
+    /// can be driven by `tokio::spawn` on the multi-threaded runtime. This is a
+    /// compile-time assertion (the future is created but never polled): it fails
+    /// to compile if any stage holds a non-`Send` value (e.g. `thread_rng`)
+    /// across an `.await`.
+    #[tokio::test]
+    async fn protect_outgoing_future_is_send() {
+        fn assert_send<T: Send>(_: &T) {}
+        // (runs inside a runtime because the sub-component constructors create
+        // tokio timers eagerly; the protect_outgoing future itself is never
+        // polled — this only checks its type is Send.)
+        let mgr = AntiSurveillanceManager::new(AntiSurveillanceConfig::default());
+        let cell = Cell {
+            circuit_id: 1,
+            stream_id: 0,
+            command: CellCommand::Data,
+            payload: vec![0u8; 509],
+            timestamp: Instant::now(),
+        };
+        let fut = mgr.protect_outgoing(cell);
+        assert_send(&fut);
+    }
+}

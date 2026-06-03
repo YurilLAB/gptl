@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use rand::Rng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand_distr::{Distribution, Exp};
 
 /// Adaptive padding engine
@@ -125,7 +127,10 @@ impl PaddingEngine {
     /// Adaptive padding algorithm (WTF-PAD style)
     async fn adaptive_pad(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        // StdRng (not thread_rng) so this future stays `Send` and can be driven
+        // by tokio::spawn on the multi-threaded runtime: thread_rng is a
+        // non-Send Rc and is held here across `.await` points.
+        let mut rng = StdRng::from_entropy();
         let histogram = self.iat_histogram.read().await;
 
         // Group cells by time windows
@@ -164,7 +169,8 @@ impl PaddingEngine {
     /// Aggressive padding for maximum security
     async fn aggressive_pad(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        // StdRng so the future is `Send` (held across `.await`); see adaptive_pad.
+        let mut rng = StdRng::from_entropy();
 
         // Fixed burst sizes (defense against website fingerprinting)
         const BURST_SIZES: [usize; 3] = [10, 25, 50];

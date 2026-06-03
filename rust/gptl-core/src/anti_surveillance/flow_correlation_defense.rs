@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use rand::Rng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand::seq::{IteratorRandom, SliceRandom};
 
 /// Flow correlation defense manager
@@ -157,7 +159,7 @@ impl FlowCorrelationDefense {
     /// Split cells across multiple paths
     async fn split_across_paths(&self, cells: Vec<Cell>, num_paths: usize) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut path_cells: Vec<Vec<Cell>> = vec![Vec::new(); num_paths];
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Distribute cells using secret sharing approach
         for cell in cells {
@@ -214,7 +216,7 @@ impl FlowCorrelationDefense {
     /// Apply advanced flow obfuscation
     async fn apply_flow_obfuscation(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Randomize cell order within windows
         let window_size = 10;
@@ -242,7 +244,7 @@ impl FlowCorrelationDefense {
     /// Generate dummy cell
     fn generate_dummy_cell(&self) -> Cell {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         let mut payload = vec![0u8; 509];
         rng.fill(&mut payload[..]);
 
@@ -351,7 +353,7 @@ impl DeepCorrDefense {
 
     /// Apply adversarial perturbations to defeat deep learning correlation
     pub fn apply_perturbations(&self, data: &mut [u8]) {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Add small random perturbations
         for byte in data.iter_mut() {
@@ -363,7 +365,7 @@ impl DeepCorrDefense {
 
     /// Insert adversarial patterns
     pub fn insert_adversarial_pattern(&self, cells: &mut Vec<Cell>) {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Randomly insert pattern
         if let Some(pattern) = self.pattern_inserter.patterns.choose(&mut rng) {
@@ -454,7 +456,7 @@ impl MultiPathCoordinator {
     /// Rotate paths for active flows
     pub async fn rotate_paths(&self) {
         let mut assignments = self.assignments.write().await;
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         for (_flow_id, current_path) in assignments.iter_mut() {
             // Select different path

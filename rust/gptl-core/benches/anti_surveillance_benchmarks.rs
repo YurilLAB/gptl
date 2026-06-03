@@ -3,7 +3,7 @@ use gptl_core::{
     anti_surveillance::{
         AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand,
         padding::PaddingEngine,
-        timing_protection::TimingDefense,
+        timing_protection::TimingShield,
         traffic_shaping::TrafficShaper,
         circuit_obfuscation::CircuitShield,
     },
@@ -37,8 +37,6 @@ fn bench_padding_standard(c: &mut Criterion) {
     rt.block_on(engine.initialize()).unwrap();
 
     for size in [1, 10, 50, 100].iter() {
-        let cells = create_test_cells(*size, 1);
-
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.to_async(&rt).iter(|| async {
                 let cells = create_test_cells(*size, 1);
@@ -103,14 +101,14 @@ fn bench_timing_defense(c: &mut Criterion) {
     let mut group = c.benchmark_group("timing_defense");
 
     let config = Arc::new(RwLock::new(AntiSurveillanceConfig::default()));
-    let defense = TimingDefense::new(config);
+    let defense = TimingShield::new(config);
     rt.block_on(defense.initialize()).unwrap();
 
     for size in [10, 50, 100].iter() {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.to_async(&rt).iter(|| async {
                 let cells = create_test_cells(*size, 1);
-                black_box(defense.apply_timing_defense(cells).await.unwrap())
+                black_box(defense.protect_timing(cells).await.unwrap())
             });
         });
     }
@@ -130,7 +128,7 @@ fn bench_traffic_shaping(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.to_async(&rt).iter(|| async {
                 let cells = create_test_cells(*size, 1);
-                black_box(shaper.shape_traffic(cells).await.unwrap())
+                black_box(shaper.shape_cells(cells).await.unwrap())
             });
         });
     }
@@ -173,7 +171,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
     }));
 
     let padding = PaddingEngine::new(config.clone());
-    let timing = TimingDefense::new(config.clone());
+    let timing = TimingShield::new(config.clone());
     let shaping = TrafficShaper::new(config.clone());
 
     rt.block_on(async {
@@ -187,8 +185,8 @@ fn bench_full_pipeline(c: &mut Criterion) {
             b.to_async(&rt).iter(|| async {
                 let cells = create_test_cells(*size, 1);
                 let padded = padding.pad_cells(cells).await.unwrap();
-                let timed = timing.apply_timing_defense(padded).await.unwrap();
-                black_box(shaping.shape_traffic(timed).await.unwrap())
+                let timed = timing.protect_timing(padded).await.unwrap();
+                black_box(shaping.shape_cells(timed).await.unwrap())
             });
         });
     }

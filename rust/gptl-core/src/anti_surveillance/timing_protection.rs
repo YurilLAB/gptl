@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use rand::Rng;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use rand_distr::{Distribution, Normal, Poisson};
 
 /// Timing shield for protecting against timing analysis
@@ -73,7 +75,7 @@ impl TimingShield {
     /// Add random jitter to cell timing
     async fn add_jitter(&self, cells: Vec<Cell>, max_jitter: Duration) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Use Poisson distribution for jitter (more realistic)
         let jitter_dist = Poisson::new(max_jitter.as_millis() as f64 / 2.0)
@@ -161,7 +163,7 @@ impl TimingShield {
 
     /// Shuffle batch randomly
     async fn shuffle_batch(&self, batch: &mut [Cell]) {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         // Fisher-Yates shuffle
         for i in (1..batch.len()).rev() {
@@ -193,7 +195,7 @@ impl TimingShield {
         timestamp: Instant,
         std_dev_ms: f64,
     ) -> Result<Instant, AntiSurveillanceError> {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         let normal = Normal::new(0.0, std_dev_ms)
             .map_err(|e| AntiSurveillanceError::TimingError(format!("Normal distribution error: {}", e)))?;
@@ -255,7 +257,7 @@ impl ClockSkewProtection {
         let now = Instant::now();
         if now.duration_since(self.last_update) >= self.update_interval {
             // Randomize offset to prevent fingerprinting
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::from_entropy();
             self.offset_ms = rng.gen_range(-100..100);
             self.last_update = now;
         }
@@ -357,7 +359,7 @@ impl WatermarkDetector {
     pub async fn mitigate_watermark(&self, cells: Vec<Cell>) -> Vec<Cell> {
         // Add random delays to break watermark pattern
         let mut output = Vec::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::from_entropy();
         
         for cell in cells {
             // Random delay up to 100ms
