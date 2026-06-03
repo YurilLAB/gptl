@@ -56,7 +56,7 @@ fn bench_hybrid_kex(c: &mut Criterion) {
 
 fn bench_ratchet_next_send(c: &mut Criterion) {
     let secret = SharedSecret(Zeroizing::new(vec![0x42u8; 32]));
-    let mut ratchet = KeyRatchet::new(&secret).unwrap();
+    let mut ratchet = KeyRatchet::new(&secret, true).unwrap();
     c.bench_function("ratchet_next_send_key", |b| {
         b.iter(|| black_box(ratchet.next_send_key().unwrap()));
     });

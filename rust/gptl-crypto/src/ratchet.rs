@@ -136,18 +136,28 @@ pub struct KeyRatchet {
 
 impl KeyRatchet {
     /// Create new key ratchet from a shared secret using HKDF-SHA256.
-    pub fn new(shared_secret: &SharedSecret) -> Result<Self, KeyExchangeError> {
+    ///
+    /// `initiator` selects the role: the two peers MUST pass opposite values so
+    /// that one peer's *send* chain equals the other peer's *recv* chain. (If
+    /// both sides derived the send chain from the same label, both directions
+    /// would share a key stream — catastrophic key reuse — and a sender's key
+    /// would not match the receiver's.)
+    pub fn new(shared_secret: &SharedSecret, initiator: bool) -> Result<Self, KeyExchangeError> {
         if shared_secret.0.len() < 32 {
             return Err(KeyExchangeError::SharedSecretFailed(
                 "Shared secret too short".to_string(),
             ));
         }
 
-        // Derive initial root and chain keys via HKDF (salt = zero vector for initial derivation)
+        // Derive initial root and two *directional* chain keys via HKDF
+        // (salt = zero vector for the initial derivation).
         let zeros = [0u8; 32];
         let root_key = Self::hkdf_derive(&shared_secret.0, &zeros, b"gptl-root-key");
-        let send_chain_key = Self::hkdf_derive(&shared_secret.0, &root_key, b"gptl-send-chain");
-        let recv_chain_key = Self::hkdf_derive(&shared_secret.0, &root_key, b"gptl-recv-chain");
+        let i2r = Self::hkdf_derive(&shared_secret.0, &root_key, b"gptl-chain-initiator-to-responder");
+        let r2i = Self::hkdf_derive(&shared_secret.0, &root_key, b"gptl-chain-responder-to-initiator");
+
+        // Assign send/recv by role so they cross-wire between the two peers.
+        let (send_chain_key, recv_chain_key) = if initiator { (i2r, r2i) } else { (r2i, i2r) };
 
         Ok(Self {
             root_key: Zeroizing::new(root_key),
@@ -196,33 +206,39 @@ impl KeyRatchet {
         Ok(key)
     }
 
-    /// Perform DH ratchet step per Signal Double Ratchet specification.
+    /// Perform a DH ratchet step (simplified Double Ratchet).
     ///
-    /// `new_root_key, new_chain_key = KDF_RK(root_key, dh_output)`
-    /// where the current root key is used as the HKDF salt, ensuring
-    /// the chain of prior root keys feeds into every new key.
-    pub fn ratchet_dh(&mut self, dh_output: &SharedSecret) -> Result<(), KeyExchangeError> {
+    /// `sending = true` is the step you take after generating a fresh DH key
+    /// pair (updates the root and the *send* chain). `sending = false` is the
+    /// step you take on receiving the peer's new DH public key (updates the root
+    /// and the *recv* chain). Both peers derive the new chain from the same
+    /// `dh_output` and the (equal) current root with the same label, so your
+    /// send chain after a send-step equals the peer's recv chain after the
+    /// matching recv-step. Steps must alternate (send/recv) to stay in sync.
+    pub fn ratchet_dh(
+        &mut self,
+        dh_output: &SharedSecret,
+        sending: bool,
+    ) -> Result<(), KeyExchangeError> {
         if dh_output.0.len() < 32 {
             return Err(KeyExchangeError::SharedSecretFailed(
                 "DH output too short".to_string(),
             ));
         }
 
-        // KDF_RK: HKDF(salt=root_key, IKM=dh_output)
-        // Produces new root key and new sending chain key (per Double Ratchet spec).
+        // KDF_RK: HKDF(salt=root_key, IKM=dh_output) → new root + new chain.
         let new_root_key = Self::hkdf_derive(&dh_output.0, &self.root_key[..], b"ratchet-root-key");
         let new_chain_key =
             Self::hkdf_derive(&dh_output.0, &self.root_key[..], b"ratchet-chain-key");
 
         *self.root_key = new_root_key;
-        *self.send_chain_key = new_chain_key;
-        // recv_chain_key is updated when a NEW DH public key is received from the
-        // remote party (the receiving-side ratchet step). Updating it here from
-        // our own DH output would break the symmetric chain — the remote's
-        // send chain (derived from the same dh_output with the same KDF inputs)
-        // would not match our recv chain.
-        self.send_count = 0;
-        // recv_count is reset on the receiving-side DH step, not here.
+        if sending {
+            *self.send_chain_key = new_chain_key;
+            self.send_count = 0;
+        } else {
+            *self.recv_chain_key = new_chain_key;
+            self.recv_count = 0;
+        }
 
         Ok(())
     }
@@ -313,7 +329,7 @@ mod tests {
     #[test]
     fn test_key_ratchet() {
         let shared_secret = SharedSecret(Zeroizing::new(vec![0u8; 32]));
-        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+        let mut ratchet = KeyRatchet::new(&shared_secret, true).unwrap();
 
         let key1 = ratchet.next_send_key().unwrap();
         let key2 = ratchet.next_send_key().unwrap();
@@ -328,7 +344,7 @@ mod tests {
     #[test]
     fn test_key_ratchet_separate_chains() {
         let shared_secret = SharedSecret(Zeroizing::new(vec![0u8; 32]));
-        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+        let mut ratchet = KeyRatchet::new(&shared_secret, true).unwrap();
 
         let send_key = ratchet.next_send_key().unwrap();
         let recv_key = ratchet.next_recv_key().unwrap();
@@ -342,14 +358,14 @@ mod tests {
         // After a DH ratchet step the new message keys must differ from
         // the ones produced before the step.
         let shared_secret = SharedSecret(Zeroizing::new(vec![0xABu8; 32]));
-        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+        let mut ratchet = KeyRatchet::new(&shared_secret, true).unwrap();
 
         // Produce a key before the ratchet step
         let old_send_key = ratchet.next_send_key().unwrap();
 
         // Perform a DH ratchet step with a fresh DH output
         let new_dh_output = SharedSecret(Zeroizing::new(vec![0x99u8; 32]));
-        ratchet.ratchet_dh(&new_dh_output).unwrap();
+        ratchet.ratchet_dh(&new_dh_output, true).unwrap();
 
         // After the ratchet the next send key must differ from the pre-ratchet key
         let new_send_key = ratchet.next_send_key().unwrap();
@@ -362,7 +378,7 @@ mod tests {
     #[test]
     fn test_ratchet_after_max_messages_send_count_advances() {
         let shared_secret = SharedSecret(Zeroizing::new(vec![0x01u8; 32]));
-        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+        let mut ratchet = KeyRatchet::new(&shared_secret, true).unwrap();
 
         // Simulate sending max_messages worth of messages (use 100 as a proxy)
         let limit = 100usize;
@@ -387,72 +403,80 @@ mod tests {
     }
 
     #[test]
-    fn test_ratchet_state_after_dh_step_resets_counters() {
+    fn test_ratchet_dh_step_resets_relevant_counter() {
         let shared_secret = SharedSecret(Zeroizing::new(vec![0x07u8; 32]));
-        let mut ratchet = KeyRatchet::new(&shared_secret).unwrap();
+        let mut ratchet = KeyRatchet::new(&shared_secret, true).unwrap();
 
-        // Advance the send chain a few steps
         for _ in 0..5 {
             ratchet.next_send_key().unwrap();
         }
+        for _ in 0..3 {
+            ratchet.next_recv_key().unwrap();
+        }
         assert_eq!(ratchet.stats().send_count, 5);
+        assert_eq!(ratchet.stats().recv_count, 3);
 
-        // A DH ratchet step resets the chain counters
+        // A *sending* DH step resets only the send counter.
         let dh = SharedSecret(Zeroizing::new(vec![0x77u8; 32]));
-        ratchet.ratchet_dh(&dh).unwrap();
+        ratchet.ratchet_dh(&dh, true).unwrap();
+        assert_eq!(ratchet.stats().send_count, 0, "send_count resets on a send-step");
+        assert_eq!(ratchet.stats().recv_count, 3, "recv_count unchanged by a send-step");
 
-        assert_eq!(
-            ratchet.stats().send_count,
-            0,
-            "send_count must reset to 0 after a DH ratchet step"
-        );
-        assert_eq!(
-            ratchet.stats().recv_count,
-            0,
-            "recv_count must reset to 0 after a DH ratchet step"
-        );
+        // A *receiving* DH step resets only the recv counter.
+        let dh2 = SharedSecret(Zeroizing::new(vec![0x88u8; 32]));
+        ratchet.ratchet_dh(&dh2, false).unwrap();
+        assert_eq!(ratchet.stats().recv_count, 0, "recv_count resets on a recv-step");
     }
 
     #[test]
-    fn test_ratchet_two_parties_send_recv_chains_are_symmetric() {
-        // When Alice and Bob start from the same shared secret, the chains are
-        // deterministic: Alice's send keys and Bob's send keys both advance the
-        // same chain key, so repeated calls on the same chain must produce the
-        // same sequence for both parties (since they share the same root).
+    fn test_ratchet_two_parties_chains_cross_wire() {
+        // The initiator's SEND chain must equal the responder's RECV chain (and
+        // vice versa), so a message encrypted by one decrypts on the other, and
+        // the two directions use INDEPENDENT key streams. (Regression: the old
+        // code derived both peers' send chains from the same label, making both
+        // directions share a key stream — catastrophic key reuse.)
         let secret = SharedSecret(Zeroizing::new(vec![0x42u8; 32]));
-        let mut alice = KeyRatchet::new(&secret).unwrap();
-        let mut bob = KeyRatchet::new(&secret).unwrap();
+        let mut initiator = KeyRatchet::new(&secret, true).unwrap();
+        let mut responder = KeyRatchet::new(&secret, false).unwrap();
 
-        // Both parties' send chains start from the same chain key → same keys
-        let alice_s1 = alice.next_send_key().unwrap();
-        let bob_s1 = bob.next_send_key().unwrap();
-        assert_eq!(
-            alice_s1, bob_s1,
-            "Alice and Bob send key[0] must be equal when starting from same secret"
-        );
+        // initiator -> responder
+        let i_send1 = initiator.next_send_key().unwrap();
+        let r_recv1 = responder.next_recv_key().unwrap();
+        assert_eq!(i_send1, r_recv1, "initiator send[0] must equal responder recv[0]");
+        let i_send2 = initiator.next_send_key().unwrap();
+        let r_recv2 = responder.next_recv_key().unwrap();
+        assert_eq!(i_send2, r_recv2, "initiator send[1] must equal responder recv[1]");
 
-        let alice_s2 = alice.next_send_key().unwrap();
-        let bob_s2 = bob.next_send_key().unwrap();
-        assert_eq!(
-            alice_s2, bob_s2,
-            "Alice and Bob send key[1] must be equal when starting from same secret"
-        );
+        // responder -> initiator
+        let r_send1 = responder.next_send_key().unwrap();
+        let i_recv1 = initiator.next_recv_key().unwrap();
+        assert_eq!(r_send1, i_recv1, "responder send[0] must equal initiator recv[0]");
 
-        // Similarly, recv chains are also symmetric
-        let mut alice2 = KeyRatchet::new(&secret).unwrap();
-        let mut bob2 = KeyRatchet::new(&secret).unwrap();
-        let alice_r1 = alice2.next_recv_key().unwrap();
-        let bob_r1 = bob2.next_recv_key().unwrap();
-        assert_eq!(
-            alice_r1, bob_r1,
-            "Alice and Bob recv key[0] must be equal when starting from same secret"
-        );
+        // The two directions must NOT share a key stream.
+        assert_ne!(i_send1, r_send1, "the two directions must use independent keys");
+    }
+
+    #[test]
+    fn test_dh_ratchet_send_step_matches_peer_recv_step() {
+        // After a DH step, the initiator's new send chain must equal the
+        // responder's new recv chain (both derive from the same dh_output).
+        let secret = SharedSecret(Zeroizing::new(vec![0x11u8; 32]));
+        let mut initiator = KeyRatchet::new(&secret, true).unwrap();
+        let mut responder = KeyRatchet::new(&secret, false).unwrap();
+
+        let dh = SharedSecret(Zeroizing::new(vec![0x55u8; 32]));
+        initiator.ratchet_dh(&dh, true).unwrap(); // initiator generated a new DH key
+        responder.ratchet_dh(&dh, false).unwrap(); // responder received it
+
+        let i_send = initiator.next_send_key().unwrap();
+        let r_recv = responder.next_recv_key().unwrap();
+        assert_eq!(i_send, r_recv, "post-DH send chain must match peer's recv chain");
     }
 
     #[test]
     fn test_ratchet_short_shared_secret_rejected() {
         let short = SharedSecret(Zeroizing::new(vec![0u8; 16]));
-        let result = KeyRatchet::new(&short);
+        let result = KeyRatchet::new(&short, true);
         assert!(
             result.is_err(),
             "shared secret shorter than 32 bytes must be rejected"
