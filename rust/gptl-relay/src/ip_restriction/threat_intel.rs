@@ -391,15 +391,24 @@ impl ThreatFeed {
         }
 
         let json: serde_json::Value = response.json().await.map_err(|_| ())?;
-        let data = json.get("data").and_then(|d| d.get("attributes")).ok_or(())?;
+        let data = json
+            .get("data")
+            .and_then(|d| d.get("attributes"))
+            .ok_or(())?;
 
         let stats = data.get("last_analysis_stats").ok_or(())?;
         let malicious = stats.get("malicious").and_then(|v| v.as_u64()).unwrap_or(0);
-        let suspicious = stats.get("suspicious").and_then(|v| v.as_u64()).unwrap_or(0);
+        let suspicious = stats
+            .get("suspicious")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let total = malicious
             + suspicious
             + stats.get("harmless").and_then(|v| v.as_u64()).unwrap_or(0)
-            + stats.get("undetected").and_then(|v| v.as_u64()).unwrap_or(0);
+            + stats
+                .get("undetected")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
 
         if total == 0 {
             return Ok(None);
@@ -901,13 +910,17 @@ mod tests {
         // Fail-closed: the same error blocks the IP.
         let closed = ThreatIntelligence::new().with_fail_closed(true);
         assert!(
-            closed.aggregate(ip, vec![("feed".into(), Err(()))]).is_some(),
+            closed
+                .aggregate(ip, vec![("feed".into(), Err(()))])
+                .is_some(),
             "fail-closed must block when a feed could not be consulted"
         );
 
         // Fail-closed with a clean verdict still allows.
         assert!(
-            closed.aggregate(ip, vec![("feed".into(), Ok(None))]).is_none(),
+            closed
+                .aggregate(ip, vec![("feed".into(), Ok(None))])
+                .is_none(),
             "a clean verdict is allowed even in fail-closed mode"
         );
     }

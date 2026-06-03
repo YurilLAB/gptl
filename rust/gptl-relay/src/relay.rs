@@ -519,14 +519,19 @@ mod tests {
         });
         let p1 = Arc::clone(&server.conn_semaphore).try_acquire_owned();
         let p2 = Arc::clone(&server.conn_semaphore).try_acquire_owned();
-        assert!(p1.is_ok() && p2.is_ok(), "first max_connections permits available");
+        assert!(
+            p1.is_ok() && p2.is_ok(),
+            "first max_connections permits available"
+        );
 
         let p3 = Arc::clone(&server.conn_semaphore).try_acquire_owned();
         assert!(p3.is_err(), "a connection beyond the cap must be shed");
 
         drop(p1);
         assert!(
-            Arc::clone(&server.conn_semaphore).try_acquire_owned().is_ok(),
+            Arc::clone(&server.conn_semaphore)
+                .try_acquire_owned()
+                .is_ok(),
             "a permit frees when its connection finishes"
         );
     }
