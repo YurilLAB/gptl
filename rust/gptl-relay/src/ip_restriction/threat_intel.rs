@@ -26,6 +26,10 @@ pub struct ThreatIntelligence {
     min_threat_score: u8,
     /// Categories to always block
     auto_block_categories: Vec<ThreatCategory>,
+    /// When true, an IP whose lookup could not be completed against a configured
+    /// feed (network/parse error) is BLOCKED rather than admitted. Defaults to
+    /// false (fail-open) for availability; enable for high-assurance deployments.
+    fail_closed: bool,
     /// Statistics
     stats: Arc<RwLock<ThreatStats>>,
 }
@@ -44,8 +48,16 @@ impl ThreatIntelligence {
                 ThreatCategory::Botnet,
                 ThreatCategory::Scanner,
             ],
+            fail_closed: false,
             stats: Arc::new(RwLock::new(ThreatStats::default())),
         }
+    }
+
+    /// Enable fail-closed mode: block IPs whose lookup could not be completed
+    /// against a configured feed (see the `fail_closed` field).
+    pub fn with_fail_closed(mut self, fail_closed: bool) -> Self {
+        self.fail_closed = fail_closed;
+        self
     }
 
     /// Configure cache TTL
@@ -106,6 +118,24 @@ impl ThreatIntelligence {
 
     /// Query all configured threat feeds
     async fn query_threat_feeds(&self, ip: IpAddr) -> Option<ThreatInfo> {
+        let mut results = Vec::with_capacity(self.feeds.len());
+        for feed in &self.feeds {
+            results.push((feed.name().to_string(), feed.query(ip).await));
+        }
+        self.aggregate(ip, results)
+    }
+
+    /// Combine per-feed results into a block/allow decision.
+    ///
+    /// Each result is `Ok(Some)` (threat), `Ok(None)` (clean), or `Err(())`
+    /// (lookup could not be completed). An IP is blocked when the aggregated
+    /// score crosses the threshold, when it carries any auto-block category, or
+    /// — in fail-closed mode — when any configured feed could not be consulted.
+    fn aggregate(
+        &self,
+        ip: IpAddr,
+        results: Vec<(String, Result<Option<ThreatInfo>, ()>)>,
+    ) -> Option<ThreatInfo> {
         let mut aggregated = ThreatInfo {
             ip,
             score: 0,
@@ -114,14 +144,18 @@ impl ThreatIntelligence {
             sources: Vec::new(),
             fetched_at: Utc::now(),
         };
+        let mut any_error = false;
 
-        for feed in &self.feeds {
-            if let Some(info) = feed.query(ip).await {
-                // Merge threat information
-                aggregated.score = aggregated.score.max(info.score);
-                aggregated.categories.extend(info.categories);
-                aggregated.reports.extend(info.reports);
-                aggregated.sources.push(feed.name().to_string());
+        for (name, result) in results {
+            match result {
+                Ok(Some(info)) => {
+                    aggregated.score = aggregated.score.max(info.score);
+                    aggregated.categories.extend(info.categories);
+                    aggregated.reports.extend(info.reports);
+                    aggregated.sources.push(name);
+                }
+                Ok(None) => {}
+                Err(()) => any_error = true,
             }
         }
 
@@ -139,6 +173,10 @@ impl ThreatIntelligence {
             .any(|c| self.auto_block_categories.contains(c));
 
         if aggregated.score >= self.min_threat_score || category_flagged {
+            Some(aggregated)
+        } else if self.fail_closed && any_error {
+            // Could not verify against a configured feed; deny in fail-closed mode.
+            aggregated.sources.push("fail-closed".to_string());
             Some(aggregated)
         } else {
             None
@@ -226,20 +264,24 @@ impl ThreatFeed {
         matches!(self, ThreatFeed::AbuseIpDb { .. })
     }
 
-    /// Query the feed for an IP
-    pub async fn query(&self, ip: IpAddr) -> Option<ThreatInfo> {
+    /// Query the feed for an IP.
+    ///
+    /// `Ok(Some)` = threat data, `Ok(None)` = clean / not listed, `Err(())` =
+    /// the lookup could not be completed (network/parse error). The caller uses
+    /// the error case to decide fail-open vs fail-closed.
+    pub async fn query(&self, ip: IpAddr) -> Result<Option<ThreatInfo>, ()> {
         match self {
             ThreatFeed::AbuseIpDb { api_key } => self.query_abuseipdb(ip, api_key).await,
             ThreatFeed::VirusTotal { api_key } => self.query_virustotal(ip, api_key).await,
             ThreatFeed::AlienVaultOtx { api_key } => self.query_alienvault(ip, api_key).await,
             ThreatFeed::CustomCsv { .. } => {
-                // Would fetch and parse CSV
-                None
+                // Would fetch and parse CSV; treated as "clean" until implemented.
+                Ok(None)
             }
-            ThreatFeed::LocalBlocklist { entries } => entries
+            ThreatFeed::LocalBlocklist { entries } => Ok(entries
                 .iter()
                 .find(|(eip, _)| *eip == ip)
-                .map(|(_, info)| info.clone()),
+                .map(|(_, info)| info.clone())),
         }
     }
 
@@ -260,15 +302,12 @@ impl ThreatFeed {
         }
     }
 
-    async fn query_abuseipdb(&self, ip: IpAddr, api_key: &str) -> Option<ThreatInfo> {
+    async fn query_abuseipdb(&self, ip: IpAddr, api_key: &str) -> Result<Option<ThreatInfo>, ()> {
         // AbuseIPDB API v2: https://docs.abuseipdb.com/
-        let client = match reqwest::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-        {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
+            .map_err(|_| ())?;
 
         let url = format!(
             "https://api.abuseipdb.com/api/v2/check?ipAddress={}&maxAgeInDays=90",
@@ -281,20 +320,26 @@ impl ThreatFeed {
             .header("Accept", "application/json")
             .send()
             .await
-            .ok()?;
+            .map_err(|_| ())?;
 
         if !response.status().is_success() {
-            return None;
+            return Err(());
         }
 
-        let json: serde_json::Value = response.json().await.ok()?;
-        let data = json.get("data")?;
+        let json: serde_json::Value = response.json().await.map_err(|_| ())?;
+        let data = json.get("data").ok_or(())?;
 
-        let abuse_score = data.get("abuseConfidenceScore")?.as_u64()? as u8;
-        let is_whitelisted = data.get("isWhitelisted")?.as_bool().unwrap_or(false);
+        let abuse_score = data
+            .get("abuseConfidenceScore")
+            .and_then(|v| v.as_u64())
+            .ok_or(())? as u8;
+        let is_whitelisted = data
+            .get("isWhitelisted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if is_whitelisted {
-            return None;
+            return Ok(None);
         }
 
         let mut categories = Vec::new();
@@ -315,25 +360,22 @@ impl ThreatFeed {
         categories.sort();
         categories.dedup();
 
-        Some(ThreatInfo {
+        Ok(Some(ThreatInfo {
             ip,
             score: abuse_score,
             categories,
             reports: vec![],
             sources: vec!["AbuseIPDB".to_string()],
             fetched_at: Utc::now(),
-        })
+        }))
     }
 
-    async fn query_virustotal(&self, ip: IpAddr, api_key: &str) -> Option<ThreatInfo> {
+    async fn query_virustotal(&self, ip: IpAddr, api_key: &str) -> Result<Option<ThreatInfo>, ()> {
         // VirusTotal API v3: https://developers.virustotal.com/reference/ip-info
-        let client = match reqwest::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-        {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
+            .map_err(|_| ())?;
 
         let url = format!("https://www.virustotal.com/api/v3/ip_addresses/{}", ip);
 
@@ -342,25 +384,25 @@ impl ThreatFeed {
             .header("x-apikey", api_key)
             .send()
             .await
-            .ok()?;
+            .map_err(|_| ())?;
 
         if !response.status().is_success() {
-            return None;
+            return Err(());
         }
 
-        let json: serde_json::Value = response.json().await.ok()?;
-        let data = json.get("data")?.get("attributes")?;
+        let json: serde_json::Value = response.json().await.map_err(|_| ())?;
+        let data = json.get("data").and_then(|d| d.get("attributes")).ok_or(())?;
 
-        let stats = data.get("last_analysis_stats")?;
-        let malicious = stats.get("malicious")?.as_u64().unwrap_or(0);
-        let suspicious = stats.get("suspicious")?.as_u64().unwrap_or(0);
+        let stats = data.get("last_analysis_stats").ok_or(())?;
+        let malicious = stats.get("malicious").and_then(|v| v.as_u64()).unwrap_or(0);
+        let suspicious = stats.get("suspicious").and_then(|v| v.as_u64()).unwrap_or(0);
         let total = malicious
             + suspicious
-            + stats.get("harmless")?.as_u64().unwrap_or(0)
-            + stats.get("undetected")?.as_u64().unwrap_or(0);
+            + stats.get("harmless").and_then(|v| v.as_u64()).unwrap_or(0)
+            + stats.get("undetected").and_then(|v| v.as_u64()).unwrap_or(0);
 
         if total == 0 {
-            return None;
+            return Ok(None);
         }
 
         // Calculate threat score based on detection ratio
@@ -387,25 +429,22 @@ impl ThreatFeed {
             categories.push(ThreatCategory::Malware);
         }
 
-        Some(ThreatInfo {
+        Ok(Some(ThreatInfo {
             ip,
             score,
             categories,
             reports: vec![],
             sources: vec!["VirusTotal".to_string()],
             fetched_at: Utc::now(),
-        })
+        }))
     }
 
-    async fn query_alienvault(&self, ip: IpAddr, api_key: &str) -> Option<ThreatInfo> {
+    async fn query_alienvault(&self, ip: IpAddr, api_key: &str) -> Result<Option<ThreatInfo>, ()> {
         // AlienVault OTX API: https://otx.alienvault.com/api
-        let client = match reqwest::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-        {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
+            .map_err(|_| ())?;
 
         let url = format!(
             "https://otx.alienvault.com/api/v1/indicators/IPv4/{}/general",
@@ -417,13 +456,13 @@ impl ThreatFeed {
             .header("X-OTX-API-KEY", api_key)
             .send()
             .await
-            .ok()?;
+            .map_err(|_| ())?;
 
         if !response.status().is_success() {
-            return None;
+            return Err(());
         }
 
-        let json: serde_json::Value = response.json().await.ok()?;
+        let json: serde_json::Value = response.json().await.map_err(|_| ())?;
 
         let pulse_count = json
             .get("pulse_info")
@@ -432,7 +471,7 @@ impl ThreatFeed {
             .unwrap_or(0);
 
         if pulse_count == 0 {
-            return None;
+            return Ok(None);
         }
 
         // Score based on number of pulses (threat intelligence reports)
@@ -476,14 +515,14 @@ impl ThreatFeed {
         categories.sort();
         categories.dedup();
 
-        Some(ThreatInfo {
+        Ok(Some(ThreatInfo {
             ip,
             score,
             categories,
             reports: vec![],
             sources: vec!["AlienVault OTX".to_string()],
             fetched_at: Utc::now(),
-        })
+        }))
     }
 
     async fn report_abuseipdb(
@@ -843,9 +882,34 @@ mod tests {
             entries: vec![(ip, threat_info.clone())],
         };
 
-        let result = feed.query(ip).await;
+        let result = feed.query(ip).await.unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().score, 100);
+    }
+
+    #[tokio::test]
+    async fn test_fail_closed_blocks_on_lookup_error() {
+        let ip: IpAddr = "203.0.113.50".parse().unwrap();
+
+        // Fail-open (default): an un-checkable IP (feed errored) is allowed.
+        let open = ThreatIntelligence::new();
+        assert!(
+            open.aggregate(ip, vec![("feed".into(), Err(()))]).is_none(),
+            "fail-open must allow when a feed errors"
+        );
+
+        // Fail-closed: the same error blocks the IP.
+        let closed = ThreatIntelligence::new().with_fail_closed(true);
+        assert!(
+            closed.aggregate(ip, vec![("feed".into(), Err(()))]).is_some(),
+            "fail-closed must block when a feed could not be consulted"
+        );
+
+        // Fail-closed with a clean verdict still allows.
+        assert!(
+            closed.aggregate(ip, vec![("feed".into(), Ok(None))]).is_none(),
+            "a clean verdict is allowed even in fail-closed mode"
+        );
     }
 
     #[tokio::test]
