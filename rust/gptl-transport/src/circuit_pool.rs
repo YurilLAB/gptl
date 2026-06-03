@@ -14,6 +14,7 @@ use crate::{
     TransportError,
 };
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -85,6 +86,11 @@ impl PooledCircuit {
 pub struct CircuitPool {
     config: PoolConfig,
     circuits: Vec<PooledCircuit>,
+    /// Metadata (created_at, accumulated stream_count) for circuits currently
+    /// checked out via `acquire`, keyed by circuit id, so `release` can restore
+    /// the real age and usage instead of resetting them (which would prevent
+    /// age/stream-limit rotation from ever firing on reused circuits).
+    leased: HashMap<u32, (Instant, usize)>,
 }
 
 impl CircuitPool {
@@ -93,6 +99,7 @@ impl CircuitPool {
         Self {
             config,
             circuits: Vec::new(),
+            leased: HashMap::new(),
         }
     }
 
@@ -173,6 +180,9 @@ impl CircuitPool {
         });
         if let Some(i) = pos {
             let pc = self.circuits.remove(i);
+            // Remember the real age/usage so release() can restore it.
+            self.leased
+                .insert(pc.circuit.circuit_id, (pc.created_at, pc.stream_count));
             debug!(
                 "pool: acquired circuit (pool size now {})",
                 self.circuits.len()
@@ -185,9 +195,20 @@ impl CircuitPool {
 
     /// Return a circuit to the pool if it is still usable.
     pub async fn release(&mut self, circuit: Circuit, path: RelayPath) {
-        let mut pc = PooledCircuit::new(circuit, path);
-        // Increment usage counter so we know how many streams went through it.
-        pc.stream_count += 1;
+        // Restore the circuit's real creation time and accumulated stream count
+        // from when it was acquired, rather than resetting them (which would let
+        // a reused circuit live forever and never hit the stream cap). Count one
+        // more stream for this lease.
+        let (created_at, prior_streams) = self
+            .leased
+            .remove(&circuit.circuit_id)
+            .unwrap_or_else(|| (Instant::now(), 0));
+        let pc = PooledCircuit {
+            circuit,
+            created_at,
+            stream_count: prior_streams + 1,
+            path,
+        };
 
         if pc.is_expired(self.config.max_circuit_age_secs)
             || pc.is_full(self.config.max_streams_per_circuit)
@@ -426,6 +447,59 @@ mod tests {
         pool.refill(&bootstrap, &selector, None).await;
 
         assert_eq!(pool.available_count(), 1);
+    }
+
+    // ── release preserves age and accumulates stream count ────────────────────
+
+    #[tokio::test]
+    async fn test_release_preserves_age_and_accumulates_streams() {
+        let key = RelayStaticKey::generate();
+        let desc = spawn_fake_relay(key).await;
+
+        let bootstrap = Arc::new(BootstrapConfig { relays: vec![desc] });
+        let path_config = PathConfig {
+            num_hops: 1,
+            exclude_same_subnet: false,
+            exclude_same_nickname_prefix: false,
+        };
+        let pool_config = PoolConfig {
+            size: 1,
+            max_streams_per_circuit: 3,
+            max_circuit_age_secs: 3600,
+            ..Default::default()
+        };
+
+        let mut pool = CircuitPool::new(pool_config);
+        let selector = PathSelector::new(path_config);
+        pool.refill(&bootstrap, &selector, None).await;
+
+        let initial_created = pool.circuits[0].created_at;
+
+        // Each acquire/release lease must accumulate the stream count and keep
+        // the original creation time (regression: release reset both, so a
+        // circuit never aged out and its stream counter never passed 1).
+        for expected in 1..=2usize {
+            let (c, p) = pool.acquire().await.unwrap();
+            pool.release(c, p).await;
+            assert_eq!(pool.circuits.len(), 1);
+            assert_eq!(
+                pool.circuits[0].stream_count, expected,
+                "stream_count must accumulate across leases"
+            );
+            assert_eq!(
+                pool.circuits[0].created_at, initial_created,
+                "created_at must be preserved across release"
+            );
+        }
+
+        // The third lease reaches the stream cap (3) → the circuit retires.
+        let (c, p) = pool.acquire().await.unwrap();
+        pool.release(c, p).await;
+        assert_eq!(
+            pool.circuits.len(),
+            0,
+            "circuit must retire once it reaches the stream cap"
+        );
     }
 
     // ── acquire removes from pool ─────────────────────────────────────────────
