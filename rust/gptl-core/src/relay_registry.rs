@@ -204,9 +204,16 @@ impl RelayInfo {
             }
         }
 
-        // Check region
+        // Check region allow-filter
         if let Some(ref region) = criteria.region {
             if self.location.country_code.as_ref() != Some(region) {
+                return false;
+            }
+        }
+
+        // Check region exclusions (geographic diversity across hops)
+        if let Some(ref code) = self.location.country_code {
+            if criteria.excluded_regions.contains(code) {
                 return false;
             }
         }
@@ -286,8 +293,10 @@ pub struct RelayCriteria {
     pub min_security_level: Option<SecurityLevel>,
     /// Minimum bandwidth required (bytes/sec)
     pub min_bandwidth: Option<u64>,
-    /// Region/country code preference
+    /// Region/country code preference (allow-filter: only this region)
     pub region: Option<String>,
+    /// Country codes to exclude (for geographic diversity across hops)
+    pub excluded_regions: Vec<String>,
     /// Require healthy status
     pub require_healthy: bool,
     /// Relay IDs to exclude
@@ -911,6 +920,22 @@ mod tests {
         // Non-base64 garbage must error too, not panic.
         list.authority_key = "!!!not base64!!!".to_string();
         assert!(list.verify().is_err());
+    }
+
+    #[test]
+    fn test_criteria_excludes_regions() {
+        let mut relay = RelayInfo::new("1.2.3.4:9001".to_string(), "k".to_string(), 1_000_000);
+        relay.location.country_code = Some("US".to_string());
+
+        let mut criteria = RelayCriteria::new();
+        // No exclusions → matches.
+        assert!(relay.matches_criteria(&criteria));
+        // Excluding the relay's own region → does not match (diversity enforced).
+        criteria.excluded_regions = vec!["US".to_string()];
+        assert!(!relay.matches_criteria(&criteria));
+        // Excluding a different region → still matches.
+        criteria.excluded_regions = vec!["DE".to_string()];
+        assert!(relay.matches_criteria(&criteria));
     }
 
     #[tokio::test]

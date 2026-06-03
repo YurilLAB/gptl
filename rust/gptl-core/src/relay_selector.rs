@@ -263,11 +263,11 @@ impl<R: RelayRegistry> RelaySelector<R> {
             let mut criteria = self.default_criteria.clone();
             criteria.excluded_ids = excluded_ids.clone();
 
-            // Exclude same region for diversity (after first hop)
+            // Exclude the country codes already used by previous hops so the
+            // path spans multiple jurisdictions (previously this block was a
+            // no-op, so all hops could land in the same region).
             if exclude_same_region && i > 0 {
-                for _region in &excluded_regions {
-                    // This is a simplified check - in production you'd use proper region exclusion
-                }
+                criteria.excluded_regions = excluded_regions.iter().cloned().collect();
             }
 
             match self.select_with_criteria(&criteria).await {
@@ -372,12 +372,17 @@ impl<R: RelayRegistry> RelaySelector<R> {
             .into_iter()
             .filter(|relay| {
                 if let Some(record) = failures.get(&relay.id) {
-                    // Check if cooldown has passed
-                    if now.duration_since(record.timestamp) < self.retry_cooldown {
-                        return false;
-                    }
-                    // Check if max retries exceeded
-                    if record.retry_count >= self.max_retries {
+                    // Back off for `retry_cooldown`, scaled by the number of
+                    // consecutive failures (so flakier relays wait longer) but
+                    // capped at `max_retries` multiples. Crucially the penalty is
+                    // BOUNDED: once it elapses the relay is eligible again. The
+                    // old code excluded any relay at >= max_retries forever, and
+                    // since retry_count is only reset by a success that requires
+                    // re-selection, such relays were permanently removed —
+                    // steadily starving the usable pool.
+                    let multiplier = record.retry_count.clamp(1, self.max_retries);
+                    let penalty = self.retry_cooldown.saturating_mul(multiplier);
+                    if now.duration_since(record.timestamp) < penalty {
                         return false;
                     }
                 }
@@ -866,6 +871,48 @@ mod tests {
         
         // Higher bandwidth relays should be selected more often
         assert!(high_bandwidth_count > 20);
+    }
+
+    #[tokio::test]
+    async fn test_failed_relay_recovers_after_cooldown() {
+        // Regression: a relay that hit max_retries was excluded forever (its
+        // retry_count could only be reset by a success, which required being
+        // re-selected — impossible while excluded). After the bounded backoff
+        // it must become selectable again.
+        let registry = Arc::new(InMemoryRegistry::new());
+        let relay = RelayInfo::new("192.168.50.1:9001".to_string(), "k".to_string(), 5_000_000);
+        let id = relay.id.clone();
+        registry.register(relay.clone()).await.unwrap();
+
+        let config = SelectorConfig {
+            retry_cooldown: Duration::from_millis(60),
+            max_retries: 3,
+            ..Default::default()
+        };
+        let selector = RelaySelector::with_config(registry, config);
+
+        // Drive the relay to max_retries.
+        for _ in 0..3 {
+            selector
+                .report_failure(&id, FailureType::ConnectionFailed)
+                .await;
+        }
+        // During the bounded backoff (cooldown * 3 = 180ms) it is filtered out.
+        let filtered = selector.filter_recent_failures(vec![relay.clone()]).await;
+        assert!(
+            filtered.is_empty(),
+            "relay should be filtered while in backoff"
+        );
+
+        // After the penalty elapses it must be eligible again (the old code
+        // excluded it forever once retry_count >= max_retries).
+        tokio::time::sleep(Duration::from_millis(260)).await;
+        let filtered = selector.filter_recent_failures(vec![relay]).await;
+        assert_eq!(
+            filtered.len(),
+            1,
+            "relay must recover after the cooldown, not be excluded forever"
+        );
     }
 
     #[tokio::test]
