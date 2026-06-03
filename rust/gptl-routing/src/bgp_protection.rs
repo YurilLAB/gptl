@@ -144,19 +144,28 @@ impl BgpGuard {
             return Ok(None);
         }
 
-        // Check RPKI validation
-        let rpki = self.rpki_validator.read().await;
-        if !rpki.validate_prefix(&destination.to_string()).await {
-            return Ok(Some("RPKI validation failed".to_string()));
-        }
-        drop(rpki);
-
-        // Check for known malicious ASes
-        let malicious = self.malicious_ases.read().await;
+        // Look up the AS path to the destination (origin AS = last hop).
         let as_path = self.lookup_as_path(destination).await?;
-        
-        for asn in as_path {
-            if malicious.contains(&asn) {
+
+        // RPKI Route Origin Validation (RFC 6811). Only a definitively *Invalid*
+        // origin is a threat. NotFound (no covering ROA — the common case for
+        // most prefixes) and Valid both pass: rejecting on a cache miss would
+        // block essentially all traffic, which is exactly what the previous
+        // `validate_prefix` gate did (the ROA cache is empty until fetch_roas
+        // runs). A sound Invalid verdict needs the announced origin AS, so this
+        // is only evaluated when the AS path is known.
+        if let Some(&origin_as) = as_path.last() {
+            let rpki = self.rpki_validator.read().await;
+            let prefix = format!("{}/32", destination);
+            if rpki.validate_route_origin(&prefix, origin_as, 32) == RpkiValidationState::Invalid {
+                return Ok(Some("RPKI validation failed (invalid origin)".to_string()));
+            }
+        }
+
+        // Check for known malicious ASes on the path.
+        let malicious = self.malicious_ases.read().await;
+        for asn in &as_path {
+            if malicious.contains(asn) {
                 return Ok(Some(format!("Path contains malicious AS: {}", asn)));
             }
         }
@@ -229,28 +238,6 @@ impl BgpGuard {
 
 #[allow(dead_code)]
 impl RpkiValidator {
-    /// Look up a prefix in the local ROA cache.
-    ///
-    /// Returns `true` when the prefix has a non-expired ROA, `false`
-    /// otherwise.  The previous implementation returned `true` for any
-    /// prefix (even ones never seen) "to avoid blocking legitimate
-    /// traffic" — that's a vacuous validator.  Callers should treat
-    /// "not in cache" as `RpkiValidationState::NotFound` (via the
-    /// `validate_route_origin` method below) rather than as an implicit
-    /// pass.  Refresh the cache periodically via `fetch_roas`.
-    async fn validate_prefix(&self, prefix: &str) -> bool {
-        if let Some(roa) = self.roa_cache.get(prefix) {
-            if roa.valid_until > Instant::now() {
-                return true;
-            }
-        }
-        tracing::debug!(
-            "RPKI cache miss for {} (refresh via fetch_roas)",
-            prefix
-        );
-        false
-    }
-
     /// Update ROA cache from RPKI validator
     async fn update_roa_cache(&mut self, entries: Vec<RoaEntry>) {
         for entry in entries {
@@ -548,6 +535,25 @@ pub struct HijackDetection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_check_route_allows_unknown_prefix_by_default() {
+        // RFC 6811: a destination with no covering ROA (NotFound) must NOT be
+        // rejected. Previously check_route blocked EVERY destination because the
+        // ROA cache is empty until fetch_roas runs, breaking all routing whenever
+        // bgp_protection was enabled (the default).
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        assert!(config.try_read().unwrap().bgp_protection, "default has BGP on");
+        let guard = BgpGuard::new(config);
+
+        let dest: IpAddr = "93.184.216.34".parse().unwrap(); // example.com
+        let threat = guard.check_route(&dest).await.unwrap();
+        assert!(
+            threat.is_none(),
+            "a destination with no ROA must be allowed, got: {:?}",
+            threat
+        );
+    }
 
     #[tokio::test]
     async fn test_path_diversity() {
