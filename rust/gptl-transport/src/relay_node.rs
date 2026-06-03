@@ -560,21 +560,58 @@ async fn dispatch_relay_cell(
     }
 }
 
-/// Exit policy: `true` for loopback / RFC1918 / link-local / `.local` /
-/// `.internal` / `localhost`.
+/// Exit policy for a concrete IP address: `true` for any address that must not
+/// be reachable through the relay (loopback, RFC1918, CGNAT, link-local,
+/// multicast, documentation, unspecified/broadcast, IPv6 ULA/link-local, and
+/// IPv4-mapped forms of all of the above).
+pub fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn v4_blocked(v4: Ipv4Addr) -> bool {
+        let o = v4.octets();
+        v4.is_loopback()
+            || v4.is_private()
+            || v4.is_link_local()
+            || v4.is_unspecified()
+            || v4.is_broadcast()
+            || v4.is_documentation()
+            || v4.is_multicast()
+            // 100.64.0.0/10 — carrier-grade NAT (RFC 6598)
+            || (o[0] == 100 && (o[1] & 0xc0) == 64)
+    }
+
+    match ip {
+        IpAddr::V4(v4) => v4_blocked(v4),
+        IpAddr::V6(v6) => {
+            // IPv4-mapped addresses (::ffff:a.b.c.d) must be checked as IPv4 so a
+            // request to ::ffff:127.0.0.1 cannot bypass the v4 rules. Use
+            // to_ipv4_mapped (not to_ipv4) so genuine v6 addresses like ::1 are
+            // not mis-mapped and instead fall through to the v6 checks below.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4_blocked(v4);
+            }
+            let seg0 = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg0 & 0xfe00) == 0xfc00 // unique-local fc00::/7
+                || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+/// Exit policy for a target string: `true` for a private/reserved literal IP or
+/// a hostname that names a local resource (`localhost` / `.local` /
+/// `.internal`).
+///
+/// NOTE: a `false` result for a hostname does NOT mean the connection is safe —
+/// the name may still resolve to a private address. Callers must resolve the
+/// host and re-check every candidate IP with [`is_private_ip`] before
+/// connecting (see `begin_stream`).
 pub fn is_private_address(host: &str) -> bool {
     let cleaned = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = cleaned.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback()
-                    || v4.is_private()
-                    || v4.is_link_local()
-                    || v4.is_unspecified()
-                    || v4.is_broadcast()
-            }
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
-        };
+        return is_private_ip(ip);
     }
     let lower = host.to_lowercase();
     lower == "localhost" || lower.ends_with(".local") || lower.ends_with(".internal")
@@ -677,7 +714,58 @@ async fn begin_stream(
         circuit_id, stream_id, host, port
     );
 
-    let tcp = match TcpStream::connect((&*host, port)).await {
+    // Resolve the host and validate EVERY candidate IP before connecting. The
+    // literal is_private_address() check above is necessary but not sufficient:
+    // a hostname can resolve (at connect time) to a private/reserved address —
+    // a DNS-rebinding SSRF that could reach loopback, RFC1918 hosts, or the
+    // cloud metadata endpoint (169.254.169.254). We resolve once and connect
+    // only to the vetted IPs, so no second (rebindable) resolution happens.
+    let resolved: Vec<std::net::SocketAddr> =
+        match tokio::net::lookup_host((host.as_str(), port)).await {
+            Ok(addrs) => addrs.collect(),
+            Err(e) => {
+                debug!("stream {} resolve failed: {}", stream_id, e);
+                return send_data_cell(
+                    ciphers, circuit_id, write_tx, is_inner_hop,
+                    RelayCell {
+                        command: RelayCommand::BeginFailed,
+                        stream_id,
+                        data: e.to_string().into_bytes(),
+                    },
+                )
+                .await;
+            }
+        };
+
+    let allowed: Vec<std::net::SocketAddr> = if options.allow_private {
+        resolved
+    } else {
+        resolved
+            .into_iter()
+            .filter(|sa| !is_private_ip(sa.ip()))
+            .collect()
+    };
+
+    if allowed.is_empty() {
+        warn!(
+            "circuit {} stream {} blocked: {} resolved only to private/reserved addresses",
+            circuit_id, stream_id, host
+        );
+        metrics
+            .streams_blocked_total
+            .fetch_add(1, Ordering::Relaxed);
+        return send_data_cell(
+            ciphers, circuit_id, write_tx, is_inner_hop,
+            RelayCell {
+                command: RelayCommand::BeginFailed,
+                stream_id,
+                data: b"exit policy: private address blocked".to_vec(),
+            },
+        )
+        .await;
+    }
+
+    let tcp = match TcpStream::connect(&allowed[..]).await {
         Ok(s) => s,
         Err(e) => {
             debug!("stream {} connect failed: {}", stream_id, e);
@@ -966,6 +1054,32 @@ mod tests {
         assert!(!is_private_address("1.1.1.1"));
         assert!(!is_private_address("example.com"));
         assert!(!is_private_address("[2606:4700:4700::1111]"));
+    }
+
+    #[test]
+    fn test_is_private_ip_blocks_reserved_ranges() {
+        use std::net::IpAddr;
+        let blocked = [
+            "127.0.0.1",            // loopback
+            "169.254.169.254",      // cloud metadata (link-local)
+            "100.64.0.1",           // CGNAT (RFC 6598)
+            "::1",                  // IPv6 loopback
+            "::ffff:127.0.0.1",     // IPv4-mapped loopback (bypass attempt)
+            "::ffff:10.0.0.1",      // IPv4-mapped RFC1918
+            "fc00::1",              // IPv6 unique-local
+            "fe80::1",              // IPv6 link-local
+            "224.0.0.1",            // multicast
+        ];
+        for s in blocked {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_private_ip(ip), "{} must be blocked", s);
+        }
+
+        let allowed = ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"];
+        for s in allowed {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!is_private_ip(ip), "{} must be allowed", s);
+        }
     }
 
     #[test]
