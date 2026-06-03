@@ -522,4 +522,36 @@ mod tests {
         let cell = Cell::new(1, CellType::Created);
         assert!(relay_respond(&cell, &relay_key).is_err());
     }
+
+    /// Fuzz: feeding random CREATE/CREATED cells to the handshake parsers must
+    /// never panic — only succeed or return an error. (Stable toolchain, so a
+    /// deterministic PRNG stands in for cargo-fuzz.)
+    #[test]
+    fn fuzz_handshake_parsers_never_panic() {
+        let mut state: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let relay_key = RelayStaticKey::generate();
+
+        for _ in 0..4_000 {
+            // Random CREATE cell into relay_respond.
+            let mut create = Cell::new((next() & 0xffff_ffff) as u32, CellType::Create);
+            for b in create.payload.iter_mut() {
+                *b = (next() & 0xff) as u8;
+            }
+            let _ = relay_respond(&create, &relay_key);
+
+            // Random CREATED cell into a fresh client_finish.
+            let (_c, pending) = client_initiate(1, &relay_key.public).unwrap();
+            let mut created = Cell::new(1, CellType::Created);
+            for b in created.payload.iter_mut() {
+                *b = (next() & 0xff) as u8;
+            }
+            let _ = client_finish(pending, &created);
+        }
+    }
 }

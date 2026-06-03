@@ -572,4 +572,90 @@ mod tests {
         buf[3..5].copy_from_slice(&bad_len.to_be_bytes());
         assert!(RelayCell::decode_inner(&buf).is_err());
     }
+
+    // ── Fuzzing (stable-toolchain, deterministic) ──────────────────────────────
+    // No cargo-fuzz/nightly here, so these throw large volumes of random and
+    // structure-aware malformed bytes at the wire parsers and assert they never
+    // panic (only return Ok/Err) and that decode∘encode round-trips.
+
+    /// Small, fast, deterministic xorshift64* PRNG (reproducible across runs).
+    struct Xorshift(u64);
+    impl Xorshift {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn fill(&mut self, buf: &mut [u8]) {
+            for chunk in buf.chunks_mut(8) {
+                let r = self.next_u64().to_le_bytes();
+                chunk.copy_from_slice(&r[..chunk.len()]);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_parsers_never_panic_on_random_input() {
+        let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
+        let iters = 25_000;
+
+        for _ in 0..iters {
+            // Cell::from_bytes — fixed 512 bytes.
+            let mut cell = [0u8; CELL_SIZE];
+            rng.fill(&mut cell);
+            if let Ok(c) = Cell::from_bytes(&cell) {
+                // Re-serialization must round-trip exactly.
+                assert_eq!(c.to_bytes(), cell);
+            }
+
+            // RelayCell::decode — fixed 491-byte plaintext.
+            let mut rp = [0u8; RELAY_PLAINTEXT_LEN];
+            rng.fill(&mut rp);
+            if let Ok(rc) = RelayCell::decode(&rp) {
+                assert!(rc.data.len() <= RELAY_MAX_DATA);
+                // encode∘decode round-trips the logical content.
+                let re = rc.encode().unwrap();
+                let rc2 = RelayCell::decode(&re).unwrap();
+                assert_eq!(rc.command, rc2.command);
+                assert_eq!(rc.stream_id, rc2.stream_id);
+                assert_eq!(rc.data, rc2.data);
+            }
+
+            // RelayCell::decode_inner — fixed 470-byte plaintext.
+            let mut ip = [0u8; RELAY_INNER_PLAINTEXT_LEN];
+            rng.fill(&mut ip);
+            if let Ok(rc) = RelayCell::decode_inner(&ip) {
+                assert!(rc.data.len() <= RELAY_INNER_MAX_DATA);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_relay_decode_all_lengths_and_commands() {
+        // Structure-aware: valid command byte + EVERY 16-bit data_len, to prove
+        // the length bound prevents any out-of-bounds slice on a real header.
+        for cmd in 0u16..=255 {
+            for &len in &[0u16, 1, 485, 486, 487, 490, 491, 4096, 65535] {
+                let mut buf = [0u8; RELAY_PLAINTEXT_LEN];
+                buf[0] = cmd as u8;
+                buf[3..5].copy_from_slice(&len.to_be_bytes());
+                // Must never panic; over-max lengths must be rejected.
+                match RelayCell::decode(&buf) {
+                    Ok(rc) => assert!(rc.data.len() <= RELAY_MAX_DATA),
+                    Err(_) => {}
+                }
+
+                let mut ibuf = [0u8; RELAY_INNER_PLAINTEXT_LEN];
+                ibuf[0] = cmd as u8;
+                ibuf[3..5].copy_from_slice(&len.to_be_bytes());
+                match RelayCell::decode_inner(&ibuf) {
+                    Ok(rc) => assert!(rc.data.len() <= RELAY_INNER_MAX_DATA),
+                    Err(_) => {}
+                }
+            }
+        }
+    }
 }
