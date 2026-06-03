@@ -11,7 +11,7 @@ pub fn run(
     format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = super::config_cmd::resolve_path(config_path)?;
-    let cfg  = GptlConfig::load(&path)?;
+    let cfg = GptlConfig::load(&path)?;
 
     match format {
         OutputFormat::Json => {
@@ -26,7 +26,7 @@ pub fn run(
     }
 
     let disabled = cfg.disabled_count();
-    let enabled  = GptlConfig::TOTAL_PROTECTIONS - disabled;
+    let enabled = GptlConfig::TOTAL_PROTECTIONS - disabled;
 
     println!("\n{}", display::heading("GPTL Status"));
     println!(
@@ -60,10 +60,22 @@ pub fn run(
     println!();
 
     println!("  Quick commands:");
-    println!("    {}  — full configuration", display::info_str("gptl config show"));
-    println!("    {}  — protection checklist", display::info_str("gptl security status"));
-    println!("    {} — find mismatches", display::info_str("gptl security audit"));
-    println!("    {}  — list named profiles", display::info_str("gptl profile list"));
+    println!(
+        "    {}  — full configuration",
+        display::info_str("gptl config show")
+    );
+    println!(
+        "    {}  — protection checklist",
+        display::info_str("gptl security status")
+    );
+    println!(
+        "    {} — find mismatches",
+        display::info_str("gptl security audit")
+    );
+    println!(
+        "    {}  — list named profiles",
+        display::info_str("gptl profile list")
+    );
     println!();
     Ok(())
 }

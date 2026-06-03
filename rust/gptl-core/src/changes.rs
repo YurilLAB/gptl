@@ -403,7 +403,10 @@ impl ChangeFilter {
         if let Some(ref search) = self.search {
             let search_lower = search.to_lowercase();
             if !change.description.to_lowercase().contains(&search_lower)
-                && !change.command_or_action.to_lowercase().contains(&search_lower)
+                && !change
+                    .command_or_action
+                    .to_lowercase()
+                    .contains(&search_lower)
             {
                 return false;
             }
@@ -445,12 +448,12 @@ impl ChangeTracker {
     /// Record a new system change
     pub async fn record(&self, change: SystemChange) -> Result<Uuid, ChangeTrackerError> {
         let id = change.id;
-        
+
         // Add to in-memory storage
         {
             let mut changes = self.changes.write().await;
             changes.push(change);
-            
+
             // Trim if exceeding max memory entries
             if changes.len() > self.config.max_memory_entries {
                 let to_remove = changes.len() - self.config.max_memory_entries;
@@ -468,7 +471,10 @@ impl ChangeTracker {
     }
 
     /// Record a change and mark it as applied
-    pub async fn record_applied(&self, mut change: SystemChange) -> Result<Uuid, ChangeTrackerError> {
+    pub async fn record_applied(
+        &self,
+        mut change: SystemChange,
+    ) -> Result<Uuid, ChangeTrackerError> {
         change.mark_applied();
         self.record(change).await
     }
@@ -480,7 +486,12 @@ impl ChangeTracker {
 
     /// Get a specific change by ID
     pub async fn get(&self, id: Uuid) -> Option<SystemChange> {
-        self.changes.read().await.iter().find(|c| c.id == id).cloned()
+        self.changes
+            .read()
+            .await
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
     }
 
     /// Get changes matching a filter
@@ -536,10 +547,10 @@ impl ChangeTracker {
     /// Export changes to CSV
     pub async fn export_csv(&self, filter: &ChangeFilter) -> Result<String, ChangeTrackerError> {
         let changes = self.get_filtered(filter).await;
-        
+
         let mut csv = String::new();
         csv.push_str("id,timestamp,category,status,description,command,requires_admin,component,gptl_version\n");
-        
+
         for change in changes {
             csv.push_str(&format!(
                 "{},{},{},{},\"{}\",\"{}\",{},{},{}\n",
@@ -554,16 +565,19 @@ impl ChangeTracker {
                 change.gptl_version
             ));
         }
-        
+
         Ok(csv)
     }
 
     /// Get summary statistics
     pub async fn get_statistics(&self) -> ChangeStatistics {
         let changes = self.changes.read().await;
-        
-        let mut stats = ChangeStatistics { total_changes: changes.len(), ..Default::default() };
-        
+
+        let mut stats = ChangeStatistics {
+            total_changes: changes.len(),
+            ..Default::default()
+        };
+
         for change in changes.iter() {
             match change.status {
                 ChangeStatus::Applied => stats.applied_count += 1,
@@ -572,10 +586,10 @@ impl ChangeTracker {
                 ChangeStatus::RollbackFailed => stats.rollback_failed_count += 1,
                 ChangeStatus::Pending => stats.pending_count += 1,
             }
-            
+
             *stats.by_category.entry(change.category).or_insert(0) += 1;
         }
-        
+
         stats
     }
 
@@ -583,27 +597,27 @@ impl ChangeTracker {
     pub async fn clear(&self) -> Result<(), ChangeTrackerError> {
         let mut changes = self.changes.write().await;
         changes.clear();
-        
+
         if self.config.persist_to_disk {
             self.persist_changes().await?;
         }
-        
+
         Ok(())
     }
 
     /// Update an existing change
     async fn update_change(&self, updated: SystemChange) -> Result<(), ChangeTrackerError> {
         let mut changes = self.changes.write().await;
-        
+
         if let Some(idx) = changes.iter().position(|c| c.id == updated.id) {
             changes[idx] = updated;
-            
+
             if self.config.persist_to_disk {
                 drop(changes);
                 self.persist_changes().await?;
             }
         }
-        
+
         Ok(())
     }
 
@@ -611,37 +625,37 @@ impl ChangeTracker {
     async fn execute_rollback(&self, command: &str) -> Result<(), ChangeTrackerError> {
         // Parse and execute the rollback command
         // This is platform-specific and depends on the type of change
-        
+
         #[cfg(windows)]
         {
             use std::process::Command;
-            
+
             let output = Command::new("powershell")
                 .args(["-Command", command])
                 .output()
                 .map_err(|e| ChangeTrackerError::RollbackFailed(e.to_string()))?;
-            
+
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(ChangeTrackerError::RollbackFailed(stderr.to_string()));
             }
         }
-        
+
         #[cfg(unix)]
         {
             use std::process::Command;
-            
+
             let output = Command::new("sh")
                 .args(["-c", command])
                 .output()
                 .map_err(|e| ChangeTrackerError::RollbackFailed(e.to_string()))?;
-            
+
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(ChangeTrackerError::RollbackFailed(stderr.to_string()));
             }
         }
-        
+
         Ok(())
     }
 
@@ -649,25 +663,25 @@ impl ChangeTracker {
     async fn persist_changes(&self) -> Result<(), ChangeTrackerError> {
         let changes = self.changes.read().await;
         let data = serde_json::to_string(&*changes)?;
-        
+
         let file_path = self.config.log_dir.join("changes.json");
         fs::write(&file_path, data).await?;
-        
+
         Ok(())
     }
 
     /// Load changes from disk
     async fn load_changes(&self) -> Result<(), ChangeTrackerError> {
         let file_path = self.config.log_dir.join("changes.json");
-        
+
         if file_path.exists() {
             let data = fs::read_to_string(&file_path).await?;
             let loaded: Vec<SystemChange> = serde_json::from_str(&data)?;
-            
+
             let mut changes = self.changes.write().await;
             *changes = loaded;
         }
-        
+
         Ok(())
     }
 }

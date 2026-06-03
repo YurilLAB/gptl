@@ -103,18 +103,10 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Config(cmd) => {
-            config_cmd::run(cmd, cli.config, cli.yes, cli.format)
-        }
-        Commands::Security(cmd) => {
-            security_cmd::run(cmd, cli.config, cli.yes)
-        }
-        Commands::Profile(cmd) => {
-            profile_cmd::run(cmd, cli.config, cli.yes)
-        }
-        Commands::Status => {
-            status_cmd::run(cli.config, cli.format)
-        }
+        Commands::Config(cmd) => config_cmd::run(cmd, cli.config, cli.yes, cli.format),
+        Commands::Security(cmd) => security_cmd::run(cmd, cli.config, cli.yes),
+        Commands::Profile(cmd) => profile_cmd::run(cmd, cli.config, cli.yes),
+        Commands::Status => status_cmd::run(cli.config, cli.format),
     };
 
     if let Err(e) = result {

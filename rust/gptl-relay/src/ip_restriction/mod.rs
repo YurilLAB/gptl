@@ -6,11 +6,11 @@
 //! `HashMap<IpAddr, ..>`, so you couldn't block `192.168.0.0/16` or
 //! restrict access to `10.0.0.0/8` without enumerating every address.
 
+use chrono::{DateTime, Duration, Utc};
+use ipnet::IpNet;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
-use ipnet::IpNet;
 use tokio::sync::RwLock;
 
 pub mod geolocation;
@@ -121,14 +121,22 @@ impl IpAllowlist {
     /// Block an exact IP.  Mainly kept for backward compatibility;
     /// prefer `block_cidr` for new code (a `/32` or `/128` accepts
     /// single hosts and uses the same code path as range blocks).
-    pub async fn block_ip(&self, ip: IpAddr, reason: impl Into<String>, duration: Option<Duration>) -> crate::Result<()> {
+    pub async fn block_ip(
+        &self,
+        ip: IpAddr,
+        reason: impl Into<String>,
+        duration: Option<Duration>,
+    ) -> crate::Result<()> {
         let mut blocked = self.blocked_ips.write().await;
-        blocked.insert(ip, BlockedIpInfo {
+        blocked.insert(
             ip,
-            reason: reason.into(),
-            blocked_at: Utc::now(),
-            expires_at: duration.map(|d| Utc::now() + d),
-        });
+            BlockedIpInfo {
+                ip,
+                reason: reason.into(),
+                blocked_at: Utc::now(),
+                expires_at: duration.map(|d| Utc::now() + d),
+            },
+        );
         Ok(())
     }
 
@@ -209,21 +217,39 @@ mod tests {
     #[tokio::test]
     async fn test_block_cidr_ipv4_matches_range() {
         let acl = IpAllowlist::new();
-        acl.block_cidr("192.168.0.0/16", "private network", None).await.unwrap();
+        acl.block_cidr("192.168.0.0/16", "private network", None)
+            .await
+            .unwrap();
 
-        assert!(acl.is_allowed("192.168.1.1".parse().unwrap()).await.is_err());
-        assert!(acl.is_allowed("192.168.255.255".parse().unwrap()).await.is_err());
-        assert!(acl.is_allowed("192.169.0.1".parse().unwrap()).await.is_ok(),
-            "neighbor /16 must NOT be in the blocked range");
+        assert!(acl
+            .is_allowed("192.168.1.1".parse().unwrap())
+            .await
+            .is_err());
+        assert!(acl
+            .is_allowed("192.168.255.255".parse().unwrap())
+            .await
+            .is_err());
+        assert!(
+            acl.is_allowed("192.169.0.1".parse().unwrap()).await.is_ok(),
+            "neighbor /16 must NOT be in the blocked range"
+        );
     }
 
     #[tokio::test]
     async fn test_block_cidr_ipv6_matches_range() {
         let acl = IpAllowlist::new();
-        acl.block_cidr("2001:db8::/32", "doc-prefix", None).await.unwrap();
+        acl.block_cidr("2001:db8::/32", "doc-prefix", None)
+            .await
+            .unwrap();
 
-        assert!(acl.is_allowed("2001:db8::1".parse().unwrap()).await.is_err());
-        assert!(acl.is_allowed("2001:db8:beef::1".parse().unwrap()).await.is_err());
+        assert!(acl
+            .is_allowed("2001:db8::1".parse().unwrap())
+            .await
+            .is_err());
+        assert!(acl
+            .is_allowed("2001:db8:beef::1".parse().unwrap())
+            .await
+            .is_err());
         assert!(acl.is_allowed("2001:db9::1".parse().unwrap()).await.is_ok());
     }
 
@@ -234,8 +260,12 @@ mod tests {
 
         assert!(acl.is_allowed("10.1.2.3".parse().unwrap()).await.is_ok());
         // Anything OUTSIDE the allowlist is blocked, even though the blocklist is empty.
-        assert!(acl.is_allowed("192.168.0.1".parse().unwrap()).await.is_err(),
-            "an IP not in any allowlist CIDR must be blocked");
+        assert!(
+            acl.is_allowed("192.168.0.1".parse().unwrap())
+                .await
+                .is_err(),
+            "an IP not in any allowlist CIDR must be blocked"
+        );
     }
 
     #[tokio::test]
@@ -256,9 +286,14 @@ mod tests {
     #[tokio::test]
     async fn test_single_host_cidr_acts_like_exact_block() {
         let acl = IpAllowlist::new();
-        acl.block_cidr("203.0.113.5/32", "honeypot", None).await.unwrap();
+        acl.block_cidr("203.0.113.5/32", "honeypot", None)
+            .await
+            .unwrap();
 
-        assert!(acl.is_allowed("203.0.113.5".parse().unwrap()).await.is_err());
+        assert!(acl
+            .is_allowed("203.0.113.5".parse().unwrap())
+            .await
+            .is_err());
         assert!(acl.is_allowed("203.0.113.6".parse().unwrap()).await.is_ok());
     }
 

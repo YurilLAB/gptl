@@ -14,12 +14,8 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 
 use crate::{
-    auth::MfaAuthenticator,
-    ip_restriction::IpAllowlist,
-    rate_limit::AuthRateLimiter,
-    session::SessionManager,
-    api_key::ApiKeyManager,
-    audit::AuditLogger,
+    api_key::ApiKeyManager, audit::AuditLogger, auth::MfaAuthenticator,
+    ip_restriction::IpAllowlist, rate_limit::AuthRateLimiter, session::SessionManager,
     SecurityContext,
 };
 use gptl_transport::relay_node::RelayNode;
@@ -151,15 +147,14 @@ impl RelayServer {
         self.initialize().await?;
 
         // Bind to address
-        let addr: SocketAddr = self.config.bind_address.parse()
-            .map_err(|e| crate::RelayError::ConfigError(
-                format!("Invalid bind address: {}", e)
-            ))?;
+        let addr: SocketAddr =
+            self.config.bind_address.parse().map_err(|e| {
+                crate::RelayError::ConfigError(format!("Invalid bind address: {}", e))
+            })?;
 
-        let listener = TcpListener::bind(addr).await
-            .map_err(|e| crate::RelayError::Internal(
-                format!("Failed to bind: {}", e)
-            ))?;
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|e| crate::RelayError::Internal(format!("Failed to bind: {}", e)))?;
 
         // Set state to running
         {
@@ -171,10 +166,9 @@ impl RelayServer {
 
         // Accept connections
         loop {
-            let (stream, peer_addr) = listener.accept().await
-                .map_err(|e| crate::RelayError::Internal(
-                    format!("Failed to accept connection: {}", e)
-                ))?;
+            let (stream, peer_addr) = listener.accept().await.map_err(|e| {
+                crate::RelayError::Internal(format!("Failed to accept connection: {}", e))
+            })?;
 
             // Handle connection in a new task
             let server = self.clone_ref();
@@ -237,10 +231,7 @@ impl RelayServer {
             // surface as a `RelayError` (the security pipeline succeeded;
             // this is downstream).
             if let Err(e) = node.handle_connection(stream, peer_addr).await {
-                tracing::warn!(
-                    "relay protocol from {} ended with: {}",
-                    peer_addr, e
-                );
+                tracing::warn!("relay protocol from {} ended with: {}", peer_addr, e);
             }
         } else {
             tracing::debug!(
@@ -261,8 +252,8 @@ impl RelayServer {
         client_ip: IpAddr,
         fingerprint: Option<String>,
     ) -> crate::Result<crate::session::SessionTokens> {
-        let ctx = SecurityContext::new(client_ip)
-            .with_fingerprint(fingerprint.as_deref().unwrap_or(""));
+        let ctx =
+            SecurityContext::new(client_ip).with_fingerprint(fingerprint.as_deref().unwrap_or(""));
 
         // 1. IP check
         {
@@ -281,18 +272,18 @@ impl RelayServer {
         let user_id = {
             let auth = self.auth.read().await;
             let result = auth.start_authentication(username, password).await;
-            
+
             // Handle the result
             match result {
                 Ok(crate::auth::AuthStep::Complete { user_id }) => user_id,
                 Ok(crate::auth::AuthStep::TotpRequired { .. }) => {
                     return Err(crate::RelayError::AuthenticationFailed(
-                        "TOTP required".to_string()
+                        "TOTP required".to_string(),
                     ));
                 }
                 Ok(crate::auth::AuthStep::WebAuthnChallenge { .. }) => {
                     return Err(crate::RelayError::AuthenticationFailed(
-                        "WebAuthn required".to_string()
+                        "WebAuthn required".to_string(),
                     ));
                 }
                 Err(e) => {
@@ -313,12 +304,14 @@ impl RelayServer {
         // 5. Create session
         let tokens = {
             let manager = self.session_manager.read().await;
-            manager.create_session(
-                &user_id,
-                client_ip,
-                fingerprint,
-                crate::session::SessionMetadata::default(),
-            ).await?
+            manager
+                .create_session(
+                    &user_id,
+                    client_ip,
+                    fingerprint,
+                    crate::session::SessionMetadata::default(),
+                )
+                .await?
         };
 
         // 6. Log authentication success
@@ -333,7 +326,9 @@ impl RelayServer {
                 mfa_used: false,
                 client_cert: false,
             };
-            logger.log_auth_attempt(event, &ctx.with_user(&user_id)).await?;
+            logger
+                .log_auth_attempt(event, &ctx.with_user(&user_id))
+                .await?;
         }
 
         Ok(tokens)
@@ -371,7 +366,9 @@ impl RelayServer {
                     "scopes": validation.scopes,
                 })),
             };
-            logger.log_security_event(event, &ctx.with_api_key(&validation.key_id)).await?;
+            logger
+                .log_security_event(event, &ctx.with_api_key(&validation.key_id))
+                .await?;
         }
 
         Ok(validation)
@@ -380,10 +377,10 @@ impl RelayServer {
     /// Get server status
     pub async fn status(&self) -> ServerStatus {
         let state = self.state.read().await;
-        
+
         ServerStatus {
             state: *state,
-            uptime: None, // Would track actual uptime
+            uptime: None,   // Would track actual uptime
             connections: 0, // Would track active connections
         }
     }
@@ -394,7 +391,7 @@ impl RelayServer {
         *state = ServerState::Stopping;
 
         // Cleanup operations
-        
+
         *state = ServerState::Stopped;
         Ok(())
     }
@@ -474,8 +471,8 @@ pub struct ServerStatus {
 mod tests {
     use super::*;
     use gptl_transport::cell::{Cell, CellType, RelayCell, RelayCommand};
-    use gptl_transport::handshake::{client_finish, client_initiate};
     use gptl_transport::handshake::RelayStaticKey;
+    use gptl_transport::handshake::{client_finish, client_initiate};
     use gptl_transport::relay_conn::RelayConn;
     use gptl_transport::relay_node::RelayOptions;
     use std::io::{Read, Write};
@@ -554,11 +551,10 @@ mod tests {
         let circuit_id = 0xA5A5_A5A5u32 | 1;
         let (create, pending) = client_initiate(circuit_id, &static_pub).unwrap();
         conn.send(&create).await.unwrap();
-        let created =
-            tokio::time::timeout(Duration::from_secs(5), conn.recv())
-                .await
-                .expect("CREATED must arrive within 5s")
-                .unwrap();
+        let created = tokio::time::timeout(Duration::from_secs(5), conn.recv())
+            .await
+            .expect("CREATED must arrive within 5s")
+            .unwrap();
         let session = client_finish(pending, &created).unwrap();
         let mut ciphers = gptl_transport::crypto::CircuitCiphers::new(
             &session.forward_key,

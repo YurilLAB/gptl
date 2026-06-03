@@ -173,17 +173,22 @@ impl HybridKeyExchange {
         // X25519: generate ephemeral keypair and compute DH with recipient
         let (ephemeral_pub, ephemeral_priv) = self.x25519.generate_keypair()?;
         let recipient_x25519_pub = PublicKey(recipient_public.0[..X25519_PUBLIC_LEN].to_vec());
-        let x25519_shared = self.x25519.compute_shared(&ephemeral_priv, &recipient_x25519_pub)?;
+        let x25519_shared = self
+            .x25519
+            .compute_shared(&ephemeral_priv, &recipient_x25519_pub)?;
 
         // ML-KEM-768: encapsulate to recipient's public key
         let kyber_pub_bytes = &recipient_public.0[X25519_PUBLIC_LEN..];
         let kyber_public = pqcrypto_kyber::kyber768::PublicKey::from_bytes(kyber_pub_bytes)
-            .map_err(|_| KeyExchangeError::InvalidPublicKey("ML-KEM public key parse error".to_string()))?;
+            .map_err(|_| {
+                KeyExchangeError::InvalidPublicKey("ML-KEM public key parse error".to_string())
+            })?;
         // Note: pqcrypto-kyber returns (SharedSecret, Ciphertext) — not (Ciphertext, SharedSecret)
         let (kyber_shared, kyber_ct) = pqcrypto_kyber::kyber768::encapsulate(&kyber_public);
 
         // Combine: HKDF(x25519_shared || mlkem_shared) per IETF draft-ietf-tls-ecdhe-mlkem
-        let shared_secret = Self::combine_shared_secrets(&x25519_shared.0, kyber_shared.as_bytes())?;
+        let shared_secret =
+            Self::combine_shared_secrets(&x25519_shared.0, kyber_shared.as_bytes())?;
 
         // Ciphertext: ephemeral X25519 pk || ML-KEM ciphertext
         let mut ciphertext = ephemeral_pub.0.clone();
@@ -227,16 +232,23 @@ impl HybridKeyExchange {
 
         // X25519: DH with ephemeral initiator public key
         let ephemeral_x25519_pub = PublicKey(ciphertext[..X25519_EPHEMERAL_LEN].to_vec());
-        let x25519_private = PrivateKey(Zeroizing::new(own_private.0[..X25519_PRIVATE_LEN].to_vec()));
-        let x25519_shared = self.x25519.compute_shared(&x25519_private, &ephemeral_x25519_pub)?;
+        let x25519_private =
+            PrivateKey(Zeroizing::new(own_private.0[..X25519_PRIVATE_LEN].to_vec()));
+        let x25519_shared = self
+            .x25519
+            .compute_shared(&x25519_private, &ephemeral_x25519_pub)?;
 
         // ML-KEM-768: decapsulate using own secret key
         let kyber_ct_bytes = &ciphertext[X25519_EPHEMERAL_LEN..];
         let kyber_private_bytes = &own_private.0[X25519_PRIVATE_LEN..];
-        let kyber_ct = pqcrypto_kyber::kyber768::Ciphertext::from_bytes(kyber_ct_bytes)
-            .map_err(|_| KeyExchangeError::InvalidPublicKey("ML-KEM ciphertext parse error".to_string()))?;
+        let kyber_ct =
+            pqcrypto_kyber::kyber768::Ciphertext::from_bytes(kyber_ct_bytes).map_err(|_| {
+                KeyExchangeError::InvalidPublicKey("ML-KEM ciphertext parse error".to_string())
+            })?;
         let kyber_sk = pqcrypto_kyber::kyber768::SecretKey::from_bytes(kyber_private_bytes)
-            .map_err(|_| KeyExchangeError::InvalidPrivateKey("ML-KEM secret key parse error".to_string()))?;
+            .map_err(|_| {
+                KeyExchangeError::InvalidPrivateKey("ML-KEM secret key parse error".to_string())
+            })?;
         let kyber_shared = pqcrypto_kyber::kyber768::decapsulate(&kyber_ct, &kyber_sk);
 
         Self::combine_shared_secrets(&x25519_shared.0, kyber_shared.as_bytes())
@@ -246,7 +258,10 @@ impl HybridKeyExchange {
     ///
     /// Uses concatenation as IKM per IETF draft-ietf-tls-ecdhe-mlkem:
     /// `HKDF(salt=0, IKM=x25519_shared||mlkem_shared, info="hybrid-shared-secret")`
-    fn combine_shared_secrets(x25519: &[u8], mlkem: &[u8]) -> Result<SharedSecret, KeyExchangeError> {
+    fn combine_shared_secrets(
+        x25519: &[u8],
+        mlkem: &[u8],
+    ) -> Result<SharedSecret, KeyExchangeError> {
         let mut ikm = x25519.to_vec();
         ikm.extend_from_slice(mlkem);
 
@@ -297,7 +312,8 @@ impl KeyExchange for HybridKeyExchange {
         Err(KeyExchangeError::SharedSecretFailed(
             "Hybrid KEM requires separate encapsulate/decapsulate calls. \
              Use HybridKeyExchange::encapsulate (initiator) and \
-             HybridKeyExchange::decapsulate (responder).".to_string()
+             HybridKeyExchange::decapsulate (responder)."
+                .to_string(),
         ))
     }
 }
@@ -373,7 +389,10 @@ mod tests {
         let encap1 = kex.encapsulate(&bob_public).unwrap();
         let encap2 = kex.encapsulate(&bob_public).unwrap();
 
-        assert_ne!(encap1.shared_secret.0.as_slice(), encap2.shared_secret.0.as_slice());
+        assert_ne!(
+            encap1.shared_secret.0.as_slice(),
+            encap2.shared_secret.0.as_slice()
+        );
         assert_ne!(encap1.ciphertext, encap2.ciphertext);
     }
 
@@ -432,7 +451,9 @@ mod tests {
         );
 
         // A wrong-length public key is also rejected.
-        assert!(kex.compute_shared(&priv_key, &PublicKey(vec![0u8; 31])).is_err());
+        assert!(kex
+            .compute_shared(&priv_key, &PublicKey(vec![0u8; 31]))
+            .is_err());
     }
 
     #[test]
@@ -494,7 +515,10 @@ mod tests {
         // 16 bytes instead of 32
         let short_priv = PrivateKey(zeroize::Zeroizing::new(vec![0xAA; 16]));
         let result = kex.compute_shared(&short_priv, &bob_pub);
-        assert!(result.is_err(), "wrong-length private key should be rejected");
+        assert!(
+            result.is_err(),
+            "wrong-length private key should be rejected"
+        );
     }
 
     #[test]
@@ -505,7 +529,10 @@ mod tests {
         // 16 bytes instead of 32
         let short_pub = PublicKey(vec![0xBB; 16]);
         let result = kex.compute_shared(&alice_priv, &short_pub);
-        assert!(result.is_err(), "wrong-length public key should be rejected");
+        assert!(
+            result.is_err(),
+            "wrong-length public key should be rejected"
+        );
     }
 
     #[test]
@@ -519,8 +546,16 @@ mod tests {
         let s2 = kex.compute_shared(&alice_priv, &bob_pub).unwrap();
         let s3 = kex.compute_shared(&bob_priv, &alice_pub).unwrap();
 
-        assert_eq!(s1.0.as_slice(), s2.0.as_slice(), "repeated calls with same keys must match");
-        assert_eq!(s1.0.as_slice(), s3.0.as_slice(), "symmetric shared secret must match");
+        assert_eq!(
+            s1.0.as_slice(),
+            s2.0.as_slice(),
+            "repeated calls with same keys must match"
+        );
+        assert_eq!(
+            s1.0.as_slice(),
+            s3.0.as_slice(),
+            "symmetric shared secret must match"
+        );
     }
 
     #[test]
@@ -533,8 +568,11 @@ mod tests {
         let s1 = kex.compute_shared(&priv1, &alice_pub).unwrap();
         let s2 = kex.compute_shared(&priv2, &alice_pub).unwrap();
 
-        assert_ne!(s1.0.as_slice(), s2.0.as_slice(),
-            "different private keys with same public key must produce different secrets");
+        assert_ne!(
+            s1.0.as_slice(),
+            s2.0.as_slice(),
+            "different private keys with same public key must produce different secrets"
+        );
     }
 
     #[test]
@@ -546,8 +584,10 @@ mod tests {
         let (bob_pub, _) = kex.generate_keypair().unwrap();
 
         let shared = kex.compute_shared(&alice_priv, &bob_pub).unwrap();
-        assert!(shared.0.iter().any(|&b| b != 0),
-            "shared secret from random keypairs must not be all-zero");
+        assert!(
+            shared.0.iter().any(|&b| b != 0),
+            "shared secret from random keypairs must not be all-zero"
+        );
     }
 
     #[test]
@@ -576,8 +616,10 @@ mod tests {
         let kex = HybridKeyExchange::new();
         let (pub_key, priv_key) = kex.generate_keypair().unwrap();
         let result = kex.compute_shared(&priv_key, &pub_key);
-        assert!(result.is_err(),
-            "HybridKeyExchange::compute_shared must return Err (use encapsulate/decapsulate)");
+        assert!(
+            result.is_err(),
+            "HybridKeyExchange::compute_shared must return Err (use encapsulate/decapsulate)"
+        );
     }
 
     #[test]
@@ -588,8 +630,10 @@ mod tests {
         let encap = kex.encapsulate(&bob_public).unwrap();
         let bob_shared = kex.decapsulate(&bob_private, &encap.ciphertext).unwrap();
 
-        assert!(bob_shared.0.iter().any(|&b| b != 0),
-            "hybrid shared secret must not be all-zero");
+        assert!(
+            bob_shared.0.iter().any(|&b| b != 0),
+            "hybrid shared secret must not be all-zero"
+        );
     }
 
     #[test]
@@ -607,8 +651,11 @@ mod tests {
         let encap2 = kex.encapsulate(&pub1).unwrap();
         let secret2 = kex.decapsulate(&priv1, &encap2.ciphertext).unwrap();
 
-        assert_ne!(secret1.0.as_slice(), secret2.0.as_slice(),
-            "secrets from different keypair exchanges must differ");
+        assert_ne!(
+            secret1.0.as_slice(),
+            secret2.0.as_slice(),
+            "secrets from different keypair exchanges must differ"
+        );
     }
 }
 

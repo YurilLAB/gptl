@@ -100,20 +100,20 @@ impl DnsGuard {
             current: 0,
             timeout: Duration::from_secs(5),
         }));
-        
+
         let cache = Arc::new(RwLock::new(DnsCache {
             entries: HashMap::new(),
             max_ttl: Duration::from_secs(300),
         }));
-        
+
         let firewall = Arc::new(RwLock::new(DnsFirewall {
             blocked_servers: Vec::new(),
             allowed_servers: Vec::new(),
             intercept_rules: Vec::new(),
         }));
-        
+
         let ipv6_policy = Arc::new(RwLock::new(Ipv6Policy::Prefer));
-        
+
         Self {
             config,
             doh_resolver,
@@ -127,15 +127,15 @@ impl DnsGuard {
     pub async fn initialize(&self) -> Result<(), RoutingError> {
         self.initialize_with_shutdown(None).await
     }
-    
+
     /// Initialize DNS protection with optional shutdown signal
     pub async fn initialize_with_shutdown(
         &self,
-        mut shutdown_signal: Option<tokio::sync::watch::Receiver<bool>>
+        mut shutdown_signal: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Result<(), RoutingError> {
         // Start cache cleanup task
         let cache = self.cache.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -143,7 +143,7 @@ impl DnsGuard {
                     _ = interval.tick() => {
                         let mut cache_guard = cache.write().await;
                         let now = Instant::now();
-                        
+
                         // Also limit cache size to prevent unbounded growth
                         if cache_guard.entries.len() > 10000 {
                             // Remove oldest entries if cache is too large
@@ -153,7 +153,7 @@ impl DnsGuard {
                                 .filter(|(_, entry)| entry.expires_at <= now)
                                 .map(|(k, _)| k.clone())
                                 .collect();
-                            
+
                             for key in keys_to_remove {
                                 cache_guard.entries.remove(&key);
                             }
@@ -175,7 +175,7 @@ impl DnsGuard {
                 }
             }
         });
-        
+
         Ok(())
     }
 
@@ -191,7 +191,7 @@ impl DnsGuard {
                 }
             }
         }
-        
+
         // Check firewall
         {
             let firewall = self.firewall.read().await;
@@ -199,7 +199,7 @@ impl DnsGuard {
                 match action {
                     InterceptAction::Block => {
                         return Err(RoutingError::ResourceAllocationFailed(
-                            "DNS query blocked".to_string()
+                            "DNS query blocked".to_string(),
                         ));
                     }
                     InterceptAction::Redirect => {
@@ -212,20 +212,23 @@ impl DnsGuard {
                 }
             }
         }
-        
+
         // Resolve via DoH
         let response = self.resolve_doh(query).await?;
-        
+
         // Cache response
         {
             let mut cache = self.cache.write().await;
             let max_ttl = cache.max_ttl;
-            cache.entries.insert(query.to_string(), CacheEntry {
-                addresses: response.clone(),
-                expires_at: Instant::now() + max_ttl,
-            });
+            cache.entries.insert(
+                query.to_string(),
+                CacheEntry {
+                    addresses: response.clone(),
+                    expires_at: Instant::now() + max_ttl,
+                },
+            );
         }
-        
+
         Ok(serialize_response(&response))
     }
 
@@ -255,7 +258,9 @@ impl DnsGuard {
             .timeout(timeout)
             .https_only(true)
             .build()
-            .map_err(|e| RoutingError::ResourceAllocationFailed(format!("DoH client error: {}", e)))?;
+            .map_err(|e| {
+                RoutingError::ResourceAllocationFailed(format!("DoH client error: {}", e))
+            })?;
 
         // RFC 8484: POST method with application/dns-message
         let response = client
@@ -268,8 +273,9 @@ impl DnsGuard {
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                let body = resp.bytes().await
-                    .map_err(|e| RoutingError::ResourceAllocationFailed(format!("DoH response error: {}", e)))?;
+                let body = resp.bytes().await.map_err(|e| {
+                    RoutingError::ResourceAllocationFailed(format!("DoH response error: {}", e))
+                })?;
 
                 parse_dns_response(&body)
             }
@@ -284,7 +290,9 @@ impl DnsGuard {
                     }
                 }
                 tracing::warn!("DoH endpoint failed, rotating to next");
-                Err(RoutingError::ResourceAllocationFailed("DoH resolution failed".to_string()))
+                Err(RoutingError::ResourceAllocationFailed(
+                    "DoH resolution failed".to_string(),
+                ))
             }
         }
     }
@@ -292,10 +300,10 @@ impl DnsGuard {
     /// Configure DNS leak prevention
     pub async fn configure_leak_prevention(&self) -> Result<(), RoutingError> {
         let _firewall = self.firewall.write().await;
-        
+
         // Block all non-tunneled DNS
         // This would interface with system firewall
-        
+
         Ok(())
     }
 
@@ -307,11 +315,11 @@ impl DnsGuard {
             "whoami.akamai.net",
             "whoami.ultradns.net",
         ];
-        
+
         // SECURITY: Test domain names are NOT logged
         let _ = test_domains;
         tracing::debug!("DNS leak test performed");
-        
+
         None
     }
 
@@ -331,7 +339,7 @@ impl DnsFirewall {
                 return Some(rule.action);
             }
         }
-        
+
         None
     }
 
@@ -381,7 +389,9 @@ fn build_dns_query(domain: &str) -> Result<Vec<u8>, RoutingError> {
     // QNAME: domain name in DNS format
     for label in domain.split('.') {
         if label.len() > 63 {
-            return Err(RoutingError::ResourceAllocationFailed("Label too long".to_string()));
+            return Err(RoutingError::ResourceAllocationFailed(
+                "Label too long".to_string(),
+            ));
         }
         query.push(label.len() as u8);
         query.extend_from_slice(label.as_bytes());
@@ -400,7 +410,9 @@ fn build_dns_query(domain: &str) -> Result<Vec<u8>, RoutingError> {
 /// Parse DNS response (RFC 1035)
 fn parse_dns_response(data: &[u8]) -> Result<Vec<IpAddr>, RoutingError> {
     if data.len() < 12 {
-        return Err(RoutingError::ResourceAllocationFailed("Invalid DNS response".to_string()));
+        return Err(RoutingError::ResourceAllocationFailed(
+            "Invalid DNS response".to_string(),
+        ));
     }
 
     // Skip header (12 bytes)
@@ -411,7 +423,9 @@ fn parse_dns_response(data: &[u8]) -> Result<Vec<IpAddr>, RoutingError> {
         let len = data[offset] as usize;
         offset += len + 1;
         if offset >= data.len() {
-            return Err(RoutingError::ResourceAllocationFailed("Malformed question".to_string()));
+            return Err(RoutingError::ResourceAllocationFailed(
+                "Malformed question".to_string(),
+            ));
         }
     }
     offset += 5; // Skip null terminator, QTYPE, QCLASS
@@ -475,7 +489,9 @@ fn parse_dns_response(data: &[u8]) -> Result<Vec<IpAddr>, RoutingError> {
     }
 
     if addresses.is_empty() {
-        return Err(RoutingError::ResourceAllocationFailed("No addresses in response".to_string()));
+        return Err(RoutingError::ResourceAllocationFailed(
+            "No addresses in response".to_string(),
+        ));
     }
 
     Ok(addresses)
@@ -508,10 +524,10 @@ impl SystemDnsManager {
     pub fn apply_vpn_dns(&mut self) -> Result<(), DnsConfigError> {
         // Store original servers
         self.original_servers = self.get_system_dns()?;
-        
+
         // Set VPN DNS
         self.set_system_dns(&self.vpn_servers)?;
-        
+
         Ok(())
     }
 
@@ -577,9 +593,9 @@ impl DoTResolver {
     pub fn new() -> Self {
         Self {
             endpoints: vec![
-                "1.1.1.1:853".to_string(),  // Cloudflare
-                "8.8.8.8:853".to_string(),  // Google
-                "9.9.9.9:853".to_string(),  // Quad9
+                "1.1.1.1:853".to_string(), // Cloudflare
+                "8.8.8.8:853".to_string(), // Google
+                "9.9.9.9:853".to_string(), // Quad9
             ],
             tls_config: TlsConfig {
                 pinned_certs: Vec::new(),
@@ -590,19 +606,20 @@ impl DoTResolver {
 
     /// Resolve via DNS-over-TLS (RFC 7858)
     pub async fn resolve(&self, query: &str) -> Result<Vec<IpAddr>, DnsError> {
-        use tokio::net::TcpStream;
-        use tokio_rustls::TlsConnector;
         use rustls::ClientConfig;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+        use tokio_rustls::TlsConnector;
 
         // Build DNS query
-        let dns_query = build_dns_query(query)
-            .map_err(|e| DnsError::ResolutionFailed(e.to_string()))?;
+        let dns_query =
+            build_dns_query(query).map_err(|e| DnsError::ResolutionFailed(e.to_string()))?;
 
         // Try each endpoint
         for endpoint in &self.endpoints {
             // Parse endpoint
-            let addr = endpoint.parse::<std::net::SocketAddr>()
+            let addr = endpoint
+                .parse::<std::net::SocketAddr>()
                 .map_err(|e| DnsError::ResolutionFailed(format!("Invalid endpoint: {}", e)))?;
 
             // Create TLS config with modern settings (2025 best practices)
@@ -623,8 +640,10 @@ impl DoTResolver {
             // Connect with timeout
             let tcp_stream = match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                TcpStream::connect(addr)
-            ).await {
+                TcpStream::connect(addr),
+            )
+            .await
+            {
                 Ok(Ok(stream)) => stream,
                 _ => continue, // Try next endpoint
             };
@@ -664,7 +683,9 @@ impl DoTResolver {
             }
         }
 
-        Err(DnsError::ResolutionFailed("All endpoints failed".to_string()))
+        Err(DnsError::ResolutionFailed(
+            "All endpoints failed".to_string(),
+        ))
     }
 }
 
@@ -724,9 +745,7 @@ mod tests {
 
         // Test cache entry creation
         let entry = CacheEntry {
-            addresses: vec![
-                "1.2.3.4".parse().unwrap(),
-            ],
+            addresses: vec!["1.2.3.4".parse().unwrap()],
             expires_at: Instant::now() + Duration::from_secs(300),
         };
 
@@ -765,8 +784,7 @@ mod tests {
             0x00, 0x00, // Authority: 0
             0x00, 0x00, // Additional: 0
             // Question section
-            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
-            0x03, b'c', b'o', b'm',
+            0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm',
             0x00, // Null terminator
             0x00, 0x01, // Type A
             0x00, 0x01, // Class IN
@@ -832,8 +850,10 @@ mod tests {
 
         // resolve_secure checks the firewall before making network calls
         let result = guard.resolve_secure("blocked-domain.example.com").await;
-        assert!(result.is_err(),
-            "query matching a block rule must be rejected before reaching the network");
+        assert!(
+            result.is_err(),
+            "query matching a block rule must be rejected before reaching the network"
+        );
     }
 
     #[test]
@@ -857,8 +877,10 @@ mod tests {
         let long_label = "a".repeat(64);
         let domain = format!("{}.com", long_label);
         let result = build_dns_query(&domain);
-        assert!(result.is_err(),
-            "label longer than 63 characters must be rejected");
+        assert!(
+            result.is_err(),
+            "label longer than 63 characters must be rejected"
+        );
     }
 
     #[test]
@@ -866,8 +888,10 @@ mod tests {
         // Fewer than 12 bytes → invalid header
         let malformed = vec![0x00, 0x01, 0x81, 0x80, 0x00, 0x01];
         let result = parse_dns_response(&malformed);
-        assert!(result.is_err(),
-            "DNS response shorter than 12 bytes must be rejected");
+        assert!(
+            result.is_err(),
+            "DNS response shorter than 12 bytes must be rejected"
+        );
     }
 
     #[test]
@@ -887,8 +911,10 @@ mod tests {
         ];
 
         let result = parse_dns_response(&response);
-        assert!(result.is_err(),
-            "DNS response with no answer records must return Err");
+        assert!(
+            result.is_err(),
+            "DNS response with no answer records must return Err"
+        );
     }
 
     #[tokio::test]
@@ -910,8 +936,10 @@ mod tests {
 
         // resolve_secure should return cached data without hitting the network
         let result = guard.resolve_secure("cached.example.com").await;
-        assert!(result.is_ok(),
-            "valid cached entry must return Ok without a network request");
+        assert!(
+            result.is_ok(),
+            "valid cached entry must return Ok without a network request"
+        );
         let data = result.unwrap();
         // Serialized IPv4: 4 bytes for 93.184.216.34
         assert_eq!(data.len(), 4, "cached IPv4 must serialize to 4 bytes");
@@ -931,7 +959,10 @@ mod tests {
             "1.1.1.1".parse().unwrap(),
         ];
         firewall.block_isp_dns(servers);
-        assert_eq!(firewall.blocked_servers.len(), 3,
-            "all provided ISP servers must be added to blocked list");
+        assert_eq!(
+            firewall.blocked_servers.len(),
+            3,
+            "all provided ISP servers must be added to blocked list"
+        );
     }
 }

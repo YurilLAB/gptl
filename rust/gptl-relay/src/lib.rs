@@ -24,14 +24,18 @@ pub mod changes {
 }
 
 // Re-export commonly used types
-pub use api_key::{ApiKeyManager, ApiKeyScope, ApiKeyValidation, ApiKeyCredentials, ApiKeyInfo};
+pub use api_key::{ApiKeyCredentials, ApiKeyInfo, ApiKeyManager, ApiKeyScope, ApiKeyValidation};
 pub use audit::{AuditLogger, AuthEvent, SecurityEventType, SecuritySeverity};
-pub use auth::{MfaAuthenticator, PasswordHasher, TotpManager, WebAuthnManager, ClientCertVerifier, AuthStep};
-pub use auto_setup::{FirewallAutomation, FirewallError, FirewallResult, FirewallStatus, FirewallType, TrackedRule};
-pub use config::{ServerConfig, SecurityLevel, load_config};
-pub use ip_restriction::{IpAllowlist, GeoBlocker, ThreatIntelligence};
+pub use auth::{
+    AuthStep, ClientCertVerifier, MfaAuthenticator, PasswordHasher, TotpManager, WebAuthnManager,
+};
+pub use auto_setup::{
+    FirewallAutomation, FirewallError, FirewallResult, FirewallStatus, FirewallType, TrackedRule,
+};
+pub use config::{load_config, SecurityLevel, ServerConfig};
+pub use ip_restriction::{GeoBlocker, IpAllowlist, ThreatIntelligence};
 pub use rate_limit::AuthRateLimiter;
-pub use relay::{RelayServer, RelayConfig};
+pub use relay::{RelayConfig, RelayServer};
 pub use session::SessionManager;
 
 /// Library version
@@ -46,47 +50,47 @@ pub enum RelayError {
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    
+
     /// Authentication failed
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
-    
+
     /// Authorization failed
     #[error("Authorization failed: {0}")]
     AuthorizationFailed(String),
-    
+
     /// Invalid session
     #[error("Invalid session")]
     InvalidSession,
-    
+
     /// Session binding mismatch
     #[error("Session binding mismatch: {0}")]
     SessionBindingMismatch(String),
-    
+
     /// IP is blocked
     #[error("IP blocked: {0}")]
     IpBlocked(String),
-    
+
     /// Rate limit exceeded
     #[error("Rate limit exceeded. Retry after {0} seconds")]
     RateLimitExceeded(u64),
-    
+
     /// Account is locked
     #[error("Account locked: {0}")]
     AccountLocked(String),
-    
+
     /// Invalid API key
     #[error("Invalid API key")]
     InvalidApiKey,
-    
+
     /// API key expired
     #[error("API key expired")]
     ApiKeyExpired,
-    
+
     /// Audit error
     #[error("Audit error: {0}")]
     AuditError(String),
-    
+
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
@@ -124,20 +128,20 @@ impl SecurityContext {
             request_id: uuid::Uuid::new_v4().to_string(),
         }
     }
-    
+
     /// Add user information to the context
     pub fn with_user(mut self, user_id: &str) -> Self {
         self.user_id = Some(user_id.to_string());
         self
     }
-    
+
     /// Add fingerprint to the context
     pub fn with_fingerprint(mut self, fingerprint: &str) -> Self {
         self.fingerprint = Some(fingerprint.to_string());
         self.client_fingerprint = Some(fingerprint.to_string());
         self
     }
-    
+
     /// Add API key ID to the context
     pub fn with_api_key(mut self, key_id: &str) -> Self {
         self.api_key_id = Some(key_id.to_string());
@@ -192,7 +196,7 @@ impl SecurityFeatures {
             tamper_evident: false,
         }
     }
-    
+
     /// Maximum security features
     pub fn maximum() -> Self {
         Self {

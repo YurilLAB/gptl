@@ -121,10 +121,7 @@ pub async fn run(config: ProxyConfig) -> Result<(), TransportError> {
 }
 
 /// Handle one SOCKS5 client connection.
-async fn handle_connection(
-    client: TcpStream,
-    config: ProxyConfig,
-) -> Result<(), TransportError> {
+async fn handle_connection(client: TcpStream, config: ProxyConfig) -> Result<(), TransportError> {
     // Observer bookkeeping: classify each failure into a `FailureKind`,
     // emit register/unregister/success/failure around the call to the
     // real handler.  Tracking lives here (not inside the inner fn) so
@@ -137,14 +134,16 @@ async fn handle_connection(
     let stage_at_failure = std::sync::Arc::new(std::sync::Mutex::new(FailureKind::Other));
     let stage_for_inner = stage_at_failure.clone();
 
-    let result =
-        handle_connection_inner(client, config, &mut tracked, stage_for_inner).await;
+    let result = handle_connection_inner(client, config, &mut tracked, stage_for_inner).await;
 
     if let Some((circuit_id, entry_label)) = tracked {
         match &result {
             Ok(()) => {
                 observer.record_success(circuit_id, started.elapsed(), 0);
-                debug!("circuit {} via {} completed cleanly", circuit_id, entry_label);
+                debug!(
+                    "circuit {} via {} completed cleanly",
+                    circuit_id, entry_label
+                );
             }
             Err(e) => {
                 let kind = *stage_at_failure.lock().unwrap();

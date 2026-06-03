@@ -24,8 +24,7 @@ use gptl_transport::{
     observer::{CompositeObserver, SharedObserver},
     path::PathConfig,
     proxy::{run as run_proxy, ProxyConfig},
-    selftest,
-    TransportError,
+    selftest, TransportError,
 };
 use std::sync::atomic::Ordering;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -112,8 +111,8 @@ async fn main() {
                 "error: startup self-test found ZERO healthy relays — refusing to start.\n\
                  hint: check that gptl-node is running at the addresses in {}, that the\n\
                  hint: pubkey_hex values match, and that the listen address is reachable.\n\
-                 hint: re-run with --skip-selftest to bypass this gate."
-                , relays_path.display()
+                 hint: re-run with --skip-selftest to bypass this gate.",
+                relays_path.display()
             );
             std::process::exit(1);
         }
@@ -383,12 +382,8 @@ fn print_usage() {
     println!("  --guards <PATH>             Path to guards.json for persistent guard state");
     println!("  --pool-size <N>             Pre-build N circuits (0 = disabled, default: 0)");
     println!("  --guard-rotation-days <N>   Guard rotation interval in days (default: 30)");
-    println!(
-        "  --skip-selftest             Skip the startup self-test (NOT recommended)"
-    );
-    println!(
-        "  --selftest-timeout <SECS>   Per-relay self-test timeout (default: 5)"
-    );
+    println!("  --skip-selftest             Skip the startup self-test (NOT recommended)");
+    println!("  --selftest-timeout <SECS>   Per-relay self-test timeout (default: 5)");
     println!(
         "  --metrics-addr <ADDR>       Bind a Prometheus /metrics endpoint here (e.g. 127.0.0.1:9101)"
     );

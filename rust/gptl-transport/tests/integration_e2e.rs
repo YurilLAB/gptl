@@ -58,7 +58,13 @@ fn make_key_file(dir: &Path) -> PathBuf {
 /// Run `gptl-node --print-descriptor` and pull out the pubkey_hex from its JSON.
 fn fetch_pubkey(node_bin: &Path, key_path: &Path, listen: &str) -> String {
     let out = Command::new(node_bin)
-        .args(["--key", key_path.to_str().unwrap(), "--listen", listen, "--print-descriptor"])
+        .args([
+            "--key",
+            key_path.to_str().unwrap(),
+            "--listen",
+            listen,
+            "--print-descriptor",
+        ])
         .output()
         .expect("run gptl-node --print-descriptor");
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -112,9 +118,12 @@ fn spawn_echo_server() -> String {
 
 /// Send `payload` through the SOCKS5 proxy at `proxy_addr` to `target`,
 /// expecting the same payload echoed back.  Returns the received bytes.
-fn socks5_echo_request(proxy_addr: &str, target_host: &str, target_port: u16, payload: &[u8])
-    -> std::io::Result<Vec<u8>>
-{
+fn socks5_echo_request(
+    proxy_addr: &str,
+    target_host: &str,
+    target_port: u16,
+    payload: &[u8],
+) -> std::io::Result<Vec<u8>> {
     let mut s = TcpStream::connect(proxy_addr)?;
     s.set_read_timeout(Some(Duration::from_secs(10)))?;
     s.set_write_timeout(Some(Duration::from_secs(10)))?;
@@ -137,7 +146,11 @@ fn socks5_echo_request(proxy_addr: &str, target_host: &str, target_port: u16, pa
     let mut reply = [0u8; 10];
     s.read_exact(&mut reply)?;
     assert_eq!(reply[0], 0x05, "VER must be 5 in reply");
-    assert_eq!(reply[1], 0x00, "REP must be 0x00 (Succeeded), got 0x{:02x}", reply[1]);
+    assert_eq!(
+        reply[1], 0x00,
+        "REP must be 0x00 (Succeeded), got 0x{:02x}",
+        reply[1]
+    );
 
     // Echo round-trip.
     s.write_all(payload)?;
@@ -212,10 +225,14 @@ fn end_to_end_single_hop_socks5_roundtrip() {
     let mut node = KillOnDrop(
         Command::new(&node_bin)
             .args([
-                "--key", key_path.to_str().unwrap(),
-                "--listen", &relay_listen,
-                "--nickname", "itrelay",
-                "--log", "warn",
+                "--key",
+                key_path.to_str().unwrap(),
+                "--listen",
+                &relay_listen,
+                "--nickname",
+                "itrelay",
+                "--log",
+                "warn",
                 "--allow-private",
             ])
             .stdout(Stdio::null())
@@ -244,11 +261,16 @@ fn end_to_end_single_hop_socks5_roundtrip() {
     let mut client = KillOnDrop(
         Command::new(&client_bin)
             .args([
-                "--relays", relays_json.to_str().unwrap(),
-                "--listen", &proxy_listen,
-                "--hops", "1",
-                "--log", "warn",
-                "--selftest-timeout", "3",
+                "--relays",
+                relays_json.to_str().unwrap(),
+                "--listen",
+                &proxy_listen,
+                "--hops",
+                "1",
+                "--log",
+                "warn",
+                "--selftest-timeout",
+                "3",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -266,10 +288,7 @@ fn end_to_end_single_hop_socks5_roundtrip() {
     let payload = b"hello from integration_e2e!";
     let echoed = socks5_echo_request(&proxy_listen, &echo_host, echo_port, payload)
         .expect("SOCKS5 roundtrip");
-    assert_eq!(
-        echoed, payload,
-        "echoed bytes must match what we sent"
-    );
+    assert_eq!(echoed, payload, "echoed bytes must match what we sent");
 
     // 5.  A second roundtrip on a fresh SOCKS5 connection — verifies the
     //     circuit-tear-down path from the first request didn't break the

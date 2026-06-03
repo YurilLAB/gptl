@@ -13,9 +13,8 @@
 
 use crate::{
     cell::{
-        Cell, CellType, RelayCell, RelayCommand, CELL_PAYLOAD_LEN, CELL_SIZE,
-        RELAY_INNER_CT_LEN, RELAY_INNER_MAX_DATA, RELAY_INNER_PLAINTEXT_LEN, RELAY_MAX_DATA,
-        RELAY_PLAINTEXT_LEN,
+        Cell, CellType, RelayCell, RelayCommand, CELL_PAYLOAD_LEN, CELL_SIZE, RELAY_INNER_CT_LEN,
+        RELAY_INNER_MAX_DATA, RELAY_INNER_PLAINTEXT_LEN, RELAY_MAX_DATA, RELAY_PLAINTEXT_LEN,
     },
     crypto::RelayCiphers,
     handshake::{relay_respond, RelayStaticKey},
@@ -98,7 +97,10 @@ impl std::fmt::Debug for RelayNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RelayNode")
             .field("fingerprint", &hex::encode(self.static_key.fingerprint))
-            .field("active_circuits", &self.active_circuits.load(Ordering::Relaxed))
+            .field(
+                "active_circuits",
+                &self.active_circuits.load(Ordering::Relaxed),
+            )
             .field("max_circuits", &self.options.max_circuits)
             .field("allow_private", &self.options.allow_private)
             .finish()
@@ -199,7 +201,10 @@ impl RelayNode {
                         other => warn!("client {} ended: {}", peer, other),
                     }
                 }
-                let n = node.active_circuits.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+                let n = node
+                    .active_circuits
+                    .fetch_sub(1, Ordering::Relaxed)
+                    .saturating_sub(1);
                 node.metrics
                     .active_circuits
                     .store(n as u64, Ordering::Relaxed);
@@ -224,12 +229,7 @@ impl RelayNode {
 
         // Wait for the CREATE cell with a bounded timeout so a quiet
         // attacker can't tie up a circuit slot indefinitely.
-        let create = match tokio::time::timeout(
-            self.options.handshake_timeout,
-            conn.recv(),
-        )
-        .await
-        {
+        let create = match tokio::time::timeout(self.options.handshake_timeout, conn.recv()).await {
             Ok(Ok(cell)) => cell,
             Ok(Err(e)) => {
                 self.metrics
@@ -516,8 +516,15 @@ async fn dispatch_relay_cell(
     match inner.command {
         RelayCommand::Begin => {
             begin_stream(
-                inner, circuit_id, ciphers, write_tx,
-                streams, dest_tx, is_inner_hop, options, metrics,
+                inner,
+                circuit_id,
+                ciphers,
+                write_tx,
+                streams,
+                dest_tx,
+                is_inner_hop,
+                options,
+                metrics,
             )
             .await
         }
@@ -529,7 +536,10 @@ async fn dispatch_relay_cell(
                     drop(map);
                     streams.lock().await.remove(&sid);
                     send_data_cell(
-                        ciphers, circuit_id, write_tx, is_inner_hop,
+                        ciphers,
+                        circuit_id,
+                        write_tx,
+                        is_inner_hop,
                         RelayCell {
                             command: RelayCommand::End,
                             stream_id: sid,
@@ -541,7 +551,9 @@ async fn dispatch_relay_cell(
             } else {
                 debug!(
                     "circuit {} stream {} data for unknown stream, discarding {} bytes",
-                    circuit_id, inner.stream_id, inner.data.len(),
+                    circuit_id,
+                    inner.stream_id,
+                    inner.data.len(),
                 );
             }
             Ok(())
@@ -638,7 +650,10 @@ async fn begin_stream(
                 .streams_blocked_total
                 .fetch_add(1, Ordering::Relaxed);
             return send_data_cell(
-                ciphers, circuit_id, write_tx, is_inner_hop,
+                ciphers,
+                circuit_id,
+                write_tx,
+                is_inner_hop,
                 RelayCell {
                     command: RelayCommand::BeginFailed,
                     stream_id,
@@ -660,7 +675,10 @@ async fn begin_stream(
         Some(p) if !host.is_empty() => p,
         _ => {
             return send_data_cell(
-                ciphers, circuit_id, write_tx, is_inner_hop,
+                ciphers,
+                circuit_id,
+                write_tx,
+                is_inner_hop,
                 RelayCell {
                     command: RelayCommand::BeginFailed,
                     stream_id,
@@ -680,7 +698,10 @@ async fn begin_stream(
             .streams_blocked_total
             .fetch_add(1, Ordering::Relaxed);
         return send_data_cell(
-            ciphers, circuit_id, write_tx, is_inner_hop,
+            ciphers,
+            circuit_id,
+            write_tx,
+            is_inner_hop,
             RelayCell {
                 command: RelayCommand::BeginFailed,
                 stream_id,
@@ -699,7 +720,10 @@ async fn begin_stream(
             .streams_blocked_total
             .fetch_add(1, Ordering::Relaxed);
         return send_data_cell(
-            ciphers, circuit_id, write_tx, is_inner_hop,
+            ciphers,
+            circuit_id,
+            write_tx,
+            is_inner_hop,
             RelayCell {
                 command: RelayCommand::BeginFailed,
                 stream_id,
@@ -726,7 +750,10 @@ async fn begin_stream(
             Err(e) => {
                 debug!("stream {} resolve failed: {}", stream_id, e);
                 return send_data_cell(
-                    ciphers, circuit_id, write_tx, is_inner_hop,
+                    ciphers,
+                    circuit_id,
+                    write_tx,
+                    is_inner_hop,
                     RelayCell {
                         command: RelayCommand::BeginFailed,
                         stream_id,
@@ -755,7 +782,10 @@ async fn begin_stream(
             .streams_blocked_total
             .fetch_add(1, Ordering::Relaxed);
         return send_data_cell(
-            ciphers, circuit_id, write_tx, is_inner_hop,
+            ciphers,
+            circuit_id,
+            write_tx,
+            is_inner_hop,
             RelayCell {
                 command: RelayCommand::BeginFailed,
                 stream_id,
@@ -770,7 +800,10 @@ async fn begin_stream(
         Err(e) => {
             debug!("stream {} connect failed: {}", stream_id, e);
             return send_data_cell(
-                ciphers, circuit_id, write_tx, is_inner_hop,
+                ciphers,
+                circuit_id,
+                write_tx,
+                is_inner_hop,
                 RelayCell {
                     command: RelayCommand::BeginFailed,
                     stream_id,
@@ -782,7 +815,10 @@ async fn begin_stream(
     };
 
     send_data_cell(
-        ciphers, circuit_id, write_tx, is_inner_hop,
+        ciphers,
+        circuit_id,
+        write_tx,
+        is_inner_hop,
         RelayCell {
             command: RelayCommand::Connected,
             stream_id,
@@ -790,9 +826,7 @@ async fn begin_stream(
         },
     )
     .await?;
-    metrics
-        .streams_opened_total
-        .fetch_add(1, Ordering::Relaxed);
+    metrics.streams_opened_total.fetch_add(1, Ordering::Relaxed);
 
     let (read_half, write_half) = tcp.into_split();
     streams
@@ -881,7 +915,9 @@ async fn send_extend_failed(
 ) -> Result<(), TransportError> {
     warn!("circuit {} RELAY_EXTEND failed: {}", circuit_id, reason);
     send_relay_cell(
-        ciphers, circuit_id, write_tx,
+        ciphers,
+        circuit_id,
+        write_tx,
         RelayCell {
             command: RelayCommand::ExtendFailed,
             stream_id: 0,
@@ -903,15 +939,27 @@ async fn handle_extend(
     let data = &inner.data;
 
     if data.len() < 4 {
-        send_extend_failed("payload too short (< 4 bytes)", circuit_id, ciphers, write_tx).await?;
+        send_extend_failed(
+            "payload too short (< 4 bytes)",
+            circuit_id,
+            ciphers,
+            write_tx,
+        )
+        .await?;
         return Ok(None);
     }
     let addr_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let required = 4usize.saturating_add(addr_len).saturating_add(96);
     if data.len() < required {
         send_extend_failed(
-            &format!("payload truncated: need {} bytes, got {}", required, data.len()),
-            circuit_id, ciphers, write_tx,
+            &format!(
+                "payload truncated: need {} bytes, got {}",
+                required,
+                data.len()
+            ),
+            circuit_id,
+            ciphers,
+            write_tx,
         )
         .await?;
         return Ok(None);
@@ -935,7 +983,9 @@ async fn handle_extend(
 
     debug!(
         "circuit {} extending to {} (fp prefix {}...)",
-        circuit_id, addr, hex::encode(&fp[..4])
+        circuit_id,
+        addr,
+        hex::encode(&fp[..4])
     );
 
     let relay2_tcp = match TcpStream::connect(&addr).await {
@@ -943,7 +993,9 @@ async fn handle_extend(
         Err(e) => {
             send_extend_failed(
                 &format!("connect to {}: {}", addr, e),
-                circuit_id, ciphers, write_tx,
+                circuit_id,
+                ciphers,
+                write_tx,
             )
             .await?;
             return Ok(None);
@@ -960,7 +1012,9 @@ async fn handle_extend(
     if let Err(e) = relay2_conn.send(&create).await {
         send_extend_failed(
             &format!("send CREATE to relay2: {}", e),
-            circuit_id, ciphers, write_tx,
+            circuit_id,
+            ciphers,
+            write_tx,
         )
         .await?;
         return Ok(None);
@@ -971,7 +1025,9 @@ async fn handle_extend(
         Err(e) => {
             send_extend_failed(
                 &format!("recv CREATED from relay2: {}", e),
-                circuit_id, ciphers, write_tx,
+                circuit_id,
+                ciphers,
+                write_tx,
             )
             .await?;
             return Ok(None);
@@ -980,7 +1036,9 @@ async fn handle_extend(
     if !matches!(created.cell_type, CellType::Created) {
         send_extend_failed(
             &format!("relay2 sent {:?} (expected CREATED)", created.cell_type),
-            circuit_id, ciphers, write_tx,
+            circuit_id,
+            ciphers,
+            write_tx,
         )
         .await?;
         return Ok(None);
@@ -988,7 +1046,9 @@ async fn handle_extend(
 
     let extended_data = created.payload[0..96].to_vec();
     send_relay_cell(
-        ciphers, circuit_id, write_tx,
+        ciphers,
+        circuit_id,
+        write_tx,
         RelayCell {
             command: RelayCommand::Extended,
             stream_id: 0,
@@ -1060,15 +1120,15 @@ mod tests {
     fn test_is_private_ip_blocks_reserved_ranges() {
         use std::net::IpAddr;
         let blocked = [
-            "127.0.0.1",            // loopback
-            "169.254.169.254",      // cloud metadata (link-local)
-            "100.64.0.1",           // CGNAT (RFC 6598)
-            "::1",                  // IPv6 loopback
-            "::ffff:127.0.0.1",     // IPv4-mapped loopback (bypass attempt)
-            "::ffff:10.0.0.1",      // IPv4-mapped RFC1918
-            "fc00::1",              // IPv6 unique-local
-            "fe80::1",              // IPv6 link-local
-            "224.0.0.1",            // multicast
+            "127.0.0.1",        // loopback
+            "169.254.169.254",  // cloud metadata (link-local)
+            "100.64.0.1",       // CGNAT (RFC 6598)
+            "::1",              // IPv6 loopback
+            "::ffff:127.0.0.1", // IPv4-mapped loopback (bypass attempt)
+            "::ffff:10.0.0.1",  // IPv4-mapped RFC1918
+            "fc00::1",          // IPv6 unique-local
+            "fe80::1",          // IPv6 link-local
+            "224.0.0.1",        // multicast
         ];
         for s in blocked {
             let ip: IpAddr = s.parse().unwrap();
@@ -1088,8 +1148,10 @@ mod tests {
         assert_eq!(o.max_circuits, 1000);
         assert_eq!(o.max_streams_per_circuit, 256);
         assert!(!o.allow_private, "default must NOT permit private targets");
-        assert!(o.blocked_ports.contains(&25),
-            "SMTP must be blocked by default to discourage open-relay abuse");
+        assert!(
+            o.blocked_ports.contains(&25),
+            "SMTP must be blocked by default to discourage open-relay abuse"
+        );
     }
 
     #[test]
@@ -1154,10 +1216,8 @@ mod tests {
         conn.send(&create).await.unwrap();
         let created = conn.recv().await.unwrap();
         let session = client_finish(pending, &created).unwrap();
-        let mut ciphers = crate::crypto::CircuitCiphers::new(
-            &session.forward_key,
-            &session.backward_key,
-        );
+        let mut ciphers =
+            crate::crypto::CircuitCiphers::new(&session.forward_key, &session.backward_key);
 
         // Send a RELAY_BEGIN inside an encrypted RELAY cell.
         let begin = RelayCell {
@@ -1208,7 +1268,10 @@ mod tests {
             }
         }
         assert!(got_connected, "must receive Connected before data");
-        assert_eq!(&echoed[..], b"ping123",
-            "relay must round-trip data through the echo server");
+        assert_eq!(
+            &echoed[..],
+            b"ping123",
+            "relay must round-trip data through the echo server"
+        );
     }
 }

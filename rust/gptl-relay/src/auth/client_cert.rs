@@ -1,8 +1,8 @@
 //! Client certificate authentication
 use std::collections::HashMap;
 
-use std::sync::Arc;
 use chrono::{DateTime, Utc};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Client certificate verifier
@@ -20,36 +20,49 @@ impl ClientCertVerifier {
     }
 
     /// Verify certificate
-    pub async fn verify_certificate(&self, certificate: &ClientCertificate) -> crate::Result<String> {
+    pub async fn verify_certificate(
+        &self,
+        certificate: &ClientCertificate,
+    ) -> crate::Result<String> {
         let fingerprint = self.calculate_fingerprint(certificate);
         let certs = self.allowed_certs.read().await;
-        
-        let allowed = certs.get(&fingerprint)
-            .ok_or_else(|| crate::RelayError::AuthenticationFailed("Certificate not authorized".to_string()))?;
-        
+
+        let allowed = certs.get(&fingerprint).ok_or_else(|| {
+            crate::RelayError::AuthenticationFailed("Certificate not authorized".to_string())
+        })?;
+
         if allowed.revoked {
-            return Err(crate::RelayError::AuthenticationFailed("Certificate revoked".to_string()));
+            return Err(crate::RelayError::AuthenticationFailed(
+                "Certificate revoked".to_string(),
+            ));
         }
-        
+
         Ok(allowed.user_id.clone())
     }
 
     /// Allow certificate for user
-    pub async fn allow_certificate(&self, user_id: &str, cert_fingerprint: &str) -> crate::Result<()> {
+    pub async fn allow_certificate(
+        &self,
+        user_id: &str,
+        cert_fingerprint: &str,
+    ) -> crate::Result<()> {
         let mut certs = self.allowed_certs.write().await;
-        certs.insert(cert_fingerprint.to_string(), AllowedCert {
-            user_id: user_id.to_string(),
-            fingerprint: cert_fingerprint.to_string(),
-            created_at: Utc::now(),
-            last_used: None,
-            revoked: false,
-        });
+        certs.insert(
+            cert_fingerprint.to_string(),
+            AllowedCert {
+                user_id: user_id.to_string(),
+                fingerprint: cert_fingerprint.to_string(),
+                created_at: Utc::now(),
+                last_used: None,
+                revoked: false,
+            },
+        );
         Ok(())
     }
 
     /// Calculate fingerprint
     fn calculate_fingerprint(&self, certificate: &ClientCertificate) -> String {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(&certificate.raw_der);
         hex::encode(hasher.finalize())

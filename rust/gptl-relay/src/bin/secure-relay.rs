@@ -36,20 +36,20 @@
 //!    - Admin action audit trail
 
 use gptl_relay::{
-    auth::{MfaAuthenticator, PasswordHasher, TotpManager, WebAuthnManager, ClientCertVerifier},
-    ip_restriction::{IpAllowlist, GeoBlocker, ThreatIntelligence},
-    rate_limit::AuthRateLimiter,
-    session::SessionManager,
     api_key::ApiKeyManager,
     audit::AuditLogger,
-    relay::{RelayServer, RelayConfig},
-    config::{ServerConfig, load_config},
+    auth::{ClientCertVerifier, MfaAuthenticator, PasswordHasher, TotpManager, WebAuthnManager},
+    config::{load_config, ServerConfig},
+    ip_restriction::{GeoBlocker, IpAllowlist, ThreatIntelligence},
+    rate_limit::AuthRateLimiter,
+    relay::{RelayConfig, RelayServer},
+    session::SessionManager,
     SecurityFeatures,
 };
 use gptl_transport::handshake::RelayStaticKey;
 use gptl_transport::relay_node::{RelayNode, RelayOptions};
 use std::sync::Arc;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,8 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `secure_relay`, not `gptl_relay`), so the startup security-features
     // summary printed nothing.  Honor RUST_LOG when set, default to `info`.
     use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     info!("Starting GPTL Secure Relay Server");
@@ -111,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. IP Restrictions
     let mut ip_allowlist = IpAllowlist::new();
-    
+
     if config.security.geoblocking_enabled {
         let geo_blocker = GeoBlocker::new()
             .block_tor_exit_nodes()
@@ -134,17 +133,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_manager = SessionManager::new(&generate_signing_key())
         .with_access_ttl(config.session.access_token_ttl_minutes)
         .with_refresh_ttl(config.session.refresh_token_ttl_days);
-    info!("  ✓ Session management enabled ({} min access, {} day refresh)",
-          config.session.access_token_ttl_minutes,
-          config.session.refresh_token_ttl_days);
+    info!(
+        "  ✓ Session management enabled ({} min access, {} day refresh)",
+        config.session.access_token_ttl_minutes, config.session.refresh_token_ttl_days
+    );
 
     // 5. API Key Management
     let api_key_manager = ApiKeyManager::new();
     info!("  ✓ API key system enabled");
 
     // 6. Audit Logging
-    let audit_logger = AuditLogger::new(generate_signing_key())
-        .with_persistent_storage("/var/log/gptl/audit.log");
+    let audit_logger =
+        AuditLogger::new(generate_signing_key()).with_persistent_storage("/var/log/gptl/audit.log");
     info!("  ✓ Tamper-evident audit logging enabled");
 
     // Create relay server
@@ -153,7 +153,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tls_cert_path: config.server.tls_cert_path.clone(),
         tls_key_path: config.server.tls_key_path.clone(),
         mtls_enabled: config.security.require_client_cert,
-        mtls_ca_path: config.security.require_client_cert.then(|| "/etc/gptl/ca.crt".to_string()),
+        mtls_ca_path: config
+            .security
+            .require_client_cert
+            .then(|| "/etc/gptl/ca.crt".to_string()),
         request_timeout_secs: config.server.request_timeout_secs,
         max_connections: config.server.max_connections,
         strict_mode: config.security.level == gptl_relay::SecurityLevel::Maximum,
@@ -179,10 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "relay static pubkey:        {}",
         hex::encode(relay_static_key.public)
     );
-    let relay_node = Arc::new(RelayNode::new(
-        relay_static_key,
-        RelayOptions::default(),
-    ));
+    let relay_node = Arc::new(RelayNode::new(relay_static_key, RelayOptions::default()));
     info!("  ✓ Relay protocol handler ready (RelayNode)");
 
     let server = RelayServer::new(relay_config)
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start server
     info!("Relay server starting on {}", config.server.bind_address);
-    
+
     if let Err(e) = server.start().await {
         error!("Server error: {}", e);
         return Err(Box::new(e) as Box<dyn std::error::Error>);
@@ -211,41 +211,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Print security features summary
 fn print_security_summary(config: &ServerConfig) {
     let features = config.security.level.features();
-    
+
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║              SECURITY FEATURES ENABLED                       ║");
     info!("╠══════════════════════════════════════════════════════════════╣");
-    info!("║ Multi-Factor Authentication: {:31} ║", 
-          if features.mfa_enabled { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Hardware Token Support:      {:31} ║", 
-          if features.hardware_tokens { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Client Certificate Auth:     {:31} ║", 
-          if features.client_certs { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ IP Restrictions:             {:31} ║", 
-          if features.ip_restrictions { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Geolocation Blocking:        {:31} ║", 
-          if features.geoblocking { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Rate Limiting:               {:31} ║", 
-          if features.rate_limiting { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Account Lockout:             {:31} ║", 
-          if features.account_lockout { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ CAPTCHA Support:             {:31} ║", 
-          if features.captcha { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Session Binding:             {:31} ║", 
-          if features.session_binding { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ API Key System:              {:31} ║", 
-          if features.api_keys { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Audit Logging:               {:31} ║", 
-          if features.audit_logging { "✓ ENABLED" } else { "✗ Disabled" });
-    info!("║ Tamper-Evident Logs:         {:31} ║", 
-          if features.tamper_evident { "✓ ENABLED" } else { "✗ Disabled" });
+    info!(
+        "║ Multi-Factor Authentication: {:31} ║",
+        if features.mfa_enabled {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Hardware Token Support:      {:31} ║",
+        if features.hardware_tokens {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Client Certificate Auth:     {:31} ║",
+        if features.client_certs {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ IP Restrictions:             {:31} ║",
+        if features.ip_restrictions {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Geolocation Blocking:        {:31} ║",
+        if features.geoblocking {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Rate Limiting:               {:31} ║",
+        if features.rate_limiting {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Account Lockout:             {:31} ║",
+        if features.account_lockout {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ CAPTCHA Support:             {:31} ║",
+        if features.captcha {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Session Binding:             {:31} ║",
+        if features.session_binding {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ API Key System:              {:31} ║",
+        if features.api_keys {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Audit Logging:               {:31} ║",
+        if features.audit_logging {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
+    info!(
+        "║ Tamper-Evident Logs:         {:31} ║",
+        if features.tamper_evident {
+            "✓ ENABLED"
+        } else {
+            "✗ Disabled"
+        }
+    );
     info!("╚══════════════════════════════════════════════════════════════╝");
 }
 
 /// Generate a secure signing key
 fn generate_signing_key() -> Vec<u8> {
     use rand::RngCore;
-    
+
     let mut key = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
     key

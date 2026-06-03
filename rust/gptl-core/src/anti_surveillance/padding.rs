@@ -4,13 +4,13 @@
 //! and related padding defenses against website fingerprinting attacks.
 
 use super::{AntiSurveillanceConfig, AntiSurveillanceError, Cell, CellCommand};
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
+use rand_distr::{Distribution, Exp};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand_distr::{Distribution, Exp};
 
 /// Adaptive padding engine
 pub struct PaddingEngine {
@@ -51,12 +51,10 @@ impl PaddingEngine {
     /// Create new padding engine
     pub fn new(config: Arc<RwLock<AntiSurveillanceConfig>>) -> Self {
         let state_machines = Arc::new(RwLock::new(Vec::new()));
-        
+
         // Initialize IAT histogram with typical web browsing patterns
-        let iat_histogram = vec![
-            0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0,
-        ];
-        
+        let iat_histogram = vec![0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0];
+
         Self {
             config,
             state_machines,
@@ -138,7 +136,7 @@ impl PaddingEngine {
 
         for window in windows {
             let window_size = window.len();
-            
+
             // Sample target window size from histogram
             let target_size = if let Ok(exp) = Exp::new(0.5) {
                 let sample: f64 = exp.sample(&mut rng);
@@ -181,7 +179,7 @@ impl PaddingEngine {
         while cell_iter.peek().is_some() {
             // Choose random burst size
             let burst_size = BURST_SIZES[rng.gen_range(0..BURST_SIZES.len())];
-            
+
             // Collect cells for this burst
             let mut burst = Vec::new();
             for _ in 0..burst_size {
@@ -257,7 +255,7 @@ impl PaddingEngine {
     /// Update IAT histogram based on observed traffic
     pub async fn update_histogram(&self, iat: f64) {
         let mut histogram = self.iat_histogram.write().await;
-        
+
         // Add new observation with exponential weighting
         histogram.push(iat);
         if histogram.len() > 100 {
@@ -284,7 +282,7 @@ impl<T> ChooseRandom<T> for Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anti_surveillance::{SecurityLevel, AntiSurveillanceConfig};
+    use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel};
 
     fn create_test_cell(circuit_id: u32, stream_id: u16, command: CellCommand) -> Cell {
         Cell {
@@ -382,9 +380,7 @@ mod tests {
         let config = Arc::new(RwLock::new(config));
         let engine = PaddingEngine::new(config);
 
-        let cells = vec![
-            create_test_cell(1, 1, CellCommand::Data),
-        ];
+        let cells = vec![create_test_cell(1, 1, CellCommand::Data)];
 
         let result = engine.pad_cells(cells).await.unwrap();
         // Maximum padding should pad to burst size (at least 10)
@@ -485,7 +481,8 @@ mod tests {
         let result = engine.pad_cells(cells).await.unwrap();
 
         // Find data cells and verify order
-        let data_cells: Vec<_> = result.iter()
+        let data_cells: Vec<_> = result
+            .iter()
             .filter(|c| c.command == CellCommand::Data)
             .collect();
 
@@ -517,10 +514,16 @@ mod tests {
         // Generate several cells and verify none are all-zero.
         for i in 0..10 {
             let cell = engine.generate_padding_cell(i);
-            assert_eq!(cell.payload.len(), 509, "padding cell payload length must be 509 bytes");
+            assert_eq!(
+                cell.payload.len(),
+                509,
+                "padding cell payload length must be 509 bytes"
+            );
             let all_zero = cell.payload.iter().all(|&b| b == 0);
-            assert!(!all_zero,
-                "padding cell payload must not be all-zeros (security requirement)");
+            assert!(
+                !all_zero,
+                "padding cell payload must not be all-zeros (security requirement)"
+            );
         }
     }
 
@@ -530,12 +533,18 @@ mod tests {
         let engine = PaddingEngine::new(config);
 
         let result = engine.pad_cells(vec![]).await.unwrap();
-        assert_eq!(result.len(), 1, "empty input must produce exactly one padding cell");
+        assert_eq!(
+            result.len(),
+            1,
+            "empty input must produce exactly one padding cell"
+        );
         assert_eq!(result[0].command, CellCommand::Padding);
         // The single cell's payload must not be all-zero
         let all_zero = result[0].payload.iter().all(|&b| b == 0);
-        assert!(!all_zero,
-            "the generated padding cell payload must not be all-zeros");
+        assert!(
+            !all_zero,
+            "the generated padding cell payload must not be all-zeros"
+        );
     }
 
     #[tokio::test]
@@ -549,7 +558,11 @@ mod tests {
         }
 
         let len = engine.iat_histogram.read().await.len();
-        assert!(len <= 100, "histogram must not exceed 100 entries, got {}", len);
+        assert!(
+            len <= 100,
+            "histogram must not exceed 100 entries, got {}",
+            len
+        );
     }
 
     #[tokio::test]
@@ -563,8 +576,10 @@ mod tests {
         }
 
         let machines = engine.state_machines.read().await;
-        assert!(machines.len() <= 10_000,
-            "circuit registration must not exceed 10,000 entries, got {}", machines.len());
+        assert!(
+            machines.len() <= 10_000,
+            "circuit registration must not exceed 10,000 entries, got {}",
+            machines.len()
+        );
     }
 }
-

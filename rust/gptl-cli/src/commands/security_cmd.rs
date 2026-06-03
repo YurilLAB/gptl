@@ -41,7 +41,7 @@ pub fn run(
     match cmd {
         SecurityCommand::Level { level, label_only } => cmd_level(&path, &level, label_only, yes),
         SecurityCommand::Status => cmd_status(&path),
-        SecurityCommand::Audit  => cmd_audit(&path),
+        SecurityCommand::Audit => cmd_audit(&path),
     }
 }
 
@@ -53,14 +53,16 @@ fn cmd_level(
     label_only: bool,
     yes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let target: SecurityLevel = level_str.parse().map_err(|e: crate::config::ConfigError| e)?;
+    let target: SecurityLevel = level_str
+        .parse()
+        .map_err(|e: crate::config::ConfigError| e)?;
     let mut cfg = GptlConfig::load(path)?;
 
     // Build what the new config would look like
     let mut proposed = cfg.clone();
     proposed.security_level = target;
     if !label_only {
-        proposed.core    = target.recommended_core();
+        proposed.core = target.recommended_core();
         proposed.routing = target.recommended_routing();
     }
 
@@ -112,10 +114,16 @@ fn cmd_level(
     }
 
     if !display::confirm(
-        &format!("Apply {} security level?", target.to_string().to_uppercase()),
+        &format!(
+            "Apply {} security level?",
+            target.to_string().to_uppercase()
+        ),
         yes,
     ) {
-        println!("  {}  Aborted — no changes made.", display::warn_str("Cancelled:"));
+        println!(
+            "  {}  Aborted — no changes made.",
+            display::warn_str("Cancelled:")
+        );
         return Ok(());
     }
 
@@ -134,7 +142,7 @@ fn cmd_level(
 fn cmd_status(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = GptlConfig::load(path)?;
     let disabled = cfg.disabled_count();
-    let enabled  = GptlConfig::TOTAL_PROTECTIONS - disabled;
+    let enabled = GptlConfig::TOTAL_PROTECTIONS - disabled;
 
     println!("\n{}", display::heading("GPTL Security Status"));
     println!(
@@ -189,7 +197,7 @@ fn cmd_audit(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let recommended = {
         let mut r = GptlConfig::default();
         r.security_level = cfg.security_level;
-        r.core    = cfg.security_level.recommended_core();
+        r.core = cfg.security_level.recommended_core();
         r.routing = cfg.security_level.recommended_routing();
         r
     };
@@ -205,11 +213,31 @@ fn cmd_audit(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
 
     // Protections that are OFF at all (regardless of level)
     let always_on = &[
-        ("routing.resource_protection", cfg.routing.resource_protection, "Sniper attack defense should always be on"),
-        ("routing.dns_protection",      cfg.routing.dns_protection,      "DNS leak prevention should always be on"),
-        ("routing.webrtc_protection",   cfg.routing.webrtc_protection,   "WebRTC leak prevention should always be on"),
-        ("core.traffic_shaping",        cfg.core.traffic_shaping,        "Traffic shaping should always be on"),
-        ("core.adaptive_padding",       cfg.core.adaptive_padding,       "Adaptive padding should always be on"),
+        (
+            "routing.resource_protection",
+            cfg.routing.resource_protection,
+            "Sniper attack defense should always be on",
+        ),
+        (
+            "routing.dns_protection",
+            cfg.routing.dns_protection,
+            "DNS leak prevention should always be on",
+        ),
+        (
+            "routing.webrtc_protection",
+            cfg.routing.webrtc_protection,
+            "WebRTC leak prevention should always be on",
+        ),
+        (
+            "core.traffic_shaping",
+            cfg.core.traffic_shaping,
+            "Traffic shaping should always be on",
+        ),
+        (
+            "core.adaptive_padding",
+            cfg.core.adaptive_padding,
+            "Adaptive padding should always be on",
+        ),
     ];
 
     for (key, enabled, reason) in always_on {

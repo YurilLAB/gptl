@@ -7,15 +7,15 @@
 //! - Security level filtering
 //! - Exclusion of recently failed relays
 
+use rand::seq::SliceRandom;
+use rand::Rng;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
-use rand::seq::SliceRandom;
-use rand::Rng;
-use tracing::{info, warn, trace};
+use tracing::{info, trace, warn};
 
-use crate::relay_registry::{RelayInfo, RelayRegistry, RelayCriteria, HealthStatus, SecurityLevel};
+use crate::relay_registry::{HealthStatus, RelayCriteria, RelayInfo, RelayRegistry, SecurityLevel};
 
 /// Selection strategy for choosing relays
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -183,7 +183,8 @@ impl<R: RelayRegistry> RelaySelector<R> {
 
     /// Select a single relay
     pub async fn select(&self) -> Result<SelectionResult, SelectorError> {
-        self.select_with_criteria(&self.default_criteria.clone()).await
+        self.select_with_criteria(&self.default_criteria.clone())
+            .await
     }
 
     /// Select with custom criteria
@@ -192,7 +193,10 @@ impl<R: RelayRegistry> RelaySelector<R> {
         criteria: &RelayCriteria,
     ) -> Result<SelectionResult, SelectorError> {
         // Get matching relays
-        let mut relays = self.registry.list_matching(criteria).await
+        let mut relays = self
+            .registry
+            .list_matching(criteria)
+            .await
             .map_err(|e| SelectorError::RegistryError(e.to_string()))?;
 
         if relays.is_empty() {
@@ -206,9 +210,12 @@ impl<R: RelayRegistry> RelaySelector<R> {
         if relays.is_empty() {
             warn!("All matching relays have recent failures");
             // Try to include failed relays as last resort
-            relays = self.registry.list_matching(criteria).await
+            relays = self
+                .registry
+                .list_matching(criteria)
+                .await
                 .map_err(|e| SelectorError::RegistryError(e.to_string()))?;
-            
+
             if relays.is_empty() {
                 return Err(SelectorError::NoRelaysAvailable);
             }
@@ -223,7 +230,10 @@ impl<R: RelayRegistry> RelaySelector<R> {
                 let mut history = self.selection_history.write().await;
                 history.clear();
             }
-            relays = self.registry.list_matching(criteria).await
+            relays = self
+                .registry
+                .list_matching(criteria)
+                .await
                 .map_err(|e| SelectorError::RegistryError(e.to_string()))?;
             relays = self.filter_recent_failures(relays).await;
         }
@@ -240,7 +250,7 @@ impl<R: RelayRegistry> RelaySelector<R> {
         // Update selection history
         if let Ok(ref selection) = result {
             self.update_history(selection.relay.id.clone()).await;
-            
+
             // Update circuit count
             let mut counts = self.circuit_counts.write().await;
             *counts.entry(selection.relay.id.clone()).or_insert(0) += 1;
@@ -291,12 +301,14 @@ impl<R: RelayRegistry> RelaySelector<R> {
     /// Report a relay failure
     pub async fn report_failure(&self, relay_id: &str, failure_type: FailureType) {
         let mut failures = self.recent_failures.write().await;
-        
-        let record = failures.entry(relay_id.to_string()).or_insert(FailureRecord {
-            timestamp: Instant::now(),
-            failure_type: FailureType::ConnectionFailed,
-            retry_count: 0,
-        });
+
+        let record = failures
+            .entry(relay_id.to_string())
+            .or_insert(FailureRecord {
+                timestamp: Instant::now(),
+                failure_type: FailureType::ConnectionFailed,
+                retry_count: 0,
+            });
 
         record.timestamp = Instant::now();
         record.failure_type = failure_type;
@@ -304,7 +316,11 @@ impl<R: RelayRegistry> RelaySelector<R> {
 
         // Update health status in registry if too many failures
         if record.retry_count >= self.max_retries {
-            if let Err(e) = self.registry.update_health(relay_id, HealthStatus::Degraded).await {
+            if let Err(e) = self
+                .registry
+                .update_health(relay_id, HealthStatus::Degraded)
+                .await
+            {
                 warn!("Failed to update health status for {}: {}", relay_id, e);
             }
         }
@@ -318,11 +334,15 @@ impl<R: RelayRegistry> RelaySelector<R> {
     /// Report a successful connection
     pub async fn report_success(&self, relay_id: &str) {
         let mut failures = self.recent_failures.write().await;
-        
+
         if let Some(record) = failures.get_mut(relay_id) {
             // Check before resetting — restore health if relay was previously degraded
             if record.retry_count >= self.max_retries {
-                if let Err(e) = self.registry.update_health(relay_id, HealthStatus::Healthy).await {
+                if let Err(e) = self
+                    .registry
+                    .update_health(relay_id, HealthStatus::Healthy)
+                    .await
+                {
                     warn!("Failed to update health status for {}: {}", relay_id, e);
                 }
             }
@@ -339,7 +359,7 @@ impl<R: RelayRegistry> RelaySelector<R> {
     pub async fn get_statistics(&self) -> SelectorStatistics {
         let failures = self.recent_failures.read().await;
         let circuits = self.circuit_counts.read().await;
-        
+
         SelectorStatistics {
             recent_failures: failures.len(),
             total_circuits: circuits.values().sum(),
@@ -415,7 +435,7 @@ impl<R: RelayRegistry> RelaySelector<R> {
     async fn update_history(&self, relay_id: String) {
         let mut history = self.selection_history.write().await;
         history.push_back(relay_id);
-        
+
         while history.len() > self.history_limit {
             history.pop_front();
         }
@@ -423,13 +443,13 @@ impl<R: RelayRegistry> RelaySelector<R> {
 
     /// Random selection
     async fn select_random(&self, relays: &[RelayInfo]) -> Result<SelectionResult, SelectorError> {
-        use rand::SeedableRng;
         use rand::rngs::StdRng;
-        
+        use rand::SeedableRng;
+
         // Create a new RNG with a random seed for Send safety
         let seed = rand::random::<u64>();
         let mut rng = StdRng::seed_from_u64(seed);
-        
+
         relays
             .choose(&mut rng)
             .cloned()
@@ -447,19 +467,19 @@ impl<R: RelayRegistry> RelaySelector<R> {
         &self,
         relays: &[RelayInfo],
     ) -> Result<SelectionResult, SelectorError> {
-        use rand::SeedableRng;
         use rand::rngs::StdRng;
-        
+        use rand::SeedableRng;
+
         let seed = rand::random::<u64>();
         let mut rng = StdRng::seed_from_u64(seed);
-        
+
         let total_bandwidth: u64 = relays.iter().map(|r| r.bandwidth).sum();
         if total_bandwidth == 0 {
             return self.select_random(relays).await;
         }
 
         let mut choice = rng.gen_range(0..total_bandwidth);
-        
+
         for relay in relays {
             if choice < relay.bandwidth {
                 let score = relay.bandwidth as f64 / total_bandwidth as f64;
@@ -474,12 +494,16 @@ impl<R: RelayRegistry> RelaySelector<R> {
         }
 
         // Fallback to last relay
-        relays.last().cloned().map(|relay| SelectionResult {
-            relay,
-            strategy: SelectionStrategy::BandwidthWeighted,
-            score: Some(0.0),
-            estimated_latency: None,
-        }).ok_or(SelectorError::NoRelaysAvailable)
+        relays
+            .last()
+            .cloned()
+            .map(|relay| SelectionResult {
+                relay,
+                strategy: SelectionStrategy::BandwidthWeighted,
+                score: Some(0.0),
+                estimated_latency: None,
+            })
+            .ok_or(SelectorError::NoRelaysAvailable)
     }
 
     /// Select using bandwidth-as-latency heuristic (lower bandwidth = higher estimated latency)
@@ -489,19 +513,26 @@ impl<R: RelayRegistry> RelaySelector<R> {
     ) -> Result<SelectionResult, SelectorError> {
         // Bandwidth-as-latency proxy: higher bandwidth implies lower latency.
         // Synthetic estimate: latency_ms = 50 + (1_000_000 / (bandwidth + 1))
-        let scored: Vec<_> = relays.iter().map(|r| {
-            let latency_ms = 50 + (1_000_000.0 / (r.bandwidth as f64 + 1.0)) as u64;
-            // Selection probability is inverse of estimated latency (prefer low-latency)
-            let score = 1.0 / latency_ms as f64;
-            RelayScore {
-                relay: r.clone(),
-                score,
-                bandwidth_weight: r.bandwidth as f64,
-                latency_weight: score,
-                health_weight: if r.health_status == HealthStatus::Healthy { 1.0 } else { 0.5 },
-                geographic_weight: 1.0,
-            }
-        }).collect();
+        let scored: Vec<_> = relays
+            .iter()
+            .map(|r| {
+                let latency_ms = 50 + (1_000_000.0 / (r.bandwidth as f64 + 1.0)) as u64;
+                // Selection probability is inverse of estimated latency (prefer low-latency)
+                let score = 1.0 / latency_ms as f64;
+                RelayScore {
+                    relay: r.clone(),
+                    score,
+                    bandwidth_weight: r.bandwidth as f64,
+                    latency_weight: score,
+                    health_weight: if r.health_status == HealthStatus::Healthy {
+                        1.0
+                    } else {
+                        0.5
+                    },
+                    geographic_weight: 1.0,
+                }
+            })
+            .collect();
 
         let total_score: f64 = scored.iter().map(|s| s.score).sum();
         // Use a block to drop rng before any await points
@@ -537,9 +568,9 @@ impl<R: RelayRegistry> RelaySelector<R> {
         &self,
         relays: &[RelayInfo],
     ) -> Result<SelectionResult, SelectorError> {
-        use rand::SeedableRng;
         use rand::rngs::StdRng;
-        
+        use rand::SeedableRng;
+
         // If we don't have client location, fall back to random
         let client_loc = match &self.client_location {
             Some(loc) => loc,
@@ -547,20 +578,23 @@ impl<R: RelayRegistry> RelaySelector<R> {
         };
 
         // Score by geographic proximity
-        let scored: Vec<_> = relays.iter().map(|r| {
-            let distance = calculate_distance(client_loc, &r.location);
-            // Convert distance to score (closer = higher score)
-            let score = 1.0 / (1.0 + distance / 1000.0);
-            
-            RelayScore {
-                relay: r.clone(),
-                score,
-                bandwidth_weight: r.bandwidth as f64,
-                latency_weight: 1.0,
-                health_weight: 1.0,
-                geographic_weight: score,
-            }
-        }).collect();
+        let scored: Vec<_> = relays
+            .iter()
+            .map(|r| {
+                let distance = calculate_distance(client_loc, &r.location);
+                // Convert distance to score (closer = higher score)
+                let score = 1.0 / (1.0 + distance / 1000.0);
+
+                RelayScore {
+                    relay: r.clone(),
+                    score,
+                    bandwidth_weight: r.bandwidth as f64,
+                    latency_weight: 1.0,
+                    health_weight: 1.0,
+                    geographic_weight: score,
+                }
+            })
+            .collect();
 
         let seed = rand::random::<u64>();
         let mut rng = StdRng::seed_from_u64(seed);
@@ -574,7 +608,7 @@ impl<R: RelayRegistry> RelaySelector<R> {
                     strategy: SelectionStrategy::Geographic,
                     score: Some(score.score / total_score),
                     estimated_latency: Some(Duration::from_millis(
-                        (score.geographic_weight * 100.0) as u64
+                        (score.geographic_weight * 100.0) as u64,
                     )),
                 });
             }
@@ -586,54 +620,57 @@ impl<R: RelayRegistry> RelaySelector<R> {
 
     /// Hybrid selection combining multiple factors
     async fn select_hybrid(&self, relays: &[RelayInfo]) -> Result<SelectionResult, SelectorError> {
-        use rand::SeedableRng;
         use rand::rngs::StdRng;
-        
+        use rand::SeedableRng;
+
         let seed = rand::random::<u64>();
         let mut rng = StdRng::seed_from_u64(seed);
-        
+
         // Calculate normalized scores
         let max_bandwidth = relays.iter().map(|r| r.bandwidth).max().unwrap_or(1) as f64;
-        
-        let scored: Vec<_> = relays.iter().map(|r| {
-            // Bandwidth score (0-1)
-            let bw_score = r.bandwidth as f64 / max_bandwidth;
-            
-            // Health score (0-1)
-            let health_score = match r.health_status {
-                HealthStatus::Healthy => 1.0,
-                HealthStatus::Degraded => 0.7,
-                _ => 0.0,
-            };
-            
-            // Age score (prefer relays seen recently)
-            let age_score = if let Ok(age) = SystemTime::now().duration_since(r.last_seen) {
-                let hours = age.as_secs() as f64 / 3600.0;
-                1.0 / (1.0 + hours / 24.0) // Decay over days
-            } else {
-                0.0
-            };
-            
-            // Geographic score if location available
-            let geo_score = if let Some(ref client_loc) = self.client_location {
-                let distance = calculate_distance(client_loc, &r.location);
-                1.0 / (1.0 + distance / 1000.0)
-            } else {
-                0.5 // Neutral if no location
-            };
-            
-            // Combined score with weights
-            let score = bw_score * 0.4 + health_score * 0.3 + age_score * 0.2 + geo_score * 0.1;
-            
-            RelayScore {
-                relay: r.clone(),
-                score,
-                bandwidth_weight: bw_score,
-                latency_weight: age_score,
-                health_weight: health_score,
-                geographic_weight: geo_score,
-            }
-        }).collect();
+
+        let scored: Vec<_> = relays
+            .iter()
+            .map(|r| {
+                // Bandwidth score (0-1)
+                let bw_score = r.bandwidth as f64 / max_bandwidth;
+
+                // Health score (0-1)
+                let health_score = match r.health_status {
+                    HealthStatus::Healthy => 1.0,
+                    HealthStatus::Degraded => 0.7,
+                    _ => 0.0,
+                };
+
+                // Age score (prefer relays seen recently)
+                let age_score = if let Ok(age) = SystemTime::now().duration_since(r.last_seen) {
+                    let hours = age.as_secs() as f64 / 3600.0;
+                    1.0 / (1.0 + hours / 24.0) // Decay over days
+                } else {
+                    0.0
+                };
+
+                // Geographic score if location available
+                let geo_score = if let Some(ref client_loc) = self.client_location {
+                    let distance = calculate_distance(client_loc, &r.location);
+                    1.0 / (1.0 + distance / 1000.0)
+                } else {
+                    0.5 // Neutral if no location
+                };
+
+                // Combined score with weights
+                let score = bw_score * 0.4 + health_score * 0.3 + age_score * 0.2 + geo_score * 0.1;
+
+                RelayScore {
+                    relay: r.clone(),
+                    score,
+                    bandwidth_weight: bw_score,
+                    latency_weight: age_score,
+                    health_weight: health_score,
+                    geographic_weight: geo_score,
+                }
+            })
+            .collect();
 
         // Weighted random selection
         let total_score: f64 = scored.iter().map(|s| s.score).sum();
@@ -650,7 +687,7 @@ impl<R: RelayRegistry> RelaySelector<R> {
                     strategy: SelectionStrategy::Hybrid,
                     score: Some(score.score / total_score),
                     estimated_latency: Some(Duration::from_millis(
-                        (1000.0 * (1.0 - score.health_weight)) as u64
+                        (1000.0 * (1.0 - score.health_weight)) as u64,
                     )),
                 });
             }
@@ -671,7 +708,7 @@ fn calculate_distance(
         (Some(lat), Some(lon)) => (lat as f64 / 1_000_000.0, lon as f64 / 1_000_000.0),
         _ => return f64::MAX,
     };
-    
+
     let (lat2, lon2) = match (loc2.latitude, loc2.longitude) {
         (Some(lat), Some(lon)) => (lat as f64 / 1_000_000.0, lon as f64 / 1_000_000.0),
         _ => return f64::MAX,
@@ -684,7 +721,7 @@ fn calculate_distance(
     let a = (d_lat / 2.0).sin().powi(2)
         + lat1.to_radians().cos() * lat2.to_radians().cos() * (d_lon / 2.0).sin().powi(2);
     let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
-    
+
     r * c
 }
 
@@ -735,9 +772,9 @@ impl<R: RelayRegistry + 'static> RelayPool<R> {
     pub async fn initialize(&self) -> Result<(), SelectorError> {
         self.refresh().await
     }
-    
+
     /// Start background refresh task - caller must ensure R: 'static
-    pub fn start_background_refresh(self: Arc<Self>) 
+    pub fn start_background_refresh(self: Arc<Self>)
     where
         R: 'static,
     {
@@ -745,12 +782,12 @@ impl<R: RelayRegistry + 'static> RelayPool<R> {
         let selector = self.selector.clone();
         let interval = self.refresh_interval;
         let pool_size = self.pool_size;
-        
+
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                
+
                 match selector.select_multiple(pool_size, true).await {
                     Ok(selections) => {
                         let ids: Vec<_> = selections.into_iter().map(|s| s.relay.id).collect();
@@ -769,10 +806,10 @@ impl<R: RelayRegistry + 'static> RelayPool<R> {
     async fn refresh(&self) -> Result<(), SelectorError> {
         let selections = self.selector.select_multiple(self.pool_size, true).await?;
         let ids: Vec<_> = selections.into_iter().map(|s| s.relay.id).collect();
-        
+
         let mut preferred = self.preferred_relays.write().await;
         *preferred = ids;
-        
+
         info!("Relay pool refreshed with {} relays", self.pool_size);
         Ok(())
     }
@@ -825,7 +862,7 @@ mod tests {
 
     async fn create_test_registry() -> Arc<InMemoryRegistry> {
         let registry = Arc::new(InMemoryRegistry::new());
-        
+
         // Add some test relays
         for i in 0..5 {
             let relay = RelayInfo::new(
@@ -835,7 +872,7 @@ mod tests {
             );
             registry.register(relay).await.unwrap();
         }
-        
+
         registry
     }
 
@@ -843,10 +880,10 @@ mod tests {
     async fn test_random_selection() {
         let registry = create_test_registry().await;
         let selector = RelaySelector::new(registry);
-        
+
         let result = selector.select().await;
         assert!(result.is_ok());
-        
+
         let selection = result.unwrap();
         assert_eq!(selection.strategy, SelectionStrategy::Hybrid);
     }
@@ -859,7 +896,7 @@ mod tests {
             ..Default::default()
         };
         let selector = RelaySelector::with_config(registry, config);
-        
+
         // Run multiple selections to verify bias toward higher bandwidth
         let mut high_bandwidth_count = 0;
         for _ in 0..100 {
@@ -868,7 +905,7 @@ mod tests {
                 high_bandwidth_count += 1;
             }
         }
-        
+
         // Higher bandwidth relays should be selected more often
         assert!(high_bandwidth_count > 20);
     }
@@ -919,24 +956,26 @@ mod tests {
     async fn test_failure_tracking() {
         let registry = create_test_registry().await;
         let selector = RelaySelector::new(registry.clone());
-        
+
         // Select a relay
         let result = selector.select().await.unwrap();
         let relay_id = result.relay.id;
-        
+
         // Report failures
         for _ in 0..5 {
-            selector.report_failure(&relay_id, FailureType::ConnectionFailed).await;
+            selector
+                .report_failure(&relay_id, FailureType::ConnectionFailed)
+                .await;
         }
-        
+
         // Check that relay is now avoided
         let stats = selector.get_statistics().await;
         assert_eq!(stats.recent_failures, 1);
-        
+
         // Clear failures and report success
         selector.clear_failures().await;
         selector.report_success(&relay_id).await;
-        
+
         let stats = selector.get_statistics().await;
         assert_eq!(stats.recent_failures, 0);
     }
@@ -945,10 +984,10 @@ mod tests {
     async fn test_multiple_selection() {
         let registry = create_test_registry().await;
         let selector = RelaySelector::new(registry);
-        
+
         let results = selector.select_multiple(3, true).await.unwrap();
         assert_eq!(results.len(), 3);
-        
+
         // Ensure all relays are unique
         let ids: std::collections::HashSet<_> = results.iter().map(|r| &r.relay.id).collect();
         assert_eq!(ids.len(), 3);

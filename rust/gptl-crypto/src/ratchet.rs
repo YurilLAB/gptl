@@ -161,10 +161,18 @@ impl KeyRatchet {
     /// Derive next sending key and advance the send chain.
     pub fn next_send_key(&mut self) -> Result<[u8; 32], CellEncryptionError> {
         // Message key: HKDF(IKM=chain_key, salt=chain_key, info="msg-key")
-        let key = Self::hkdf_derive(&self.send_chain_key[..], &self.send_chain_key[..], b"gptl-msg-key");
+        let key = Self::hkdf_derive(
+            &self.send_chain_key[..],
+            &self.send_chain_key[..],
+            b"gptl-msg-key",
+        );
 
         // Advance chain key: HKDF(IKM=chain_key, salt=chain_key, info="chain-key")
-        *self.send_chain_key = Self::hkdf_derive(&self.send_chain_key[..], &self.send_chain_key[..], b"gptl-chain-key");
+        *self.send_chain_key = Self::hkdf_derive(
+            &self.send_chain_key[..],
+            &self.send_chain_key[..],
+            b"gptl-chain-key",
+        );
         self.send_count += 1;
 
         Ok(key)
@@ -172,9 +180,17 @@ impl KeyRatchet {
 
     /// Derive next receiving key and advance the receive chain.
     pub fn next_recv_key(&mut self) -> Result<[u8; 32], CellEncryptionError> {
-        let key = Self::hkdf_derive(&self.recv_chain_key[..], &self.recv_chain_key[..], b"gptl-msg-key");
+        let key = Self::hkdf_derive(
+            &self.recv_chain_key[..],
+            &self.recv_chain_key[..],
+            b"gptl-msg-key",
+        );
 
-        *self.recv_chain_key = Self::hkdf_derive(&self.recv_chain_key[..], &self.recv_chain_key[..], b"gptl-chain-key");
+        *self.recv_chain_key = Self::hkdf_derive(
+            &self.recv_chain_key[..],
+            &self.recv_chain_key[..],
+            b"gptl-chain-key",
+        );
         self.recv_count += 1;
 
         Ok(key)
@@ -195,7 +211,8 @@ impl KeyRatchet {
         // KDF_RK: HKDF(salt=root_key, IKM=dh_output)
         // Produces new root key and new sending chain key (per Double Ratchet spec).
         let new_root_key = Self::hkdf_derive(&dh_output.0, &self.root_key[..], b"ratchet-root-key");
-        let new_chain_key = Self::hkdf_derive(&dh_output.0, &self.root_key[..], b"ratchet-chain-key");
+        let new_chain_key =
+            Self::hkdf_derive(&dh_output.0, &self.root_key[..], b"ratchet-chain-key");
 
         *self.root_key = new_root_key;
         *self.send_chain_key = new_chain_key;
@@ -336,8 +353,10 @@ mod tests {
 
         // After the ratchet the next send key must differ from the pre-ratchet key
         let new_send_key = ratchet.next_send_key().unwrap();
-        assert_ne!(old_send_key, new_send_key,
-            "send key after ratchet must differ from pre-ratchet send key");
+        assert_ne!(
+            old_send_key, new_send_key,
+            "send key after ratchet must differ from pre-ratchet send key"
+        );
     }
 
     #[test]
@@ -354,11 +373,17 @@ mod tests {
 
         // All keys should be unique (no repeats before rotation)
         let unique: std::collections::HashSet<_> = keys.iter().collect();
-        assert_eq!(unique.len(), limit, "every pre-rotation message key must be unique");
+        assert_eq!(
+            unique.len(),
+            limit,
+            "every pre-rotation message key must be unique"
+        );
 
         let stats = ratchet.stats();
-        assert_eq!(stats.send_count, limit as u64,
-            "send_count must equal the number of send keys consumed");
+        assert_eq!(
+            stats.send_count, limit as u64,
+            "send_count must equal the number of send keys consumed"
+        );
     }
 
     #[test]
@@ -376,10 +401,16 @@ mod tests {
         let dh = SharedSecret(Zeroizing::new(vec![0x77u8; 32]));
         ratchet.ratchet_dh(&dh).unwrap();
 
-        assert_eq!(ratchet.stats().send_count, 0,
-            "send_count must reset to 0 after a DH ratchet step");
-        assert_eq!(ratchet.stats().recv_count, 0,
-            "recv_count must reset to 0 after a DH ratchet step");
+        assert_eq!(
+            ratchet.stats().send_count,
+            0,
+            "send_count must reset to 0 after a DH ratchet step"
+        );
+        assert_eq!(
+            ratchet.stats().recv_count,
+            0,
+            "recv_count must reset to 0 after a DH ratchet step"
+        );
     }
 
     #[test]
@@ -395,49 +426,65 @@ mod tests {
         // Both parties' send chains start from the same chain key → same keys
         let alice_s1 = alice.next_send_key().unwrap();
         let bob_s1 = bob.next_send_key().unwrap();
-        assert_eq!(alice_s1, bob_s1,
-            "Alice and Bob send key[0] must be equal when starting from same secret");
+        assert_eq!(
+            alice_s1, bob_s1,
+            "Alice and Bob send key[0] must be equal when starting from same secret"
+        );
 
         let alice_s2 = alice.next_send_key().unwrap();
         let bob_s2 = bob.next_send_key().unwrap();
-        assert_eq!(alice_s2, bob_s2,
-            "Alice and Bob send key[1] must be equal when starting from same secret");
+        assert_eq!(
+            alice_s2, bob_s2,
+            "Alice and Bob send key[1] must be equal when starting from same secret"
+        );
 
         // Similarly, recv chains are also symmetric
         let mut alice2 = KeyRatchet::new(&secret).unwrap();
         let mut bob2 = KeyRatchet::new(&secret).unwrap();
         let alice_r1 = alice2.next_recv_key().unwrap();
         let bob_r1 = bob2.next_recv_key().unwrap();
-        assert_eq!(alice_r1, bob_r1,
-            "Alice and Bob recv key[0] must be equal when starting from same secret");
+        assert_eq!(
+            alice_r1, bob_r1,
+            "Alice and Bob recv key[0] must be equal when starting from same secret"
+        );
     }
 
     #[test]
     fn test_ratchet_short_shared_secret_rejected() {
         let short = SharedSecret(Zeroizing::new(vec![0u8; 16]));
         let result = KeyRatchet::new(&short);
-        assert!(result.is_err(), "shared secret shorter than 32 bytes must be rejected");
+        assert!(
+            result.is_err(),
+            "shared secret shorter than 32 bytes must be rejected"
+        );
     }
 
     #[test]
     fn test_forward_secrecy_mark_rotated_resets_all_counters() {
-        let mut fs = ForwardSecrecy::with_limits(
-            Duration::from_secs(3600),
-            5,
-            1000,
-        );
+        let mut fs = ForwardSecrecy::with_limits(Duration::from_secs(3600), 5, 1000);
 
         for _ in 0..5 {
             fs.record_message(100);
         }
-        assert!(fs.needs_rotation(), "should need rotation after max_messages reached");
+        assert!(
+            fs.needs_rotation(),
+            "should need rotation after max_messages reached"
+        );
 
         fs.mark_rotated();
-        assert!(!fs.needs_rotation(),
-            "should not need rotation immediately after mark_rotated");
+        assert!(
+            !fs.needs_rotation(),
+            "should not need rotation immediately after mark_rotated"
+        );
 
         let stats = fs.stats();
-        assert_eq!(stats.message_count, 0, "message_count must reset after rotation");
-        assert_eq!(stats.data_volume, 0, "data_volume must reset after rotation");
+        assert_eq!(
+            stats.message_count, 0,
+            "message_count must reset after rotation"
+        );
+        assert_eq!(
+            stats.data_volume, 0,
+            "data_volume must reset after rotation"
+        );
     }
 }

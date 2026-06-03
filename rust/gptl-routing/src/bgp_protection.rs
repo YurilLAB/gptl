@@ -94,24 +94,26 @@ impl BgpGuard {
             roa_cache: HashMap::new(),
             last_update: Instant::now(),
         }));
-        
+
         let bgp_monitor = Arc::new(RwLock::new(BgpMonitor {
             update_history: Vec::new(),
             heuristics: vec![
                 DetectionHeuristic::Frequency { threshold: 0.00001 },
-                DetectionHeuristic::Time { threshold: Duration::from_secs(360) },
+                DetectionHeuristic::Time {
+                    threshold: Duration::from_secs(360),
+                },
                 DetectionHeuristic::OriginValidation,
                 DetectionHeuristic::PathLength { max_length: 10 },
             ],
         }));
-        
+
         let as_analyzer = Arc::new(RwLock::new(AsPathAnalyzer {
             path_history: HashMap::new(),
             as_relationships: HashMap::new(),
         }));
-        
+
         let malicious_ases = Arc::new(RwLock::new(HashSet::new()));
-        
+
         Self {
             config,
             rpki_validator,
@@ -132,14 +134,14 @@ impl BgpGuard {
                 // Check for BGP anomalies
             }
         });
-        
+
         Ok(())
     }
 
     /// Check route for BGP threats
     pub async fn check_route(&self, destination: &IpAddr) -> Result<Option<String>, RoutingError> {
         let config = self.config.read().await;
-        
+
         if !config.bgp_protection {
             return Ok(None);
         }
@@ -192,8 +194,16 @@ impl BgpGuard {
 
         // Compare only intermediate hops (exclude first/last which are always shared
         // as the source and destination ASes).
-        let middle1 = if path1.len() > 2 { &path1[1..path1.len() - 1] } else { &path1[..0] };
-        let middle2 = if path2.len() > 2 { &path2[1..path2.len() - 1] } else { &path2[..0] };
+        let middle1 = if path1.len() > 2 {
+            &path1[1..path1.len() - 1]
+        } else {
+            &path1[..0]
+        };
+        let middle2 = if path2.len() > 2 {
+            &path2[1..path2.len() - 1]
+        } else {
+            &path2[..0]
+        };
 
         let set1: HashSet<_> = middle1.iter().collect();
         let set2: HashSet<_> = middle2.iter().collect();
@@ -215,7 +225,7 @@ impl BgpGuard {
     pub async fn report_anomaly(&self, update: BgpUpdate, alert_type: BgpAlertType) {
         let mut monitor = self.bgp_monitor.write().await;
         monitor.update_history.push(update.clone());
-        
+
         // Take action based on alert type
         match alert_type {
             BgpAlertType::Hijack => {
@@ -299,7 +309,12 @@ impl RpkiValidator {
     }
 
     /// Validate route origin (ROV - Route Origin Validation)
-    pub fn validate_route_origin(&self, prefix: &str, origin_as: u32, prefix_len: u8) -> RpkiValidationState {
+    pub fn validate_route_origin(
+        &self,
+        prefix: &str,
+        origin_as: u32,
+        prefix_len: u8,
+    ) -> RpkiValidationState {
         if let Some(roa) = self.roa_cache.get(prefix) {
             if roa.valid_until < Instant::now() {
                 return RpkiValidationState::NotFound;
@@ -330,9 +345,7 @@ impl BgpMonitor {
             DetectionHeuristic::Time { threshold } => {
                 self.check_time_anomaly(destination, *threshold).await
             }
-            DetectionHeuristic::OriginValidation => {
-                self.check_origin_validation(destination).await
-            }
+            DetectionHeuristic::OriginValidation => self.check_origin_validation(destination).await,
             DetectionHeuristic::PathLength { max_length } => {
                 self.check_path_length(destination, *max_length).await
             }
@@ -347,20 +360,23 @@ impl BgpMonitor {
     ) -> Option<String> {
         // Count announcements per prefix/AS
         let mut frequency_map: HashMap<u32, usize> = HashMap::new();
-        
+
         for update in &self.update_history {
             *frequency_map.entry(update.origin_as).or_insert(0) += 1;
         }
-        
+
         let total = self.update_history.len() as f64;
-        
+
         for (asn, count) in frequency_map {
             let freq = count as f64 / total;
             if freq < threshold {
-                return Some(format!("Low frequency AS detected: {} (freq: {})", asn, freq));
+                return Some(format!(
+                    "Low frequency AS detected: {} (freq: {})",
+                    asn, freq
+                ));
             }
         }
-        
+
         None
     }
 
@@ -374,13 +390,14 @@ impl BgpMonitor {
 
         // Group updates by prefix
         let mut prefix_durations: HashMap<String, (Instant, Instant)> = HashMap::new();
-        
+
         for update in &self.update_history {
-            let entry = prefix_durations.entry(update.prefix.clone())
+            let entry = prefix_durations
+                .entry(update.prefix.clone())
                 .or_insert((update.timestamp, update.timestamp));
             entry.1 = update.timestamp;
         }
-        
+
         for (prefix, (start, end)) in prefix_durations {
             let duration = end.duration_since(start);
             if duration < threshold {
@@ -390,7 +407,7 @@ impl BgpMonitor {
                 ));
             }
         }
-        
+
         None
     }
 
@@ -401,11 +418,7 @@ impl BgpMonitor {
     }
 
     /// Check path length anomaly
-    async fn check_path_length(
-        &self,
-        _destination: &IpAddr,
-        max_length: usize,
-    ) -> Option<String> {
+    async fn check_path_length(&self, _destination: &IpAddr, max_length: usize) -> Option<String> {
         for update in &self.update_history {
             if update.as_path.len() > max_length {
                 return Some(format!(
@@ -415,7 +428,7 @@ impl BgpMonitor {
                 ));
             }
         }
-        
+
         None
     }
 }
@@ -458,7 +471,8 @@ impl CounterRaptor {
 
     /// Select guard with AS awareness
     pub fn select_as_aware_guard(&self, candidates: &[GuardCandidate]) -> Option<GuardCandidate> {
-        candidates.iter()
+        candidates
+            .iter()
             .filter(|g| !self.avoid_ases.contains(&g.asn))
             .filter(|g| g.asn != self.client_as)
             .max_by_key(|g| g.bandwidth)
@@ -518,7 +532,7 @@ impl ArtemisDetector {
                 });
             }
         }
-        
+
         None
     }
 }
@@ -543,7 +557,10 @@ mod tests {
         // ROA cache is empty until fetch_roas runs, breaking all routing whenever
         // bgp_protection was enabled (the default).
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        assert!(config.try_read().unwrap().bgp_protection, "default has BGP on");
+        assert!(
+            config.try_read().unwrap().bgp_protection,
+            "default has BGP on"
+        );
         let guard = BgpGuard::new(config);
 
         let dest: IpAddr = "93.184.216.34".parse().unwrap(); // example.com
@@ -667,17 +684,13 @@ mod tests {
     #[tokio::test]
     async fn test_bgp_monitor_heuristics() {
         let monitor = BgpMonitor {
-            update_history: vec![
-                BgpUpdate {
-                    timestamp: Instant::now(),
-                    prefix: "1.0.0.0/24".to_string(),
-                    origin_as: 13335,
-                    as_path: vec![13335, 174],
-                },
-            ],
-            heuristics: vec![
-                DetectionHeuristic::PathLength { max_length: 10 },
-            ],
+            update_history: vec![BgpUpdate {
+                timestamp: Instant::now(),
+                prefix: "1.0.0.0/24".to_string(),
+                origin_as: 13335,
+                as_path: vec![13335, 174],
+            }],
+            heuristics: vec![DetectionHeuristic::PathLength { max_length: 10 }],
         };
 
         // Test path length check
@@ -717,8 +730,10 @@ mod tests {
         // Identical intermediate hops → overlap > 1 → must fail diversity check
         let path = vec![1, 2, 3, 4];
         let result = guard.validate_path_diversity(&path, &path).await.unwrap();
-        assert!(!result,
-            "identical paths must fail path diversity (all intermediate hops overlap)");
+        assert!(
+            !result,
+            "identical paths must fail path diversity (all intermediate hops overlap)"
+        );
     }
 
     #[tokio::test]
@@ -729,16 +744,23 @@ mod tests {
         // Paths with 0 or 1 elements have no intermediate hops — diverse by definition
         let short1: Vec<u32> = vec![1];
         let short2: Vec<u32> = vec![2];
-        let result = guard.validate_path_diversity(&short1, &short2).await.unwrap();
-        assert!(result,
-            "single-hop paths have no intermediate hops and must pass diversity check");
+        let result = guard
+            .validate_path_diversity(&short1, &short2)
+            .await
+            .unwrap();
+        assert!(
+            result,
+            "single-hop paths have no intermediate hops and must pass diversity check"
+        );
 
         // Two-element paths: only source and destination, also no intermediate hops
         let two1 = vec![1, 4];
         let two2 = vec![1, 5];
         let result2 = guard.validate_path_diversity(&two1, &two2).await.unwrap();
-        assert!(result2,
-            "two-hop paths have no intermediate hops and must pass diversity check");
+        assert!(
+            result2,
+            "two-hop paths have no intermediate hops and must pass diversity check"
+        );
     }
 
     #[test]
@@ -768,8 +790,11 @@ mod tests {
 
         let state = validator.validate_route_origin("9.9.9.0/24", 19281, 24);
         // Expired ROA → treated as NotFound
-        assert_eq!(state, RpkiValidationState::NotFound,
-            "expired ROA must return NotFound, not Valid");
+        assert_eq!(
+            state,
+            RpkiValidationState::NotFound,
+            "expired ROA must return NotFound, not Valid"
+        );
     }
 
     #[test]
@@ -792,8 +817,11 @@ mod tests {
 
         // ASN 0 is not 64512 — must be Invalid
         let state = validator.validate_route_origin("10.0.0.0/8", 0, 8);
-        assert_eq!(state, RpkiValidationState::Invalid,
-            "ASN 0 must not satisfy a ROA with a different origin AS");
+        assert_eq!(
+            state,
+            RpkiValidationState::Invalid,
+            "ASN 0 must not satisfy a ROA with a different origin AS"
+        );
     }
 
     #[test]
@@ -815,8 +843,11 @@ mod tests {
         );
 
         let state = validator.validate_route_origin("203.0.113.0/24", u32::MAX, 24);
-        assert_eq!(state, RpkiValidationState::Invalid,
-            "u32::MAX ASN must not satisfy a different origin ROA");
+        assert_eq!(
+            state,
+            RpkiValidationState::Invalid,
+            "u32::MAX ASN must not satisfy a different origin ROA"
+        );
     }
 
     #[tokio::test]
@@ -828,7 +859,9 @@ mod tests {
         let path1 = vec![100, 200, 300, 400, 999];
         let path2 = vec![100, 200, 300, 400, 888];
         let result = guard.validate_path_diversity(&path1, &path2).await.unwrap();
-        assert!(!result,
-            "paths sharing 3 intermediate hops must fail diversity check");
+        assert!(
+            !result,
+            "paths sharing 3 intermediate hops must fail diversity check"
+        );
     }
 }

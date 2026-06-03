@@ -26,12 +26,12 @@ fn builtin_config(name: &str) -> Option<GptlConfig> {
     let level = match name {
         "standard" => SecurityLevel::Standard,
         "enhanced" => SecurityLevel::Enhanced,
-        "maximum"  => SecurityLevel::Maximum,
+        "maximum" => SecurityLevel::Maximum,
         _ => return None,
     };
     let mut cfg = GptlConfig::default();
     cfg.security_level = level;
-    cfg.core    = level.recommended_core();
+    cfg.core = level.recommended_core();
     cfg.routing = level.recommended_routing();
     Some(cfg)
 }
@@ -40,8 +40,7 @@ fn builtin_config(name: &str) -> Option<GptlConfig> {
 ///
 /// Order: built-ins first, then user-saved profiles in alphabetical order.
 pub fn list(config_path: &Path) -> Result<Vec<(String, bool)>, ConfigError> {
-    let mut profiles: Vec<(String, bool)> =
-        BUILTIN.iter().map(|n| (n.to_string(), true)).collect();
+    let mut profiles: Vec<(String, bool)> = BUILTIN.iter().map(|n| (n.to_string(), true)).collect();
 
     let dir = profiles_dir(config_path);
     if dir.exists() {
@@ -130,7 +129,10 @@ fn validate_name(name: &str) -> Result<(), ConfigError> {
             message: "profile name cannot be empty".to_string(),
         });
     }
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(ConfigError::InvalidValue {
             key: "profile name".to_string(),
             message: format!(

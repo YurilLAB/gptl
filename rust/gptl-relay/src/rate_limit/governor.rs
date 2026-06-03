@@ -74,7 +74,9 @@ impl GovernorRateLimiter {
             } else {
                 (deficit / self.quota.replenish_per_second as f64).ceil() as u64
             };
-            Err(RateLimitError { retry_after: seconds.max(1) })
+            Err(RateLimitError {
+                retry_after: seconds.max(1),
+            })
         }
     }
 
@@ -85,8 +87,7 @@ impl GovernorRateLimiter {
 
     /// Create a rate limiter for burst traffic
     pub fn burst(burst_size: u32, replenish_per_second: u32) -> Self {
-        let quota = Quota::per_second(replenish_per_second)
-            .with_burst(burst_size);
+        let quota = Quota::per_second(replenish_per_second).with_burst(burst_size);
         Self::new(quota)
     }
 
@@ -106,7 +107,11 @@ pub struct RateLimitError {
 
 impl std::fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Rate limit exceeded. Retry after {} seconds", self.retry_after)
+        write!(
+            f,
+            "Rate limit exceeded. Retry after {} seconds",
+            self.retry_after
+        )
     }
 }
 
@@ -175,7 +180,8 @@ impl<K: std::hash::Hash + Eq + Clone + Send + Sync + 'static> KeyedRateLimiter<K
         // Slow path: create new limiter
         {
             let mut limiters = self.limiters.write().await;
-            let limiter = limiters.entry(key.clone())
+            let limiter = limiters
+                .entry(key.clone())
                 .or_insert_with(|| GovernorRateLimiter::new(self.default_quota));
             limiter.check()
         }
@@ -208,7 +214,10 @@ mod tests {
     #[test]
     fn test_governor_burst_then_throttle() {
         // burst=3, refill=1/s: first 3 requests pass, 4th fails.
-        let limiter = GovernorRateLimiter::new(Quota { burst: 3, replenish_per_second: 1 });
+        let limiter = GovernorRateLimiter::new(Quota {
+            burst: 3,
+            replenish_per_second: 1,
+        });
         assert!(limiter.check().is_ok(), "1st request must pass (burst)");
         assert!(limiter.check().is_ok(), "2nd request must pass (burst)");
         assert!(limiter.check().is_ok(), "3rd request must pass (burst)");
@@ -219,26 +228,41 @@ mod tests {
     fn test_governor_strict_rejects_second_request() {
         let limiter = GovernorRateLimiter::strict(1);
         assert!(limiter.check().is_ok());
-        assert!(limiter.check().is_err(),
-            "strict(1) must reject a second back-to-back request");
+        assert!(
+            limiter.check().is_err(),
+            "strict(1) must reject a second back-to-back request"
+        );
     }
 
     #[test]
     fn test_governor_replenishes_over_time() {
-        let limiter = GovernorRateLimiter::new(Quota { burst: 1, replenish_per_second: 1000 });
+        let limiter = GovernorRateLimiter::new(Quota {
+            burst: 1,
+            replenish_per_second: 1000,
+        });
         assert!(limiter.check().is_ok());
         // 5ms is well over 1/1000s — bucket should refill.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        assert!(limiter.check().is_ok(),
-            "must allow after enough time has elapsed for a refill");
+        assert!(
+            limiter.check().is_ok(),
+            "must allow after enough time has elapsed for a refill"
+        );
     }
 
     #[tokio::test]
     async fn test_keyed_rate_limiter_independent_buckets() {
-        let kl: KeyedRateLimiter<&'static str> =
-            KeyedRateLimiter::new(Quota { burst: 1, replenish_per_second: 0 });
+        let kl: KeyedRateLimiter<&'static str> = KeyedRateLimiter::new(Quota {
+            burst: 1,
+            replenish_per_second: 0,
+        });
         assert!(kl.check(&"a").await.is_ok());
-        assert!(kl.check(&"b").await.is_ok(), "different keys must have independent buckets");
-        assert!(kl.check(&"a").await.is_err(), "same key must reuse the bucket");
+        assert!(
+            kl.check(&"b").await.is_ok(),
+            "different keys must have independent buckets"
+        );
+        assert!(
+            kl.check(&"a").await.is_err(),
+            "same key must reuse the bucket"
+        );
     }
 }

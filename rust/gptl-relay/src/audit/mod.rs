@@ -7,13 +7,13 @@
 //! - Cryptographic chain of custody
 //! - Structured JSON logging with signatures
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use sha2::{Sha256, Digest};
-use serde::{Serialize, Deserialize};
 
 /// Audit logger with tamper-evident logging
 #[derive(Debug)]
@@ -70,11 +70,13 @@ impl AuditLogger {
     pub async fn load_from_storage(&self) -> crate::Result<()> {
         if let Some(ref path) = self.storage_path {
             if path.exists() {
-                let contents = tokio::fs::read_to_string(path).await
-                    .map_err(|e| crate::RelayError::AuditError(format!("Failed to read log file: {}", e)))?;
+                let contents = tokio::fs::read_to_string(path).await.map_err(|e| {
+                    crate::RelayError::AuditError(format!("Failed to read log file: {}", e))
+                })?;
 
-                let log: TamperEvidentLog = serde_json::from_str(&contents)
-                    .map_err(|e| crate::RelayError::AuditError(format!("Failed to parse log file: {}", e)))?;
+                let log: TamperEvidentLog = serde_json::from_str(&contents).map_err(|e| {
+                    crate::RelayError::AuditError(format!("Failed to parse log file: {}", e))
+                })?;
 
                 let mut storage = self.storage.write().await;
                 storage.entries = log.entries;
@@ -85,11 +87,7 @@ impl AuditLogger {
                 // so seeding next_sequence from the count would assign new entries
                 // sequences that collide with / regress below existing ones and
                 // permanently break verify_integrity's chain check on restart.
-                storage.next_sequence = storage
-                    .entries
-                    .back()
-                    .map(|e| e.sequence + 1)
-                    .unwrap_or(0);
+                storage.next_sequence = storage.entries.back().map(|e| e.sequence + 1).unwrap_or(0);
                 storage.update_merkle_tree();
             }
         }
@@ -100,17 +98,20 @@ impl AuditLogger {
     pub async fn save_to_storage(&self) -> crate::Result<()> {
         if let Some(ref path) = self.storage_path {
             let log = self.export_tamper_evident_log().await;
-            let json = serde_json::to_string_pretty(&log)
-                .map_err(|e| crate::RelayError::AuditError(format!("Failed to serialize logs: {}", e)))?;
+            let json = serde_json::to_string_pretty(&log).map_err(|e| {
+                crate::RelayError::AuditError(format!("Failed to serialize logs: {}", e))
+            })?;
 
             // Ensure parent directory exists
             if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await
-                    .map_err(|e| crate::RelayError::AuditError(format!("Failed to create log directory: {}", e)))?;
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    crate::RelayError::AuditError(format!("Failed to create log directory: {}", e))
+                })?;
             }
 
-            tokio::fs::write(path, json).await
-                .map_err(|e| crate::RelayError::AuditError(format!("Failed to write log file: {}", e)))?;
+            tokio::fs::write(path, json).await.map_err(|e| {
+                crate::RelayError::AuditError(format!("Failed to write log file: {}", e))
+            })?;
         }
         Ok(())
     }
@@ -164,7 +165,7 @@ impl AuditLogger {
         // Check log level
         if event.level() < self.min_level {
             return Err(crate::RelayError::AuditError(
-                "Event below minimum log level".to_string()
+                "Event below minimum log level".to_string(),
             ));
         }
 
@@ -173,10 +174,9 @@ impl AuditLogger {
         // Create entry
         let sequence = storage.next_sequence();
         let timestamp = Utc::now();
-        
+
         // Get previous hash for chain
-        let previous_hash = storage.last_hash()
-            .unwrap_or_else(|| vec![0u8; 32]);
+        let previous_hash = storage.last_hash().unwrap_or_else(|| vec![0u8; 32]);
 
         // Create entry data
         let entry_data = LogEntryData {
@@ -262,7 +262,7 @@ impl AuditLogger {
             // Verify entry hash
             let calculated_hash = Self::calculate_hash(&entry.data);
             let stored_hash = hex_decode(&entry.hash).unwrap_or_default();
-            
+
             if calculated_hash != stored_hash {
                 report.invalid_entries += 1;
             } else {
@@ -289,13 +289,12 @@ impl AuditLogger {
     }
 
     /// Get log entries with filtering
-    pub async fn query(
-        &self,
-        filter: LogFilter,
-    ) -> Vec<LogEntry> {
+    pub async fn query(&self, filter: LogFilter) -> Vec<LogEntry> {
         let storage = self.storage.read().await;
-        
-        storage.entries.iter()
+
+        storage
+            .entries
+            .iter()
             .filter(|e| filter.matches(e))
             .cloned()
             .collect()
@@ -304,7 +303,9 @@ impl AuditLogger {
     /// Get a specific entry by sequence
     pub async fn get_entry(&self, sequence: u64) -> Option<LogEntry> {
         let storage = self.storage.read().await;
-        storage.entries.iter()
+        storage
+            .entries
+            .iter()
             .find(|e| e.sequence == sequence)
             .cloned()
     }
@@ -312,8 +313,10 @@ impl AuditLogger {
     /// Get entries in a range
     pub async fn get_range(&self, start: u64, end: u64) -> Vec<LogEntry> {
         let storage = self.storage.read().await;
-        
-        storage.entries.iter()
+
+        storage
+            .entries
+            .iter()
             .filter(|e| e.sequence >= start && e.sequence <= end)
             .cloned()
             .collect()
@@ -322,7 +325,7 @@ impl AuditLogger {
     /// Export tamper-evident log
     pub async fn export_tamper_evident_log(&self) -> TamperEvidentLog {
         let storage = self.storage.read().await;
-        
+
         TamperEvidentLog {
             entries: storage.entries.clone(),
             merkle_root: storage.merkle_root.clone(),
@@ -351,9 +354,8 @@ impl AuditLogger {
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
-        
-        let mut mac = HmacSha256::new_from_slice(key)
-            .expect("HMAC can take key of any size");
+
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
         mac.update(hash);
         mac.finalize().into_bytes().to_vec()
     }
@@ -364,11 +366,10 @@ impl AuditLogger {
         use sha2::Sha256;
 
         type HmacSha256 = Hmac<Sha256>;
-        
-        let mut mac = HmacSha256::new_from_slice(key)
-            .expect("HMAC can take key of any size");
+
+        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
         mac.update(hash);
-        
+
         mac.verify_slice(signature).is_ok()
     }
 }
@@ -419,7 +420,8 @@ impl LogStorage {
     }
 
     fn last_hash(&self) -> Option<Vec<u8>> {
-        self.entries.back()
+        self.entries
+            .back()
             .map(|e| hex_decode(&e.hash).unwrap_or_default())
     }
 
@@ -437,7 +439,9 @@ impl LogStorage {
         // letting an attacker forge a membership proof for a non-existent
         // log entry by constructing an internal node whose preimage looks
         // like a leaf.
-        let mut hashes: Vec<Vec<u8>> = self.entries.iter()
+        let mut hashes: Vec<Vec<u8>> = self
+            .entries
+            .iter()
             .map(|e| {
                 let raw = hex_decode(&e.hash).unwrap_or_default();
                 let mut hasher = Sha256::new();
@@ -712,9 +716,7 @@ pub struct TamperEvidentLog {
 
 /// Helper functions
 fn hex_encode(data: &[u8]) -> String {
-    data.iter()
-        .map(|b| format!("{:02x}", b))
-        .collect()
+    data.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
@@ -812,12 +814,19 @@ mod tests {
         let report = logger.verify_integrity().await;
         // The configured cap (50) must be honored — previously archive_old_entries
         // hardcoded 1000, so a cap < 1000 never actually trimmed.
-        assert!(report.total_entries > 0 && report.total_entries <= 50,
-            "archive must trim to the configured cap (50); got total={}", report.total_entries);
-        assert!(report.broken_chain_at.is_none(),
+        assert!(
+            report.total_entries > 0 && report.total_entries <= 50,
+            "archive must trim to the configured cap (50); got total={}",
+            report.total_entries
+        );
+        assert!(
+            report.broken_chain_at.is_none(),
             "integrity must NOT flag a broken chain on a well-formed archived log; \
              got broken_chain_at={:?} valid={} invalid={}",
-            report.broken_chain_at, report.valid_entries, report.invalid_entries);
+            report.broken_chain_at,
+            report.valid_entries,
+            report.invalid_entries
+        );
     }
 
     #[tokio::test]
@@ -957,8 +966,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let log_path = dir.path().join("audit.log");
 
-        let logger = AuditLogger::new(vec![1u8; 32])
-            .with_persistent_storage(&log_path);
+        let logger = AuditLogger::new(vec![1u8; 32]).with_persistent_storage(&log_path);
 
         let ctx = crate::SecurityContext::new("192.168.1.1".parse().unwrap());
 
@@ -980,8 +988,7 @@ mod tests {
         assert!(log_path.exists());
 
         // Create new logger and load
-        let logger2 = AuditLogger::new(vec![1u8; 32])
-            .with_persistent_storage(&log_path);
+        let logger2 = AuditLogger::new(vec![1u8; 32]).with_persistent_storage(&log_path);
 
         logger2.load_from_storage().await.unwrap();
 

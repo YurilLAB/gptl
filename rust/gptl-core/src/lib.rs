@@ -11,20 +11,19 @@ pub mod relay_selector;
 
 // Re-export commonly used types
 pub use changes::{
-    ChangeBuilder, ChangeCategory, ChangeFilter, ChangeStatistics, ChangeStatus,
-    ChangeTracker, ChangeTrackerConfig, ChangeTrackerError, PlatformDetails, SystemChange,
+    ChangeBuilder, ChangeCategory, ChangeFilter, ChangeStatistics, ChangeStatus, ChangeTracker,
+    ChangeTrackerConfig, ChangeTrackerError, PlatformDetails, SystemChange,
 };
 
 // Re-export relay types
 pub use relay_registry::{
-    RelayInfo, RelayRegistry, InMemoryRegistry, JsonFileRegistry, RelayCriteria,
-    HealthStatus, SecurityLevel, Location, RelayCapabilities, RegistryError,
-    SignedRelayList, RegistryRateLimiter,
+    HealthStatus, InMemoryRegistry, JsonFileRegistry, Location, RegistryError, RegistryRateLimiter,
+    RelayCapabilities, RelayCriteria, RelayInfo, RelayRegistry, SecurityLevel, SignedRelayList,
 };
 
 pub use relay_selector::{
-    RelaySelector, SelectionStrategy, SelectionResult, SelectorConfig,
-    SelectorError, SelectorStatistics, RelayPool, FailureType as RelayFailureType,
+    FailureType as RelayFailureType, RelayPool, RelaySelector, SelectionResult, SelectionStrategy,
+    SelectorConfig, SelectorError, SelectorStatistics,
 };
 
 /// Version of the GPTL core library

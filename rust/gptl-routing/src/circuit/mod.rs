@@ -22,15 +22,14 @@ pub use health::{
     CircuitHealthMonitor, FailureType, HealthMonitorConfig, HealthStatistics, HealthStatus,
 };
 pub use manager::{
-    CircuitHandle, CircuitManager, CircuitManagerConfig, CircuitManagerEvent, CircuitManagerStatistics,
+    CircuitHandle, CircuitManager, CircuitManagerConfig, CircuitManagerEvent,
+    CircuitManagerStatistics,
 };
 pub use pool::{
     CircuitBuilder, CircuitId, CircuitPool, CircuitPoolConfig, PoolCircuit, PoolCircuitState,
     PoolError, PoolEvent, PoolStatistics, RetireReason,
 };
-pub use rotation::{
-    RotationEvent, RotationPolicy, RotationStatistics, RotationTrigger,
-};
+pub use rotation::{RotationEvent, RotationPolicy, RotationStatistics, RotationTrigger};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,19 +118,17 @@ impl<B: CircuitBuilder> CircuitManagerBuilder<B> {
     /// Build the circuit manager
     pub fn build(self) -> CircuitManager<B> {
         let mut manager = CircuitManager::new(self.config, self.builder);
-        
+
         if let Some(sender) = self.event_sender {
             manager = manager.with_event_sender(sender);
         }
-        
+
         manager
     }
 }
 
 /// Convenience function to create a circuit manager with default settings
-pub fn create_circuit_manager<B: CircuitBuilder>(
-    builder: Arc<B>,
-) -> CircuitManager<B> {
+pub fn create_circuit_manager<B: CircuitBuilder>(builder: Arc<B>) -> CircuitManager<B> {
     CircuitManagerBuilder::new(builder).build()
 }
 
@@ -147,7 +144,7 @@ pub fn create_circuit_manager_with_pool<B: CircuitBuilder>(
         pre_build_count: min_pool_size,
         ..Default::default()
     };
-    
+
     CircuitManagerBuilder::new(builder)
         .pool_config(pool_config)
         .build()

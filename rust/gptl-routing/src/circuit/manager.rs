@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
-
-
-use super::health::{CircuitHealthMonitor, FailureType, HealthMonitorConfig, HealthStatistics, HealthStatus};
+use super::health::{
+    CircuitHealthMonitor, FailureType, HealthMonitorConfig, HealthStatistics, HealthStatus,
+};
 use super::pool::{CircuitId, CircuitPool, CircuitPoolConfig, PoolStatistics, RetireReason};
 use super::rotation::{RotationPolicy, RotationStatistics, RotationTrigger};
 
@@ -96,15 +96,28 @@ pub enum CircuitManagerEvent {
     /// Circuit created and ready
     CircuitReady { circuit_id: CircuitId },
     /// Circuit acquired for use
-    CircuitAcquired { circuit_id: CircuitId, purpose: String },
+    CircuitAcquired {
+        circuit_id: CircuitId,
+        purpose: String,
+    },
     /// Circuit released
     CircuitReleased { circuit_id: CircuitId },
     /// Circuit closed
-    CircuitClosed { circuit_id: CircuitId, reason: String },
+    CircuitClosed {
+        circuit_id: CircuitId,
+        reason: String,
+    },
     /// Circuit rotated
-    CircuitRotated { old_id: CircuitId, new_id: CircuitId, trigger: RotationTrigger },
+    CircuitRotated {
+        old_id: CircuitId,
+        new_id: CircuitId,
+        trigger: RotationTrigger,
+    },
     /// Health status changed
-    HealthStatusChanged { circuit_id: CircuitId, new_status: HealthStatus },
+    HealthStatusChanged {
+        circuit_id: CircuitId,
+        new_status: HealthStatus,
+    },
     /// Pool refilled
     PoolRefilled { count: usize },
     /// All circuits failed
@@ -158,19 +171,19 @@ pub struct CircuitManager<B: super::pool::CircuitBuilder + 'static> {
     start_time: Instant,
 }
 
-
-
 impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
     /// Create a new circuit manager
     pub fn new(config: CircuitManagerConfig, builder: Arc<B>) -> Self {
-        let health_monitor = Arc::new(CircuitHealthMonitor::with_config(config.health_config.clone()));
-        
+        let health_monitor = Arc::new(CircuitHealthMonitor::with_config(
+            config.health_config.clone(),
+        ));
+
         let pool = Arc::new(CircuitPool::new(
             config.pool_config.clone(),
             health_monitor.clone(),
             builder.clone(),
         ));
-        
+
         Self {
             config,
             health_monitor,
@@ -194,23 +207,25 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
     /// Initialize the circuit manager
     pub async fn initialize(&self) -> Result<(), CircuitManagerError> {
         info!("Initializing circuit manager");
-        
+
         // Start health monitoring
         if self.config.enable_health_monitoring {
             self.health_monitor.start_health_check_task();
             info!("Health monitoring started");
         }
-        
+
         // Initialize pool
         if self.config.enable_pool_management {
-            self.pool.initialize().await
+            self.pool
+                .initialize()
+                .await
                 .map_err(|e| CircuitManagerError::PoolInitializationFailed(e.to_string()))?;
             info!("Circuit pool initialized");
         }
-        
+
         // Start background tasks
         self.start_background_tasks();
-        
+
         info!("Circuit manager initialized successfully");
         Ok(())
     }
@@ -222,47 +237,60 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         destination: Option<IpAddr>,
     ) -> Result<CircuitHandle, CircuitManagerError> {
         trace!(purpose, ?destination, "Acquiring circuit");
-        
+
         // Try to get a circuit from the pool
-        let circuit_id = self.pool.acquire_circuit().await
+        let circuit_id = self
+            .pool
+            .acquire_circuit()
+            .await
             .map_err(|e| CircuitManagerError::NoCircuitAvailable(e.to_string()))?;
-        
+
         // Get circuit info
-        let pool_circuit = self.pool.get_circuit(circuit_id).await
+        let pool_circuit = self
+            .pool
+            .get_circuit(circuit_id)
+            .await
             .ok_or(CircuitManagerError::CircuitNotFound(circuit_id))?;
-        
+
         // Get health score
-        let health_score = self.health_monitor.get_health_score(circuit_id).await
+        let health_score = self
+            .health_monitor
+            .get_health_score(circuit_id)
+            .await
             .unwrap_or(100);
-        
+
         // Register as active
         {
             let mut active = self.active_circuits.write().await;
-            active.insert(circuit_id, ActiveCircuit {
-                id: circuit_id,
-                streams: Vec::new(),
-                created_at: Instant::now(),
-                last_activity: Instant::now(),
-                bytes_transferred: 0,
-                request_count: 0,
-                path: pool_circuit.path.clone(),
-                is_closing: false,
-            });
+            active.insert(
+                circuit_id,
+                ActiveCircuit {
+                    id: circuit_id,
+                    streams: Vec::new(),
+                    created_at: Instant::now(),
+                    last_activity: Instant::now(),
+                    bytes_transferred: 0,
+                    request_count: 0,
+                    path: pool_circuit.path.clone(),
+                    is_closing: false,
+                },
+            );
         }
-        
+
         // Update counters
         {
             let mut created = self.total_created.write().await;
             *created += 1;
         }
-        
+
         self.send_event(CircuitManagerEvent::CircuitAcquired {
             circuit_id,
             purpose: purpose.to_string(),
-        }).await;
-        
+        })
+        .await;
+
         debug!(circuit_id, purpose, "Circuit acquired");
-        
+
         Ok(CircuitHandle {
             id: circuit_id,
             path: pool_circuit.path,
@@ -274,19 +302,22 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
     /// Release a circuit back to the manager
     pub async fn release_circuit(&self, circuit_id: CircuitId) -> Result<(), CircuitManagerError> {
         debug!(circuit_id, "Releasing circuit");
-        
+
         // Remove from active
         {
             let mut active = self.active_circuits.write().await;
             active.remove(&circuit_id);
         }
-        
+
         // Return to pool
-        self.pool.release_circuit(circuit_id).await
+        self.pool
+            .release_circuit(circuit_id)
+            .await
             .map_err(|e| CircuitManagerError::PoolError(e.to_string()))?;
-        
-        self.send_event(CircuitManagerEvent::CircuitReleased { circuit_id }).await;
-        
+
+        self.send_event(CircuitManagerEvent::CircuitReleased { circuit_id })
+            .await;
+
         Ok(())
     }
 
@@ -298,8 +329,10 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         bytes: u64,
     ) -> Result<(), CircuitManagerError> {
         // Update health monitor
-        self.health_monitor.record_success(circuit_id, latency, bytes).await;
-        
+        self.health_monitor
+            .record_success(circuit_id, latency, bytes)
+            .await;
+
         // Update active circuit stats
         {
             let mut active = self.active_circuits.write().await;
@@ -309,11 +342,13 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
                 circuit.request_count += 1;
             }
         }
-        
+
         // Update pool stats
-        self.pool.update_circuit_usage(circuit_id, bytes).await
+        self.pool
+            .update_circuit_usage(circuit_id, bytes)
+            .await
             .map_err(|e| CircuitManagerError::PoolError(e.to_string()))?;
-        
+
         Ok(())
     }
 
@@ -324,31 +359,35 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         failure_type: FailureType,
     ) -> Result<(), CircuitManagerError> {
         warn!(circuit_id, ?failure_type, "Circuit failure reported");
-        
+
         // Update health monitor
-        self.health_monitor.record_failure(circuit_id, failure_type).await;
-        
+        self.health_monitor
+            .record_failure(circuit_id, failure_type)
+            .await;
+
         // Check if we need emergency rotation
         let should_emergency_rotate = {
             let active = self.active_circuits.read().await;
             active.contains_key(&circuit_id)
         };
-        
+
         if should_emergency_rotate {
             // Check health status
             if let Some(status) = self.health_monitor.get_health_status(circuit_id).await {
                 self.send_event(CircuitManagerEvent::HealthStatusChanged {
                     circuit_id,
                     new_status: status,
-                }).await;
-                
+                })
+                .await;
+
                 // If failed, close the circuit
                 if status == HealthStatus::Failed {
-                    self.close_circuit(circuit_id, "Health check failed").await?;
+                    self.close_circuit(circuit_id, "Health check failed")
+                        .await?;
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -359,27 +398,31 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         reason: &str,
     ) -> Result<(), CircuitManagerError> {
         info!(circuit_id, reason, "Closing circuit");
-        
+
         // Remove from active
         {
             let mut active = self.active_circuits.write().await;
             active.remove(&circuit_id);
         }
-        
+
         // Retire from pool
-        let _ = self.pool.retire_circuit(circuit_id, RetireReason::Explicit).await;
-        
+        let _ = self
+            .pool
+            .retire_circuit(circuit_id, RetireReason::Explicit)
+            .await;
+
         // Update counters
         {
             let mut destroyed = self.total_destroyed.write().await;
             *destroyed += 1;
         }
-        
+
         self.send_event(CircuitManagerEvent::CircuitClosed {
             circuit_id,
             reason: reason.to_string(),
-        }).await;
-        
+        })
+        .await;
+
         Ok(())
     }
 
@@ -390,19 +433,21 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         trigger: RotationTrigger,
     ) -> Result<CircuitHandle, CircuitManagerError> {
         info!(old_circuit_id, %trigger, "Rotating circuit");
-        
+
         // Acquire new circuit
         let new_handle = self.acquire_circuit("rotation", None).await?;
-        
+
         // Close old circuit
-        self.close_circuit(old_circuit_id, &format!("Rotated: {}", trigger)).await?;
-        
+        self.close_circuit(old_circuit_id, &format!("Rotated: {}", trigger))
+            .await?;
+
         self.send_event(CircuitManagerEvent::CircuitRotated {
             old_id: old_circuit_id,
             new_id: new_handle.id,
             trigger,
-        }).await;
-        
+        })
+        .await;
+
         Ok(new_handle)
     }
 
@@ -415,18 +460,18 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
     pub async fn get_statistics(&self) -> CircuitManagerStatistics {
         let pool_stats = self.pool.get_statistics().await;
         let health_stats = self.health_monitor.get_statistics().await;
-        
+
         let active_count = self.active_circuits.read().await.len();
         let total_created = *self.total_created.read().await;
         let total_destroyed = *self.total_destroyed.read().await;
-        
+
         let avg_lifetime = if total_destroyed > 0 {
             let elapsed = self.start_time.elapsed().as_secs();
             Duration::from_secs(elapsed / total_destroyed)
         } else {
             Duration::from_secs(0)
         };
-        
+
         CircuitManagerStatistics {
             pool_stats,
             health_stats,
@@ -458,12 +503,13 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
     #[allow(dead_code)]
     async fn handle_all_circuits_failed(&self) {
         error!("All circuits have failed!");
-        
-        self.send_event(CircuitManagerEvent::AllCircuitsFailed).await;
-        
+
+        self.send_event(CircuitManagerEvent::AllCircuitsFailed)
+            .await;
+
         // Try to rebuild the pool
         warn!("Attempting to rebuild circuit pool");
-        
+
         // Give the pool some time to recover
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -481,47 +527,51 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         let pool = self.pool.clone();
         let event_sender = self.event_sender.clone();
         let interval = self.config.health_config.health_check_interval;
-        
+
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
-            
+
             loop {
                 ticker.tick().await;
-                
+
                 // Get unhealthy circuits
                 let unhealthy = health_monitor.get_unhealthy_circuits().await;
-                
+
                 for circuit_id in unhealthy {
                     // Check if active
                     let is_active = {
                         let active = active_circuits.read().await;
                         active.contains_key(&circuit_id)
                     };
-                    
+
                     if is_active {
                         warn!(circuit_id, "Active circuit became unhealthy, retiring");
-                        
+
                         // Get current status for event
                         if let Some(status) = health_monitor.get_health_status(circuit_id).await {
                             if let Some(ref sender) = event_sender {
-                                let _ = sender.send(CircuitManagerEvent::HealthStatusChanged {
-                                    circuit_id,
-                                    new_status: status,
-                                }).await;
+                                let _ = sender
+                                    .send(CircuitManagerEvent::HealthStatusChanged {
+                                        circuit_id,
+                                        new_status: status,
+                                    })
+                                    .await;
                             }
                         }
-                        
+
                         // Remove from active
                         {
                             let mut active = active_circuits.write().await;
                             active.remove(&circuit_id);
                         }
-                        
+
                         // Retire from pool
-                        let _ = pool.retire_circuit(circuit_id, RetireReason::HealthCheck).await;
+                        let _ = pool
+                            .retire_circuit(circuit_id, RetireReason::HealthCheck)
+                            .await;
                     }
                 }
-                
+
                 trace!("Health check task cycle completed");
             }
         });
@@ -533,16 +583,16 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
         let pool = self.pool.clone();
         let health_monitor = self.health_monitor.clone();
         let idle_timeout = self.config.health_config.idle_timeout;
-        
+
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(60));
-            
+
             loop {
                 ticker.tick().await;
-                
+
                 let now = Instant::now();
                 let mut to_remove = Vec::new();
-                
+
                 // Find stale circuits
                 {
                     let active = active_circuits.read().await;
@@ -552,20 +602,20 @@ impl<B: super::pool::CircuitBuilder> CircuitManager<B> {
                         }
                     }
                 }
-                
+
                 // Remove stale circuits
                 for circuit_id in to_remove {
                     warn!(circuit_id, "Removing stale circuit");
-                    
+
                     {
                         let mut active = active_circuits.write().await;
                         active.remove(&circuit_id);
                     }
-                    
+
                     let _ = pool.release_circuit(circuit_id).await;
                     health_monitor.unregister_circuit(circuit_id).await;
                 }
-                
+
                 trace!("Cleanup task cycle completed");
             }
         });
@@ -600,8 +650,8 @@ pub enum CircuitManagerError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::pool::MockCircuitBuilder;
+    use super::*;
 
     fn create_test_config() -> CircuitManagerConfig {
         CircuitManagerConfig {
@@ -629,9 +679,9 @@ mod tests {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let manager = CircuitManager::new(config, builder);
-        
+
         assert!(manager.initialize().await.is_ok());
     }
 
@@ -642,18 +692,18 @@ mod tests {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let manager = CircuitManager::new(config, builder);
         manager.initialize().await.unwrap();
-        
+
         // Acquire a circuit
         let handle = manager.acquire_circuit("test", None).await.unwrap();
         assert!(handle.id > 0);
         assert_eq!(handle.health_score, 100);
-        
+
         // Release it
         manager.release_circuit(handle.id).await.unwrap();
-        
+
         // Check stats
         let stats = manager.get_statistics().await;
         assert_eq!(stats.total_circuits_created, 1);
@@ -666,23 +716,29 @@ mod tests {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let manager = CircuitManager::new(config, builder);
         manager.initialize().await.unwrap();
-        
+
         let handle = manager.acquire_circuit("test", None).await.unwrap();
-        
+
         // Report success
-        manager.report_success(handle.id, Duration::from_millis(100), 1024).await.unwrap();
-        
+        manager
+            .report_success(handle.id, Duration::from_millis(100), 1024)
+            .await
+            .unwrap();
+
         // Check health
         let health = manager.get_circuit_health(handle.id).await;
         assert!(health.is_some());
-        
+
         // Report 3 failures: score = 100 - (3*15 consecutive) - (3*10 recent) = 25 → Unhealthy
         // Using fewer than 4 to avoid HealthStatus::Failed (score=0) which auto-closes the circuit
         for _ in 0..3 {
-            manager.report_failure(handle.id, FailureType::Timeout).await.unwrap();
+            manager
+                .report_failure(handle.id, FailureType::Timeout)
+                .await
+                .unwrap();
         }
 
         // Health should be degraded (Unhealthy, not Healthy)
@@ -699,23 +755,29 @@ mod tests {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let manager = CircuitManager::new(config, builder);
         manager.initialize().await.unwrap();
-        
+
         // Create some circuits
         let handle1 = manager.acquire_circuit("test1", None).await.unwrap();
         let handle2 = manager.acquire_circuit("test2", None).await.unwrap();
-        
+
         // Report activity
-        manager.report_success(handle1.id, Duration::from_millis(100), 1000).await.unwrap();
-        manager.report_success(handle2.id, Duration::from_millis(200), 2000).await.unwrap();
-        
+        manager
+            .report_success(handle1.id, Duration::from_millis(100), 1000)
+            .await
+            .unwrap();
+        manager
+            .report_success(handle2.id, Duration::from_millis(200), 2000)
+            .await
+            .unwrap();
+
         let stats = manager.get_statistics().await;
         assert_eq!(stats.total_circuits_created, 2);
         assert_eq!(stats.pool_stats.in_use_circuits, 2);
         assert!(stats.health_stats.total_circuits >= 4); // At least 2 in-use + 2 pool circuits; background tasks may add more
-        
+
         manager.release_circuit(handle1.id).await.unwrap();
         manager.release_circuit(handle2.id).await.unwrap();
     }
@@ -727,15 +789,18 @@ mod tests {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let manager = CircuitManager::new(config, builder);
         manager.initialize().await.unwrap();
-        
+
         let handle = manager.acquire_circuit("test", None).await.unwrap();
-        
+
         // Close the circuit
-        manager.close_circuit(handle.id, "Test close").await.unwrap();
-        
+        manager
+            .close_circuit(handle.id, "Test close")
+            .await
+            .unwrap();
+
         let stats = manager.get_statistics().await;
         assert_eq!(stats.total_circuits_destroyed, 1);
     }
@@ -743,7 +808,7 @@ mod tests {
     #[test]
     fn test_circuit_manager_config_default() {
         let config = CircuitManagerConfig::default();
-        
+
         assert!(config.enable_rotation);
         assert!(config.enable_health_monitoring);
         assert!(config.enable_pool_management);
@@ -758,7 +823,7 @@ mod tests {
             created_at: Instant::now(),
             health_score: 95,
         };
-        
+
         assert_eq!(handle.id, 1);
         assert_eq!(handle.path.len(), 2);
         assert_eq!(handle.health_score, 95);

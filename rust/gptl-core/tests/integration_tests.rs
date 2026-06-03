@@ -5,20 +5,20 @@
 
 use gptl_core::{
     anti_surveillance::{
-        AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand,
-        padding::PaddingEngine,
-        timing_protection::TimingShield,
-        traffic_shaping::TrafficShaper,
-        circuit_obfuscation::CircuitShield,
+        circuit_obfuscation::CircuitShield, padding::PaddingEngine,
+        timing_protection::TimingShield, traffic_shaping::TrafficShaper, AntiSurveillanceConfig,
+        Cell, CellCommand, SecurityLevel,
     },
-    relay_registry::{InMemoryRegistry, RelayInfo, RelayCriteria, SecurityLevel as RelaySecurityLevel},
+    changes::{ChangeCategory, ChangeTracker, ChangeTrackerConfig, SystemChange},
+    relay_registry::{
+        InMemoryRegistry, RelayCriteria, RelayInfo, SecurityLevel as RelaySecurityLevel,
+    },
     relay_selector::{RelaySelector, SelectionStrategy, SelectorConfig},
-    changes::{ChangeTracker, ChangeTrackerConfig, SystemChange, ChangeCategory},
     RelayRegistry,
 };
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn test_anti_surveillance_pipeline() {
@@ -138,8 +138,7 @@ async fn test_change_tracking_with_relay_operations() {
     assert!(tracked_change.is_some());
 
     // Get all network changes
-    let filter = gptl_core::changes::ChangeFilter::new()
-        .with_category(ChangeCategory::Network);
+    let filter = gptl_core::changes::ChangeFilter::new().with_category(ChangeCategory::Network);
     let changes = tracker.get_filtered(&filter).await;
     assert_eq!(changes.len(), 1);
 }
@@ -166,10 +165,12 @@ async fn test_circuit_failover_with_anti_surveillance() {
     let initial_relay_id = initial_selection.relay.id.clone();
 
     // Report failure
-    selector.report_failure(
-        &initial_relay_id,
-        gptl_core::relay_selector::FailureType::ConnectionFailed
-    ).await;
+    selector
+        .report_failure(
+            &initial_relay_id,
+            gptl_core::relay_selector::FailureType::ConnectionFailed,
+        )
+        .await;
 
     // Select new relay
     let new_selection = selector.select().await.unwrap();
@@ -203,9 +204,7 @@ async fn test_concurrent_relay_selection() {
     let mut handles = vec![];
     for _ in 0..10 {
         let sel = selector.clone();
-        let handle = tokio::spawn(async move {
-            sel.select().await
-        });
+        let handle = tokio::spawn(async move { sel.select().await });
         handles.push(handle);
     }
 
@@ -237,15 +236,13 @@ async fn test_anti_surveillance_under_load() {
 
     // Process cells for multiple circuits sequentially (avoid Send issues with thread_rng)
     for circuit_id in 0..10 {
-        let cells = vec![
-            Cell {
-                circuit_id,
-                stream_id: 1,
-                command: CellCommand::Data,
-                payload: vec![0u8; 509],
-                timestamp: Instant::now(),
-            },
-        ];
+        let cells = vec![Cell {
+            circuit_id,
+            stream_id: 1,
+            command: CellCommand::Data,
+            payload: vec![0u8; 509],
+            timestamp: Instant::now(),
+        }];
         let result = padding_engine.pad_cells(cells).await;
         assert!(result.is_ok());
     }
@@ -288,15 +285,13 @@ async fn test_security_level_escalation() {
     let padding_engine = PaddingEngine::new(config.clone());
     padding_engine.initialize().await.unwrap();
 
-    let cells = vec![
-        Cell {
-            circuit_id: 1,
-            stream_id: 1,
-            command: CellCommand::Data,
-            payload: vec![0u8; 509],
-            timestamp: Instant::now(),
-        },
-    ];
+    let cells = vec![Cell {
+        circuit_id: 1,
+        stream_id: 1,
+        command: CellCommand::Data,
+        payload: vec![0u8; 509],
+        timestamp: Instant::now(),
+    }];
 
     // Process with standard security
     let result1 = padding_engine.pad_cells(cells.clone()).await.unwrap();

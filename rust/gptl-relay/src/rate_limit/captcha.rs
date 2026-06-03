@@ -5,9 +5,9 @@
 //! - Challenge-response validation
 //! - Configurable difficulty
 
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 
 /// CAPTCHA challenge manager
@@ -58,7 +58,7 @@ impl CaptchaChallenge {
     /// Create a new challenge
     pub async fn create_challenge(&self) -> String {
         let challenge_id = uuid::Uuid::new_v4().to_string();
-        
+
         let state = ChallengeState {
             created_at: Utc::now(),
             verified: false,
@@ -81,7 +81,8 @@ impl CaptchaChallenge {
         challenge_id: &str,
         response_token: &str,
     ) -> crate::Result<CaptchaVerification> {
-        self.verify_with_ip(challenge_id, response_token, None).await
+        self.verify_with_ip(challenge_id, response_token, None)
+            .await
     }
 
     /// Verify a CAPTCHA response with an optional `remoteip`.
@@ -100,10 +101,9 @@ impl CaptchaChallenge {
         // Check if challenge exists and is valid
         {
             let challenges = self.challenges.read().await;
-            let state = challenges.get(challenge_id)
-                .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                    "Invalid challenge ID".to_string()
-                ))?;
+            let state = challenges.get(challenge_id).ok_or_else(|| {
+                crate::RelayError::AuthenticationFailed("Invalid challenge ID".to_string())
+            })?;
 
             if state.created_at + Duration::seconds(self.timeout_seconds) < Utc::now() {
                 return Ok(CaptchaVerification {
@@ -126,9 +126,7 @@ impl CaptchaChallenge {
         }
 
         // Verify with hCaptcha API
-        let result = self
-            .verify_with_hcaptcha(response_token, remote_ip)
-            .await?;
+        let result = self.verify_with_hcaptcha(response_token, remote_ip).await?;
 
         if result.success {
             // Mark challenge as verified
@@ -145,11 +143,14 @@ impl CaptchaChallenge {
     /// Check if a challenge has been verified
     pub async fn is_verified(&self, challenge_id: &str) -> bool {
         let challenges = self.challenges.read().await;
-        
-        challenges.get(challenge_id).map(|state| {
-            state.verified && 
-            state.created_at + Duration::seconds(self.timeout_seconds) > Utc::now()
-        }).unwrap_or(false)
+
+        challenges
+            .get(challenge_id)
+            .map(|state| {
+                state.verified
+                    && state.created_at + Duration::seconds(self.timeout_seconds) > Utc::now()
+            })
+            .unwrap_or(false)
     }
 
     /// Invalidate a challenge
@@ -192,13 +193,15 @@ impl CaptchaChallenge {
             .map_err(|e| crate::RelayError::Internal(format!("hCaptcha request failed: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(crate::RelayError::Internal(
-                format!("hCaptcha API returned status: {}", response.status())
-            ));
+            return Err(crate::RelayError::Internal(format!(
+                "hCaptcha API returned status: {}",
+                response.status()
+            )));
         }
 
-        let result: CaptchaVerification = response.json().await
-            .map_err(|e| crate::RelayError::Internal(format!("Failed to parse hCaptcha response: {}", e)))?;
+        let result: CaptchaVerification = response.json().await.map_err(|e| {
+            crate::RelayError::Internal(format!("Failed to parse hCaptcha response: {}", e))
+        })?;
 
         Ok(result)
     }
@@ -213,7 +216,7 @@ impl CaptchaChallenge {
     /// Get challenge statistics
     pub async fn get_stats(&self) -> CaptchaStats {
         let challenges = self.challenges.read().await;
-        
+
         let total = challenges.len() as u64;
         let verified = challenges.values().filter(|s| s.verified).count() as u64;
         let pending = total - verified;
@@ -329,12 +332,12 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    
+
     let mut result = 0u8;
     for (x, y) in a.bytes().zip(b.bytes()) {
         result |= x ^ y;
     }
-    
+
     result == 0
 }
 
@@ -436,7 +439,12 @@ mod tests {
                             // If we have headers + a non-empty body
                             // chunk, stop reading.
                             let s = String::from_utf8_lossy(&buf[..total]);
-                            if s.contains("\r\n\r\n") && s.split("\r\n\r\n").nth(1).map(|b| !b.is_empty()).unwrap_or(false) {
+                            if s.contains("\r\n\r\n")
+                                && s.split("\r\n\r\n")
+                                    .nth(1)
+                                    .map(|b| !b.is_empty())
+                                    .unwrap_or(false)
+                            {
                                 break;
                             }
                         }
@@ -469,8 +477,7 @@ mod tests {
             r#"{"success":true,"hostname":"example.com","error-codes":[]}"#,
         )
         .await;
-        let captcha =
-            CaptchaChallenge::new("test_secret", "site_key").with_verify_url(url);
+        let captcha = CaptchaChallenge::new("test_secret", "site_key").with_verify_url(url);
         let challenge_id = captcha.create_challenge().await;
 
         let result = captcha
@@ -528,8 +535,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_captcha_timeout() {
-        let captcha = CaptchaChallenge::new("secret", "site_key")
-            .with_timeout(1); // 1 second timeout
+        let captcha = CaptchaChallenge::new("secret", "site_key").with_timeout(1); // 1 second timeout
 
         let challenge_id = captcha.create_challenge().await;
 
@@ -552,8 +558,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_captcha_cleanup() {
-        let captcha = CaptchaChallenge::new("secret", "site_key")
-            .with_timeout(1);
+        let captcha = CaptchaChallenge::new("secret", "site_key").with_timeout(1);
 
         // Create multiple challenges
         for _ in 0..5 {

@@ -15,9 +15,9 @@ pub mod circuit_pool;
 pub mod crypto;
 pub mod guard;
 pub mod handshake;
-pub mod path;
 pub mod metrics;
 pub mod observer;
+pub mod path;
 pub mod proxy;
 pub mod relay_conn;
 pub mod relay_node;
@@ -31,11 +31,11 @@ pub use circuit_pool::{CircuitPool, CircuitPoolManager, PoolConfig};
 pub use crypto::{CellCipher, CircuitCiphers, RelayCiphers};
 pub use guard::{GuardConfig, GuardManager, GuardSet};
 pub use handshake::{RelayStaticKey, SessionKeys};
-pub use path::{PathConfig, PathSelector, RelayPath};
 pub use metrics::{serve_metrics, ClientMetrics, RelayMetrics};
 pub use observer::{
     noop_observer, CircuitObserver, CompositeObserver, FailureKind, NoopObserver, SharedObserver,
 };
+pub use path::{PathConfig, PathSelector, RelayPath};
 pub use proxy::{run as run_proxy, ProxyConfig};
 pub use relay_conn::RelayConn;
 pub use relay_node::{RelayNode, RelayOptions};

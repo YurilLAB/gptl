@@ -111,7 +111,9 @@ impl std::fmt::Debug for CompositeObserver {
 impl CompositeObserver {
     /// Build an empty composite.  Add children with [`push`].
     pub fn new() -> Self {
-        Self { children: Vec::new() }
+        Self {
+            children: Vec::new(),
+        }
     }
 
     /// Append a child observer.  Returns `self` for chaining.

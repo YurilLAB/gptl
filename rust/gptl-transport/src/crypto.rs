@@ -307,7 +307,11 @@ mod tests {
         // Inject a forged cell before the real ones.
         let forged = [0xABu8; CELL_PAYLOAD_LEN];
         assert!(dec.decrypt(&forged).is_err());
-        assert_eq!(dec.counter(), 0, "counter must not advance on a failed decrypt");
+        assert_eq!(
+            dec.counter(),
+            0,
+            "counter must not advance on a failed decrypt"
+        );
 
         // Legitimate cells still decrypt in order.
         assert_eq!(dec.decrypt(&ct0).unwrap(), pt0);

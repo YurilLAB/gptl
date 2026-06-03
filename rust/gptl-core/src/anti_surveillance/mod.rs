@@ -1,14 +1,14 @@
 //! GPTL Anti-Surveillance Module
-//! 
+//!
 //! Provides comprehensive countermeasures against traffic analysis attacks
 //! including traffic confirmation, website fingerprinting, circuit fingerprinting,
 //! timing attacks, and other deanonymization techniques.
 
-pub mod traffic_shaping;
-pub mod padding;
-pub mod timing_protection;
 pub mod circuit_obfuscation;
 pub mod flow_correlation_defense;
+pub mod padding;
+pub mod timing_protection;
+pub mod traffic_shaping;
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -56,7 +56,7 @@ impl Default for AntiSurveillanceConfig {
             timing_protection: true,
             circuit_obfuscation: true,
             flow_correlation_defense: true,
-            target_rate: 100.0,  // 100 cells/second
+            target_rate: 100.0, // 100 cells/second
             max_jitter_ms: 50,
             batch_size: 10,
         }
@@ -76,7 +76,7 @@ impl AntiSurveillanceManager {
     /// Create a new anti-surveillance manager
     pub fn new(config: AntiSurveillanceConfig) -> Self {
         let config = Arc::new(RwLock::new(config));
-        
+
         Self {
             traffic_shaper: Some(traffic_shaping::TrafficShaper::new(config.clone())),
             padding_engine: Some(padding::PaddingEngine::new(config.clone())),
@@ -89,31 +89,31 @@ impl AntiSurveillanceManager {
     /// Initialize all protection mechanisms
     pub async fn initialize(&self) -> Result<(), AntiSurveillanceError> {
         let config = self.config.read().await;
-        
+
         if config.traffic_shaping {
             if let Some(ref shaper) = self.traffic_shaper {
                 shaper.initialize().await?;
             }
         }
-        
+
         if config.adaptive_padding {
             if let Some(ref engine) = self.padding_engine {
                 engine.initialize().await?;
             }
         }
-        
+
         if config.timing_protection {
             if let Some(ref shield) = self.timing_shield {
                 shield.initialize().await?;
             }
         }
-        
+
         if config.circuit_obfuscation {
             if let Some(ref shield) = self.circuit_shield {
                 shield.initialize().await?;
             }
         }
-        
+
         Ok(())
     }
 
@@ -157,7 +157,7 @@ impl AntiSurveillanceManager {
     pub async fn set_security_level(&self, level: SecurityLevel) {
         let mut config = self.config.write().await;
         config.level = level;
-        
+
         // Update individual protections based on level
         match level {
             SecurityLevel::Standard => {
@@ -180,7 +180,7 @@ impl AntiSurveillanceManager {
                 config.timing_protection = true;
                 config.circuit_obfuscation = true;
                 config.flow_correlation_defense = true;
-                config.target_rate = 50.0;  // Lower rate for more padding
+                config.target_rate = 50.0; // Lower rate for more padding
                 config.max_jitter_ms = 100; // More jitter
             }
         }

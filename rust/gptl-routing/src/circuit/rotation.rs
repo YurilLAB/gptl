@@ -85,7 +85,7 @@ impl Default for RotationPolicy {
             connection_threshold: 1000,
             enable_health_rotation: true,
             health_score_threshold: 50,
-            min_circuit_lifetime: Duration::from_secs(60),  // 1 minute minimum
+            min_circuit_lifetime: Duration::from_secs(60), // 1 minute minimum
             max_circuit_lifetime: Duration::from_secs(3600), // 1 hour maximum
             randomize_rotation: true,
             rotation_jitter_percent: 10,
@@ -152,7 +152,7 @@ impl RotationInfo {
         } else {
             policy.rotation_interval
         };
-        
+
         Self {
             circuit_id,
             created_at: now,
@@ -175,7 +175,7 @@ impl RotationInfo {
         } else {
             policy.rotation_interval
         };
-        
+
         self.rotate_at = Instant::now() + interval;
         self.rotation_in_progress = false;
         self.rotation_count += 1;
@@ -237,10 +237,10 @@ impl CircuitRotator {
     pub async fn register_circuit(&self, circuit_id: CircuitId) {
         let info = RotationInfo::new(circuit_id, &self.policy);
         let rotate_at = info.rotate_at;
-        
+
         let mut rotation_info = self.rotation_info.write().await;
         rotation_info.insert(circuit_id, info);
-        
+
         debug!(
             circuit_id,
             rotation_at = ?rotate_at,
@@ -252,7 +252,7 @@ impl CircuitRotator {
     pub async fn unregister_circuit(&self, circuit_id: CircuitId) {
         let mut rotation_info = self.rotation_info.write().await;
         rotation_info.remove(&circuit_id);
-        
+
         debug!(circuit_id, "Circuit unregistered from rotator");
     }
 
@@ -261,18 +261,18 @@ impl CircuitRotator {
         // Get rotation info
         let rotation_info = self.rotation_info.read().await;
         let info = rotation_info.get(&circuit_id)?;
-        
+
         // Check minimum lifetime
         if info.age() < self.policy.min_circuit_lifetime {
             return None;
         }
-        
+
         // Check if rotation already in progress
         if info.rotation_in_progress {
             return None;
         }
         drop(rotation_info);
-        
+
         // Check health-based rotation
         if self.policy.enable_health_rotation {
             if let Some(score) = self.health_monitor.get_health_score(circuit_id).await {
@@ -281,7 +281,7 @@ impl CircuitRotator {
                 }
             }
         }
-        
+
         // Check time-based rotation
         if self.policy.enable_time_rotation {
             let rotation_info = self.rotation_info.read().await;
@@ -291,7 +291,7 @@ impl CircuitRotator {
                 }
             }
         }
-        
+
         // Check max lifetime
         let rotation_info = self.rotation_info.read().await;
         if let Some(info) = rotation_info.get(&circuit_id) {
@@ -299,7 +299,7 @@ impl CircuitRotator {
                 return Some(RotationTrigger::TimeBased);
             }
         }
-        
+
         None
     }
 
@@ -320,19 +320,19 @@ impl CircuitRotator {
                 info.scheduled_by = Some(trigger);
             }
         }
-        
+
         self.send_event(RotationEvent::RotationStarted {
             circuit_id,
             trigger,
         })
         .await;
-        
+
         info!(
             circuit_id,
             trigger = %trigger,
             "Starting circuit rotation"
         );
-        
+
         // Acquire new circuit from pool first
         let new_circuit_id = match self.pool.acquire_circuit().await {
             Ok(id) => id,
@@ -342,62 +342,72 @@ impl CircuitRotator {
                 if let Some(info) = rotation_info.get_mut(&circuit_id) {
                     info.rotation_in_progress = false;
                 }
-                
+
                 self.send_event(RotationEvent::RotationFailed {
                     circuit_id,
                     trigger,
                     error: e.to_string(),
                 })
                 .await;
-                
+
                 return Err(RotationError::PoolError(e.to_string()));
             }
         };
-        
+
         // Test new circuit before switching
         // Note: In production, you'd test the actual circuit here
-        
+
         // Retire old circuit
-        if let Err(e) = self.pool.retire_circuit(circuit_id, RetireReason::Age).await {
+        if let Err(e) = self
+            .pool
+            .retire_circuit(circuit_id, RetireReason::Age)
+            .await
+        {
             warn!(
                 circuit_id,
                 error = %e,
                 "Failed to retire old circuit during rotation"
             );
         }
-        
+
         // Unregister old circuit from rotator
         self.unregister_circuit(circuit_id).await;
-        
+
         // Register new circuit
         self.register_circuit(new_circuit_id).await;
-        
+
         self.send_event(RotationEvent::RotationCompleted {
             old_circuit_id: circuit_id,
             new_circuit_id,
             trigger,
         })
         .await;
-        
+
         info!(
             old_circuit_id = circuit_id,
             new_circuit_id,
             trigger = %trigger,
             "Circuit rotation completed"
         );
-        
+
         Ok(new_circuit_id)
     }
 
     /// Trigger emergency rotation
-    pub async fn emergency_rotate(&self, circuit_id: CircuitId) -> Result<CircuitId, RotationError> {
+    pub async fn emergency_rotate(
+        &self,
+        circuit_id: CircuitId,
+    ) -> Result<CircuitId, RotationError> {
         warn!(circuit_id, "Emergency circuit rotation triggered");
-        
+
         // Record failure in health monitor
-        self.health_monitor.record_failure(circuit_id, FailureType::InternalError).await;
-        
+        self.health_monitor
+            .record_failure(circuit_id, FailureType::InternalError)
+            .await;
+
         // Perform rotation
-        self.rotate_circuit(circuit_id, RotationTrigger::Emergency).await
+        self.rotate_circuit(circuit_id, RotationTrigger::Emergency)
+            .await
     }
 
     /// Get rotation info for a circuit
@@ -410,33 +420,33 @@ impl CircuitRotator {
     pub async fn get_circuits_needing_rotation(&self) -> Vec<(CircuitId, RotationTrigger)> {
         let rotation_info = self.rotation_info.read().await;
         let mut result = Vec::new();
-        
+
         for (&circuit_id, info) in rotation_info.iter() {
             // Skip if rotation already in progress
             if info.rotation_in_progress {
                 continue;
             }
-            
+
             // Check minimum lifetime
             if info.age() < self.policy.min_circuit_lifetime {
                 continue;
             }
-            
+
             // Check time-based
             if self.policy.enable_time_rotation && info.is_rotation_due() {
                 result.push((circuit_id, RotationTrigger::TimeBased));
                 continue;
             }
-            
+
             // Check max lifetime
             if info.age() >= self.policy.max_circuit_lifetime {
                 result.push((circuit_id, RotationTrigger::TimeBased));
                 continue;
             }
         }
-        
+
         drop(rotation_info);
-        
+
         // Check health-based (requires health monitor)
         if self.policy.enable_health_rotation {
             let rotation_info = self.rotation_info.read().await;
@@ -451,19 +461,19 @@ impl CircuitRotator {
                 }
             }
         }
-        
+
         result
     }
 
     /// Get rotation statistics
     pub async fn get_statistics(&self) -> RotationStatistics {
         let rotation_info = self.rotation_info.read().await;
-        
+
         let total = rotation_info.len();
         let mut pending = 0;
         let mut in_progress = 0;
         let mut total_rotations = 0;
-        
+
         for info in rotation_info.values() {
             if info.rotation_in_progress {
                 in_progress += 1;
@@ -472,7 +482,7 @@ impl CircuitRotator {
             }
             total_rotations += info.rotation_count;
         }
-        
+
         RotationStatistics {
             total_circuits: total,
             pending_rotations: pending,
@@ -488,13 +498,13 @@ impl CircuitRotator {
         let pool = self.pool.clone();
         let policy = self.policy.clone();
         let event_sender = self.event_sender.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let _now = Instant::now();
                 let mut to_rotate = Vec::new();
 
@@ -505,11 +515,11 @@ impl CircuitRotator {
                         if info.rotation_in_progress {
                             continue;
                         }
-                        
+
                         if info.age() < policy.min_circuit_lifetime {
                             continue;
                         }
-                        
+
                         if (policy.enable_time_rotation && info.is_rotation_due())
                             || info.age() >= policy.max_circuit_lifetime
                         {
@@ -517,7 +527,7 @@ impl CircuitRotator {
                         }
                     }
                 }
-                
+
                 // Perform rotations
                 for (circuit_id, trigger) in to_rotate {
                     // Mark in progress
@@ -528,44 +538,47 @@ impl CircuitRotator {
                             info.scheduled_by = Some(trigger);
                         }
                     }
-                    
+
                     if let Some(ref sender) = event_sender {
-                        let _ = sender.send(RotationEvent::RotationStarted {
-                            circuit_id,
-                            trigger,
-                        }).await;
+                        let _ = sender
+                            .send(RotationEvent::RotationStarted {
+                                circuit_id,
+                                trigger,
+                            })
+                            .await;
                     }
-                    
+
                     // Acquire new circuit
                     match pool.acquire_circuit().await {
                         Ok(new_circuit_id) => {
                             // Retire old circuit
                             let _ = pool.retire_circuit(circuit_id, RetireReason::Age).await;
-                            
+
                             // Update rotation info
                             {
                                 let mut info_guard = rotation_info.write().await;
                                 info_guard.remove(&circuit_id);
-                                
+
                                 let new_info = RotationInfo::new(new_circuit_id, &policy);
                                 info_guard.insert(new_circuit_id, new_info);
                             }
-                            
+
                             // Register with health monitor
                             health_monitor.register_circuit(new_circuit_id).await;
-                            
+
                             if let Some(ref sender) = event_sender {
-                                let _ = sender.send(RotationEvent::RotationCompleted {
-                                    old_circuit_id: circuit_id,
-                                    new_circuit_id,
-                                    trigger,
-                                }).await;
+                                let _ = sender
+                                    .send(RotationEvent::RotationCompleted {
+                                        old_circuit_id: circuit_id,
+                                        new_circuit_id,
+                                        trigger,
+                                    })
+                                    .await;
                             }
-                            
+
                             info!(
                                 old_circuit_id = circuit_id,
-                                new_circuit_id,
-                                "Background rotation completed"
+                                new_circuit_id, "Background rotation completed"
                             );
                         }
                         Err(e) => {
@@ -576,15 +589,17 @@ impl CircuitRotator {
                                     info.rotation_in_progress = false;
                                 }
                             }
-                            
+
                             if let Some(ref sender) = event_sender {
-                                let _ = sender.send(RotationEvent::RotationFailed {
-                                    circuit_id,
-                                    trigger,
-                                    error: e.to_string(),
-                                }).await;
+                                let _ = sender
+                                    .send(RotationEvent::RotationFailed {
+                                        circuit_id,
+                                        trigger,
+                                        error: e.to_string(),
+                                    })
+                                    .await;
                             }
-                            
+
                             warn!(
                                 circuit_id,
                                 error = %e,
@@ -593,7 +608,7 @@ impl CircuitRotator {
                         }
                     }
                 }
-                
+
                 trace!("Rotation check cycle completed");
             }
         });
@@ -638,7 +653,7 @@ fn add_jitter(duration: Duration, jitter_percent: u8) -> Duration {
     if jitter_percent == 0 {
         return duration;
     }
-    
+
     let jitter_factor = 1.0 + (rand::random::<f64>() * jitter_percent as f64 / 100.0);
     duration.mul_f64(jitter_factor)
 }
@@ -657,7 +672,7 @@ mod tests {
     fn test_rotation_info_new() {
         let policy = RotationPolicy::default();
         let info = RotationInfo::new(1, &policy);
-        
+
         assert_eq!(info.circuit_id, 1);
         assert_eq!(info.rotation_count, 0);
         assert!(!info.rotation_in_progress);
@@ -671,14 +686,14 @@ mod tests {
             ..Default::default()
         };
         let mut info = RotationInfo::new(1, &policy);
-        
+
         // Should not be due immediately
         assert!(!info.is_rotation_due());
-        
+
         // Set rotation time to now
         info.rotate_at = Instant::now() - Duration::from_secs(1);
         assert!(info.is_rotation_due());
-        
+
         // Should not be due if rotation in progress
         info.rotation_in_progress = true;
         assert!(!info.is_rotation_due());
@@ -688,7 +703,7 @@ mod tests {
     fn test_rotation_info_age() {
         let policy = RotationPolicy::default();
         let info = RotationInfo::new(1, &policy);
-        
+
         // Age should be very small
         assert!(info.age() < Duration::from_secs(1));
     }
@@ -696,7 +711,7 @@ mod tests {
     #[test]
     fn test_rotation_policy_default() {
         let policy = RotationPolicy::default();
-        
+
         assert!(policy.enable_time_rotation);
         assert!(policy.enable_usage_rotation);
         assert!(policy.enable_connection_rotation);
@@ -707,11 +722,11 @@ mod tests {
     #[test]
     fn test_add_jitter() {
         let base = Duration::from_secs(60);
-        
+
         // With 0% jitter, should be same
         let no_jitter = add_jitter(base, 0);
         assert_eq!(no_jitter, base);
-        
+
         // With jitter, should be >= base
         let with_jitter = add_jitter(base, 10);
         assert!(with_jitter >= base);
@@ -722,7 +737,7 @@ mod tests {
     async fn test_rotation_statistics() {
         let policy = RotationPolicy::default();
         let health_monitor = Arc::new(CircuitHealthMonitor::new());
-        
+
         // We need to create a mock pool for testing
         // For now, just test the statistics struct
         let stats = RotationStatistics {
@@ -731,7 +746,7 @@ mod tests {
             in_progress_rotations: 1,
             total_rotations_completed: 50,
         };
-        
+
         assert_eq!(stats.total_circuits, 10);
         assert_eq!(stats.pending_rotations, 2);
     }

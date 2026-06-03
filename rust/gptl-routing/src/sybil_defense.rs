@@ -149,33 +149,37 @@ impl SybilShield {
             entries: HashMap::new(),
             min_reputation: 0.5,
         }));
-        
+
         let detection_engine = Arc::new(RwLock::new(SybilDetector {
             heuristics: vec![
                 SybilHeuristic::SameSubnet { prefix_len: 24 },
-                SybilHeuristic::CoordinatedBehavior { window: Duration::from_secs(3600) },
+                SybilHeuristic::CoordinatedBehavior {
+                    window: Duration::from_secs(3600),
+                },
                 SybilHeuristic::BandwidthInflation { threshold: 2.0 },
             ],
             sybil_groups: Vec::new(),
         }));
-        
+
         let stake_verifier = Arc::new(RwLock::new(StakeVerifier {
             stake_requirements: [
                 (RelayType::Guard, 1000),
                 (RelayType::Middle, 500),
                 (RelayType::Exit, 2000),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             verified_stakes: HashMap::new(),
         }));
-        
+
         let diversity_checker = Arc::new(RwLock::new(DiversityChecker {
             min_as_diversity: 3,
             min_country_diversity: 2,
             as_cache: HashMap::new(),
         }));
-        
+
         let blocked_relays = Arc::new(RwLock::new(HashSet::new()));
-        
+
         Self {
             config,
             reputation_db,
@@ -191,16 +195,16 @@ impl SybilShield {
         // Start periodic Sybil scanning
         let engine = self.detection_engine.clone();
         let blocked = self.blocked_relays.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3600));
             loop {
                 interval.tick().await;
-                
+
                 // Run detection
                 let detector = engine.write().await;
                 // Detection logic here
-                
+
                 // Block detected Sybils
                 for group in &detector.sybil_groups {
                     if group.confidence > 0.9 {
@@ -212,7 +216,7 @@ impl SybilShield {
                 }
             }
         });
-        
+
         Ok(())
     }
 
@@ -225,7 +229,7 @@ impl SybilShield {
                 return Ok(false);
             }
         }
-        
+
         // Check reputation
         {
             let db = self.reputation_db.read().await;
@@ -235,7 +239,7 @@ impl SybilShield {
                 }
             }
         }
-        
+
         // Check economic stake
         {
             let verifier = self.stake_verifier.read().await;
@@ -243,7 +247,7 @@ impl SybilShield {
                 // No stake - additional verification needed
             }
         }
-        
+
         // Check for Sybil patterns
         {
             let engine = self.detection_engine.read().await;
@@ -253,7 +257,7 @@ impl SybilShield {
                 }
             }
         }
-        
+
         Ok(true)
     }
 
@@ -262,15 +266,20 @@ impl SybilShield {
         // Verify stake
         {
             let verifier = self.stake_verifier.read().await;
-            let required = verifier.stake_requirements.get(&info.relay_type).copied().unwrap_or(0);
-            
+            let required = verifier
+                .stake_requirements
+                .get(&info.relay_type)
+                .copied()
+                .unwrap_or(0);
+
             if info.stake_amount < required {
-                return Err(RoutingError::ResourceAllocationFailed(
-                    format!("Insufficient stake: {} < {}", info.stake_amount, required)
-                ));
+                return Err(RoutingError::ResourceAllocationFailed(format!(
+                    "Insufficient stake: {} < {}",
+                    info.stake_amount, required
+                )));
             }
         }
-        
+
         // Check geographic diversity
         {
             let checker = self.diversity_checker.read().await;
@@ -278,28 +287,31 @@ impl SybilShield {
                 // Verify diversity requirements
             }
         }
-        
+
         // Add to reputation database
         {
             let mut db = self.reputation_db.write().await;
-            db.entries.insert(info.identity.clone(), ReputationEntry {
-                identity: info.identity,
-                score: 0.5, // Neutral starting score
-                successes: 0,
-                failures: 0,
-                first_seen: Instant::now(),
-                last_update: Instant::now(),
-                flags: Vec::new(),
-            });
+            db.entries.insert(
+                info.identity.clone(),
+                ReputationEntry {
+                    identity: info.identity,
+                    score: 0.5, // Neutral starting score
+                    successes: 0,
+                    failures: 0,
+                    first_seen: Instant::now(),
+                    last_update: Instant::now(),
+                    flags: Vec::new(),
+                },
+            );
         }
-        
+
         Ok(())
     }
 
     /// Report relay behavior
     pub async fn report_behavior(&self, identity: &str, behavior: RelayBehavior) {
         let mut db = self.reputation_db.write().await;
-        
+
         if let Some(entry) = db.entries.get_mut(identity) {
             match behavior {
                 RelayBehavior::Success => {
@@ -339,13 +351,13 @@ impl ReputationDB {
     fn age_based_reputation(&self, entry: &ReputationEntry) -> f64 {
         let age = entry.first_seen.elapsed().as_secs();
         let age_factor = (age as f64 / (30 * 24 * 3600) as f64).min(1.0); // Max after 30 days
-        
+
         let success_rate = if entry.successes + entry.failures > 0 {
             entry.successes as f64 / (entry.successes + entry.failures) as f64
         } else {
             0.5
         };
-        
+
         (entry.score * 0.3 + success_rate * 0.4 + age_factor * 0.3).min(1.0)
     }
 }
@@ -359,11 +371,15 @@ impl SybilDetector {
         for relay in relays {
             if let IpAddr::V4(v4) = relay.address {
                 let subnet = Self::extract_subnet(v4, prefix_len);
-                groups.entry(subnet).or_default().push(relay.identity.clone());
+                groups
+                    .entry(subnet)
+                    .or_default()
+                    .push(relay.identity.clone());
             }
         }
 
-        groups.into_iter()
+        groups
+            .into_iter()
             .filter(|(_, members)| members.len() > 2)
             .map(|(subnet, members)| SybilGroup {
                 group_id: format!("subnet-{}/{}", subnet, prefix_len),
@@ -401,12 +417,14 @@ impl SybilDetector {
                 relay.fingerprint.len()
             );
 
-            behavior_groups.entry(fingerprint)
+            behavior_groups
+                .entry(fingerprint)
                 .or_default()
                 .push(relay.identity.clone());
         }
 
-        behavior_groups.into_iter()
+        behavior_groups
+            .into_iter()
             .filter(|(_, members)| members.len() > 3)
             .map(|(pattern, members)| SybilGroup {
                 group_id: format!("behavior-{}", pattern),
@@ -430,10 +448,12 @@ impl SybilDetector {
 
                 // High similarity indicates potential Sybil relationship
                 if similarity > 0.8 {
-                    adjacency.entry(relays[i].identity.clone())
+                    adjacency
+                        .entry(relays[i].identity.clone())
                         .or_default()
                         .insert(relays[j].identity.clone());
-                    adjacency.entry(relays[j].identity.clone())
+                    adjacency
+                        .entry(relays[j].identity.clone())
                         .or_default()
                         .insert(relays[i].identity.clone());
                 }
@@ -449,11 +469,8 @@ impl SybilDetector {
                 continue;
             }
 
-            let component = Self::find_connected_component(
-                &relay.identity,
-                &adjacency,
-                &mut visited
-            );
+            let component =
+                Self::find_connected_component(&relay.identity, &adjacency, &mut visited);
 
             // Groups with 4+ members and high density are suspicious
             if component.len() >= 4 {
@@ -557,9 +574,7 @@ impl SybilDetector {
         let mut edge_count = 0;
         for node in nodes {
             if let Some(neighbors) = adjacency.get(node) {
-                edge_count += neighbors.iter()
-                    .filter(|n| nodes.contains(n))
-                    .count();
+                edge_count += neighbors.iter().filter(|n| nodes.contains(n)).count();
             }
         }
 
@@ -740,7 +755,8 @@ impl TrustNetwork {
 
     /// Add trust edge
     pub fn add_trust(&mut self, from: &str, to: &str) {
-        self.edges.entry(from.to_string())
+        self.edges
+            .entry(from.to_string())
             .or_default()
             .insert(to.to_string());
     }
@@ -748,10 +764,12 @@ impl TrustNetwork {
     /// Calculate trust score
     pub fn calculate_trust(&self, identity: &str) -> f64 {
         // Simple trust: number of incoming edges
-        let incoming = self.edges.values()
+        let incoming = self
+            .edges
+            .values()
             .filter(|set| set.contains(identity))
             .count();
-        
+
         (incoming as f64 / self.edges.len().max(1) as f64).min(1.0)
     }
 }
@@ -930,7 +948,9 @@ mod tests {
         assert!(shield.register_relay(relay_info).await.is_ok());
 
         // Report successful behavior
-        shield.report_behavior("test-relay", RelayBehavior::Success).await;
+        shield
+            .report_behavior("test-relay", RelayBehavior::Success)
+            .await;
 
         // Check reputation increased
         let reputation = shield.get_reputation("test-relay").await;
@@ -999,7 +1019,10 @@ mod tests {
             )
             .await;
 
-        assert!(measured > 0, "loopback probe must observe nonzero throughput");
+        assert!(
+            measured > 0,
+            "loopback probe must observe nonzero throughput"
+        );
         // Loopback can EASILY exceed any reasonable claim; we just want
         // a real (non-zero, non-stub) measurement here.
         let recorded = authority
@@ -1026,7 +1049,10 @@ mod tests {
                 Duration::from_millis(500),
             )
             .await;
-        assert_eq!(measured, 0, "unreachable target must produce zero measurement");
+        assert_eq!(
+            measured, 0,
+            "unreachable target must produce zero measurement"
+        );
         // And `check_inflation` should fire because claimed/measured.max(1) > threshold.
         assert!(
             authority.check_inflation("dead-relay", 2.0),
@@ -1077,8 +1103,10 @@ mod tests {
         };
 
         let result = shield.register_relay(info).await;
-        assert!(result.is_err(),
-            "relay with stake below threshold must be rejected");
+        assert!(
+            result.is_err(),
+            "relay with stake below threshold must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -1098,8 +1126,10 @@ mod tests {
         };
 
         let result = shield.register_relay(info).await;
-        assert!(result.is_ok(),
-            "relay with stake exactly at threshold must be accepted");
+        assert!(
+            result.is_ok(),
+            "relay with stake exactly at threshold must be accepted"
+        );
     }
 
     #[tokio::test]
@@ -1121,14 +1151,19 @@ mod tests {
 
         // Report 10 failures — score should decrease
         for _ in 0..10 {
-            shield.report_behavior("failing-relay", RelayBehavior::Failure).await;
+            shield
+                .report_behavior("failing-relay", RelayBehavior::Failure)
+                .await;
         }
 
         let reputation = shield.get_reputation("failing-relay").await.unwrap();
         // Starting score is 0.5; each failure multiplies by 0.9:
         // 0.5 * 0.9^10 ≈ 0.174 — well below 0.5 threshold
-        assert!(reputation < 0.5,
-            "reputation must decay below threshold after 10 consecutive failures, got {}", reputation);
+        assert!(
+            reputation < 0.5,
+            "reputation must decay below threshold after 10 consecutive failures, got {}",
+            reputation
+        );
     }
 
     #[tokio::test]
@@ -1149,13 +1184,18 @@ mod tests {
 
         // Report several suspicious behaviors — score should drop
         for _ in 0..5 {
-            shield.report_behavior("suspicious-relay", RelayBehavior::Suspicious).await;
+            shield
+                .report_behavior("suspicious-relay", RelayBehavior::Suspicious)
+                .await;
         }
 
         let reputation = shield.get_reputation("suspicious-relay").await.unwrap();
         // Starting score 0.5 * 0.8^5 ≈ 0.164 — below min_reputation (0.5)
-        assert!(reputation < 0.5,
-            "repeated suspicious reports must reduce score below threshold, got {}", reputation);
+        assert!(
+            reputation < 0.5,
+            "repeated suspicious reports must reduce score below threshold, got {}",
+            reputation
+        );
     }
 
     #[tokio::test]
@@ -1209,9 +1249,15 @@ mod tests {
 
         // All members with confidence > 0.8 should fail verification
         for i in 0..3_u8 {
-            let result = shield.verify_relay(&format!("sybil-member-{}", i)).await.unwrap();
-            assert!(!result,
-                "sybil-member-{} with group confidence 0.95 must fail verification", i);
+            let result = shield
+                .verify_relay(&format!("sybil-member-{}", i))
+                .await
+                .unwrap();
+            assert!(
+                !result,
+                "sybil-member-{} with group confidence 0.95 must fail verification",
+                i
+            );
         }
     }
 }

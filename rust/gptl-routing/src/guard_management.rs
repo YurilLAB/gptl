@@ -4,12 +4,12 @@
 //! including vanguards, layered guards, and rotation policies.
 
 use super::{GuardInfo, GuardLayer, RoutingConfig, RoutingError};
+use rand::seq::SliceRandom;
+use rand::Rng;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use rand::seq::SliceRandom;
-use rand::Rng;
 
 /// Guard manager for secure guard selection and rotation
 pub struct GuardManager {
@@ -67,16 +67,16 @@ impl GuardManager {
         let first_layer = Arc::new(RwLock::new(Vec::new()));
         let second_layer = Arc::new(RwLock::new(Vec::new()));
         let third_layer = Arc::new(RwLock::new(Vec::new()));
-        
+
         let rotation_scheduler = Arc::new(RwLock::new(RotationScheduler {
             first_layer_interval: Duration::from_secs(90 * 24 * 60 * 60), // 90 days
             second_layer_interval: Duration::from_secs(30 * 24 * 60 * 60), // 30 days
             third_layer_interval: Duration::from_secs(7 * 24 * 60 * 60),  // 7 days
             last_rotations: HashMap::new(),
         }));
-        
+
         let usage_stats = Arc::new(RwLock::new(HashMap::new()));
-        
+
         Self {
             config,
             first_layer,
@@ -94,15 +94,15 @@ impl GuardManager {
         let first_layer = self.first_layer.clone();
         let second_layer = self.second_layer.clone();
         let third_layer = self.third_layer.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(3600)); // Check hourly
             loop {
                 interval.tick().await;
-                
+
                 let mut sched = scheduler.write().await;
                 let now = Instant::now();
-                
+
                 // Check first layer
                 if let Some(last) = sched.last_rotations.get(&GuardLayer::First) {
                     if now.duration_since(*last) > sched.first_layer_interval {
@@ -111,7 +111,7 @@ impl GuardManager {
                         sched.last_rotations.insert(GuardLayer::First, now);
                     }
                 }
-                
+
                 // Check second layer
                 if let Some(last) = sched.last_rotations.get(&GuardLayer::Second) {
                     if now.duration_since(*last) > sched.second_layer_interval {
@@ -120,7 +120,7 @@ impl GuardManager {
                         sched.last_rotations.insert(GuardLayer::Second, now);
                     }
                 }
-                
+
                 // Check third layer
                 if let Some(last) = sched.last_rotations.get(&GuardLayer::Third) {
                     if now.duration_since(*last) > sched.third_layer_interval {
@@ -131,22 +131,22 @@ impl GuardManager {
                 }
             }
         });
-        
+
         Ok(())
     }
 
     /// Select guards for circuit
     pub async fn select_guards(&self) -> Result<Vec<GuardInfo>, RoutingError> {
         let config = self.config.read().await;
-        
+
         let num_guards = match config.security_level {
             super::SecurityLevel::Standard => 1,
             super::SecurityLevel::Enhanced => 2,
             super::SecurityLevel::Maximum => 3,
         };
-        
+
         let mut guards = Vec::new();
-        
+
         // Select from first layer
         {
             let first = self.first_layer.read().await;
@@ -154,7 +154,7 @@ impl GuardManager {
                 guards.push(guard);
             }
         }
-        
+
         // Select from second layer (vanguards) for enhanced/maximum security
         if num_guards >= 2 {
             let second = self.second_layer.read().await;
@@ -162,7 +162,7 @@ impl GuardManager {
                 guards.push(guard);
             }
         }
-        
+
         // Select from third layer for maximum security
         if num_guards >= 3 {
             let third = self.third_layer.read().await;
@@ -170,13 +170,13 @@ impl GuardManager {
                 guards.push(guard);
             }
         }
-        
+
         if guards.is_empty() {
             return Err(RoutingError::GuardSelectionFailed(
-                "No guards available".to_string()
+                "No guards available".to_string(),
             ));
         }
-        
+
         Ok(guards)
     }
 
@@ -185,38 +185,32 @@ impl GuardManager {
         if layer.is_empty() {
             return None;
         }
-        
+
         let mut rng = rand::thread_rng();
-        
+
         // Filter out guards with low reputation
-        let candidates: Vec<_> = layer.iter()
-            .filter(|g| g.reputation > 0.5)
-            .collect();
-        
+        let candidates: Vec<_> = layer.iter().filter(|g| g.reputation > 0.5).collect();
+
         if candidates.is_empty() {
             return None;
         }
-        
+
         // Bandwidth-weighted random selection
         let total_bandwidth: u64 = candidates.iter().map(|g| g.info.bandwidth).sum();
         let mut choice = rng.gen_range(0..total_bandwidth);
-        
+
         for guard in &candidates {
             if choice < guard.info.bandwidth {
                 return Some(guard.info.clone());
             }
             choice -= guard.info.bandwidth;
         }
-        
+
         candidates.choose(&mut rng).map(|g| g.info.clone())
     }
 
     /// Add guard to layer
-    pub async fn add_guard(
-        &self,
-        info: GuardInfo,
-        layer: GuardLayer,
-    ) -> Result<(), RoutingError> {
+    pub async fn add_guard(&self, info: GuardInfo, layer: GuardLayer) -> Result<(), RoutingError> {
         let entry = GuardEntry {
             info,
             added_at: Instant::now(),
@@ -225,7 +219,7 @@ impl GuardManager {
             failure_count: 0,
             reputation: 1.0,
         };
-        
+
         match layer {
             GuardLayer::First => {
                 let mut guards = self.first_layer.write().await;
@@ -240,7 +234,7 @@ impl GuardManager {
                 guards.push(entry);
             }
         }
-        
+
         Ok(())
     }
 
@@ -253,9 +247,9 @@ impl GuardManager {
             GuardLayer::Second => Duration::from_secs(30 * 24 * 60 * 60),
             GuardLayer::Third => Duration::from_secs(7 * 24 * 60 * 60),
         };
-        
+
         layer.retain(|g| now.duration_since(g.added_at) < max_age);
-        
+
         // Remove low-reputation guards
         layer.retain(|g| g.reputation > 0.3);
     }
@@ -266,7 +260,7 @@ impl GuardManager {
         if let Some(stat) = stats.get_mut(guard_id) {
             stat.failed_circuits += 1;
         }
-        
+
         // Update reputation in all layers
         self.update_reputation(guard_id, false).await;
     }
@@ -277,7 +271,7 @@ impl GuardManager {
         let stat = stats.entry(guard_id.to_string()).or_default();
         stat.total_circuits += 1;
         stat.bytes_transferred += bytes;
-        
+
         self.update_reputation(guard_id, true).await;
     }
 
@@ -296,7 +290,7 @@ impl GuardManager {
                 }
             }
         };
-        
+
         update_fn(&mut *self.first_layer.write().await);
         update_fn(&mut *self.second_layer.write().await);
         update_fn(&mut *self.third_layer.write().await);
@@ -334,14 +328,14 @@ impl PredecessorDefense {
     /// Record circuit construction
     pub async fn record_construction(&self, first: String, second: String, third: String) {
         let mut history = self.construction_history.write().await;
-        
+
         history.push_back(CircuitConstruction {
             timestamp: Instant::now(),
             first_hop: first,
             second_hop: second,
             third_hop: third,
         });
-        
+
         // Keep only last 1000 constructions
         while history.len() > 1000 {
             history.pop_front();
@@ -351,13 +345,15 @@ impl PredecessorDefense {
     /// Check for predecessor attack patterns
     pub async fn detect_attack(&self) -> Option<PredecessorAlert> {
         let history = self.construction_history.read().await;
-        
+
         // Count first hop frequency
         let mut first_hop_counts: HashMap<String, usize> = HashMap::new();
         for construction in history.iter() {
-            *first_hop_counts.entry(construction.first_hop.clone()).or_insert(0) += 1;
+            *first_hop_counts
+                .entry(construction.first_hop.clone())
+                .or_insert(0) += 1;
         }
-        
+
         // Check for suspicious concentration
         let total = history.len() as f64;
         for (hop, count) in first_hop_counts {
@@ -370,7 +366,7 @@ impl PredecessorDefense {
                 });
             }
         }
-        
+
         None
     }
 }
@@ -415,20 +411,22 @@ impl GuardDoSProtection {
     pub async fn record_attempt(&self, guard_id: &str) -> bool {
         let mut attempts = self.connection_attempts.write().await;
         let now = Instant::now();
-        
-        let entry = attempts.entry(guard_id.to_string()).or_insert_with(Vec::new);
+
+        let entry = attempts
+            .entry(guard_id.to_string())
+            .or_insert_with(Vec::new);
         entry.push(now);
-        
+
         // Remove old attempts (older than 1 minute)
         entry.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
-        
+
         // Check if threshold exceeded
         if entry.len() as u64 > self.dos_threshold {
             let mut blocked = self.blocked_guards.write().await;
             blocked.insert(guard_id.to_string());
             return false; // Block this attempt
         }
-        
+
         true // Allow this attempt
     }
 
@@ -447,15 +445,21 @@ mod tests {
     async fn test_guard_manager() {
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
         let manager = GuardManager::new(config);
-        
+
         // Add a guard
-        manager.add_guard(GuardInfo {
-            identity: "guard1".to_string(),
-            address: "192.168.1.1:9001".to_string(),
-            bandwidth: 1000000,
-            layer: GuardLayer::First,
-        }, GuardLayer::First).await.unwrap();
-        
+        manager
+            .add_guard(
+                GuardInfo {
+                    identity: "guard1".to_string(),
+                    address: "192.168.1.1:9001".to_string(),
+                    bandwidth: 1000000,
+                    layer: GuardLayer::First,
+                },
+                GuardLayer::First,
+            )
+            .await
+            .unwrap();
+
         // Should be able to select guards
         let guards = manager.select_guards().await;
         assert!(guards.is_ok());
@@ -464,16 +468,18 @@ mod tests {
     #[tokio::test]
     async fn test_predecessor_defense() {
         let defense = PredecessorDefense::new(0.5);
-        
+
         // Record some constructions
         for _ in 0..10 {
-            defense.record_construction(
-                "guard1".to_string(),
-                "relay2".to_string(),
-                "relay3".to_string(),
-            ).await;
+            defense
+                .record_construction(
+                    "guard1".to_string(),
+                    "relay2".to_string(),
+                    "relay3".to_string(),
+                )
+                .await;
         }
-        
+
         // Should detect concentration
         let alert = defense.detect_attack().await;
         assert!(alert.is_some());

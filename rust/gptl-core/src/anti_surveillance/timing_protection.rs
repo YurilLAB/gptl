@@ -4,14 +4,14 @@
 //! batching, and constant-rate transmission to prevent timing correlation attacks.
 
 use super::{AntiSurveillanceConfig, AntiSurveillanceError, Cell};
+use rand::rngs::StdRng;
+use rand::Rng;
+use rand::SeedableRng;
+use rand_distr::{Distribution, Normal, Poisson};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand_distr::{Distribution, Normal, Poisson};
 
 /// Timing shield for protecting against timing analysis
 pub struct TimingShield {
@@ -36,7 +36,7 @@ impl TimingShield {
     pub fn new(config: Arc<RwLock<AntiSurveillanceConfig>>) -> Self {
         let reorder_buffer = Arc::new(RwLock::new(VecDeque::new()));
         let batch_buffer = Arc::new(RwLock::new(Vec::new()));
-        
+
         Self {
             config,
             reorder_buffer,
@@ -50,9 +50,12 @@ impl TimingShield {
     }
 
     /// Protect timing of outgoing cells
-    pub async fn protect_timing(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    pub async fn protect_timing(
+        &self,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let config = self.config.read().await;
-        
+
         match config.level {
             super::SecurityLevel::Standard => {
                 // Basic jitter only
@@ -61,35 +64,44 @@ impl TimingShield {
             super::SecurityLevel::Enhanced => {
                 // Jitter + light batching
                 let jittered = self.add_jitter(cells, Duration::from_millis(20)).await?;
-                self.batch_cells(jittered, 5, Duration::from_millis(50)).await
+                self.batch_cells(jittered, 5, Duration::from_millis(50))
+                    .await
             }
             super::SecurityLevel::Maximum => {
                 // Full protection: jitter + batching + reordering
-                let jittered = self.add_jitter(cells, Duration::from_millis(config.max_jitter_ms)).await?;
-                let batched = self.batch_cells(jittered, config.batch_size, Duration::from_millis(100)).await?;
+                let jittered = self
+                    .add_jitter(cells, Duration::from_millis(config.max_jitter_ms))
+                    .await?;
+                let batched = self
+                    .batch_cells(jittered, config.batch_size, Duration::from_millis(100))
+                    .await?;
                 self.reorder_cells(batched, 20).await
             }
         }
     }
 
     /// Add random jitter to cell timing
-    async fn add_jitter(&self, cells: Vec<Cell>, max_jitter: Duration) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn add_jitter(
+        &self,
+        cells: Vec<Cell>,
+        max_jitter: Duration,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
         let mut rng = StdRng::from_entropy();
-        
+
         // Use Poisson distribution for jitter (more realistic)
         let jitter_dist = Poisson::new(max_jitter.as_millis() as f64 / 2.0)
             .unwrap_or_else(|_| Poisson::new(10.0).unwrap());
-        
+
         for cell in cells {
             // Sample jitter from distribution
             let jitter_ms: u64 = jitter_dist.sample(&mut rng) as u64;
             let jitter = Duration::from_millis(jitter_ms.min(max_jitter.as_millis() as u64));
-            
+
             tokio::time::sleep(jitter).await;
             output.push(cell);
         }
-        
+
         Ok(output)
     }
 
@@ -102,10 +114,10 @@ impl TimingShield {
     ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut buffer = self.batch_buffer.write().await;
         let mut output = Vec::new();
-        
+
         for cell in cells {
             buffer.push(cell);
-            
+
             if buffer.len() >= batch_size {
                 // Shuffle batch before output
                 let mut batch: Vec<_> = buffer.drain(..).collect();
@@ -113,7 +125,7 @@ impl TimingShield {
                 output.extend(batch);
             }
         }
-        
+
         // Handle remaining cells after timeout
         if !buffer.is_empty() {
             tokio::time::sleep(max_wait).await;
@@ -121,26 +133,30 @@ impl TimingShield {
             self.shuffle_batch(&mut batch).await;
             output.extend(batch);
         }
-        
+
         Ok(output)
     }
 
     /// Reorder cells in buffer
-    async fn reorder_cells(&self, cells: Vec<Cell>, buffer_size: usize) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn reorder_cells(
+        &self,
+        cells: Vec<Cell>,
+        buffer_size: usize,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut buffer = self.reorder_buffer.write().await;
         let mut output = Vec::new();
-        
+
         for cell in cells {
             // Add to reorder buffer with scheduled time
             let now = Instant::now();
             let scheduled = now + Duration::from_millis(rand::random::<u64>() % 50);
-            
+
             buffer.push_back(TimestampedCell {
                 cell,
                 original_time: now,
                 scheduled_time: scheduled,
             });
-            
+
             // Release cells that are ready
             while let Some(front) = buffer.front() {
                 if front.scheduled_time <= Instant::now() || buffer.len() >= buffer_size {
@@ -152,19 +168,19 @@ impl TimingShield {
                 }
             }
         }
-        
+
         // Flush remaining cells
         while let Some(tc) = buffer.pop_front() {
             output.push(tc.cell);
         }
-        
+
         Ok(output)
     }
 
     /// Shuffle batch randomly
     async fn shuffle_batch(&self, batch: &mut [Cell]) {
         let mut rng = StdRng::from_entropy();
-        
+
         // Fisher-Yates shuffle
         for i in (1..batch.len()).rev() {
             let j = rng.gen_range(0..=i);
@@ -180,12 +196,12 @@ impl TimingShield {
     ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let interval = Duration::from_secs_f64(1.0 / target_rate);
         let mut output = Vec::new();
-        
+
         for cell in cells {
             tokio::time::sleep(interval).await;
             output.push(cell);
         }
-        
+
         Ok(output)
     }
 
@@ -196,13 +212,14 @@ impl TimingShield {
         std_dev_ms: f64,
     ) -> Result<Instant, AntiSurveillanceError> {
         let mut rng = StdRng::from_entropy();
-        
-        let normal = Normal::new(0.0, std_dev_ms)
-            .map_err(|e| AntiSurveillanceError::TimingError(format!("Normal distribution error: {}", e)))?;
-        
+
+        let normal = Normal::new(0.0, std_dev_ms).map_err(|e| {
+            AntiSurveillanceError::TimingError(format!("Normal distribution error: {}", e))
+        })?;
+
         let noise_ms = normal.sample(&mut rng);
         let noise_duration = Duration::from_millis(noise_ms.abs() as u64);
-        
+
         if noise_ms >= 0.0 {
             Ok(timestamp + noise_duration)
         } else {
@@ -303,13 +320,14 @@ impl WatermarkDetector {
         }
 
         // Calculate inter-arrival times
-        let iats: Vec<Duration> = timestamps.windows(2)
+        let iats: Vec<Duration> = timestamps
+            .windows(2)
             .map(|w| w[1].duration_since(w[0]))
             .collect();
 
         // Check for regular patterns (potential watermarks)
         let has_pattern = self.detect_regular_pattern(&iats);
-        
+
         if has_pattern {
             let mut patterns = self.detected_patterns.write().await;
             // Prevent unbounded growth by limiting stored patterns
@@ -321,7 +339,7 @@ impl WatermarkDetector {
             }
             patterns.push(iats);
         }
-        
+
         has_pattern
     }
 
@@ -339,17 +357,17 @@ impl WatermarkDetector {
         });
 
         // Check for periodic pattern
-        let mean_iat: f64 = iats.iter()
-            .map(|d| d.as_secs_f64())
-            .sum::<f64>() / iats.len() as f64;
-        
-        let variance: f64 = iats.iter()
+        let mean_iat: f64 = iats.iter().map(|d| d.as_secs_f64()).sum::<f64>() / iats.len() as f64;
+
+        let variance: f64 = iats
+            .iter()
             .map(|d| {
                 let diff = d.as_secs_f64() - mean_iat;
                 diff * diff
             })
-            .sum::<f64>() / iats.len() as f64;
-        
+            .sum::<f64>()
+            / iats.len() as f64;
+
         let periodic = variance < 0.001; // Low variance indicates periodicity
 
         alternating || periodic
@@ -360,14 +378,14 @@ impl WatermarkDetector {
         // Add random delays to break watermark pattern
         let mut output = Vec::new();
         let mut rng = StdRng::from_entropy();
-        
+
         for cell in cells {
             // Random delay up to 100ms
             let delay = Duration::from_millis(rng.gen_range(0..100));
             tokio::time::sleep(delay).await;
             output.push(cell);
         }
-        
+
         output
     }
 }
@@ -418,9 +436,11 @@ mod tests {
             } else {
                 base.duration_since(noisy).as_millis()
             };
-            assert!(diff_ms < 500,
+            assert!(
+                diff_ms < 500,
                 "Gaussian noise sample {} ms is unexpectedly far from base (>500 ms at 5σ)",
-                diff_ms);
+                diff_ms
+            );
         }
     }
 
@@ -442,13 +462,15 @@ mod tests {
         } else {
             base.duration_since(noisy)
         };
-        assert!(diff <= Duration::from_millis(1),
-            "zero std_dev noise must produce no shift");
+        assert!(
+            diff <= Duration::from_millis(1),
+            "zero std_dev noise must produce no shift"
+        );
     }
 
     #[tokio::test]
     async fn test_batch_cells_exact_batch_size_boundary() {
-        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+        use crate::anti_surveillance::{AntiSurveillanceConfig, Cell, CellCommand, SecurityLevel};
         let mut config = AntiSurveillanceConfig::default();
         config.batch_size = 3;
         config.level = SecurityLevel::Maximum;
@@ -468,9 +490,15 @@ mod tests {
 
         let output = shield.protect_timing(cells).await.unwrap();
         // All 3 cells must come out (no loss)
-        let data_count = output.iter().filter(|c| c.command == CellCommand::Data).count();
-        assert_eq!(data_count, 3,
-            "all {} data cells must survive exactly-batch-size protection", 3);
+        let data_count = output
+            .iter()
+            .filter(|c| c.command == CellCommand::Data)
+            .count();
+        assert_eq!(
+            data_count, 3,
+            "all {} data cells must survive exactly-batch-size protection",
+            3
+        );
     }
 
     #[test]
@@ -493,7 +521,9 @@ mod tests {
             .collect();
 
         let detected = detector.analyze_pattern(timestamps).await;
-        assert!(!detected,
-            "insufficient timestamps (fewer than window_size) must not detect a pattern");
+        assert!(
+            !detected,
+            "insufficient timestamps (fewer than window_size) must not detect a pattern"
+        );
     }
 }

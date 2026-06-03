@@ -5,23 +5,25 @@
 //! - Possession factor: TOTP (RFC 6238) or hardware tokens (FIDO2/WebAuthn)
 //! - Inherence factor: Client certificates (mTLS)
 
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 
-pub mod totp;
-pub mod webauthn;
 pub mod client_cert;
 pub mod password;
+pub mod totp;
+pub mod webauthn;
 
-pub use totp::TotpManager;
-pub use webauthn::WebAuthnManager;
 pub use client_cert::ClientCertVerifier;
 pub use password::PasswordHasher;
+pub use totp::TotpManager;
+pub use webauthn::WebAuthnManager;
 
 #[cfg(feature = "webauthn")]
-pub use webauthn::{RegistrationChallenge, AuthChallenge, RegistrationResult, AuthenticationResult, CredentialInfo};
+pub use webauthn::{
+    AuthChallenge, AuthenticationResult, CredentialInfo, RegistrationChallenge, RegistrationResult,
+};
 
 /// Multi-factor authentication manager
 #[derive(Debug)]
@@ -42,10 +44,7 @@ pub struct MfaAuthenticator {
 
 impl MfaAuthenticator {
     /// Create a new MFA authenticator
-    pub fn new(
-        password_hasher: PasswordHasher,
-        totp_manager: TotpManager,
-    ) -> Self {
+    pub fn new(password_hasher: PasswordHasher, totp_manager: TotpManager) -> Self {
         Self {
             password_hasher,
             totp_manager,
@@ -69,11 +68,7 @@ impl MfaAuthenticator {
     }
 
     /// Configure MFA for a user
-    pub async fn configure_user(
-        &self,
-        user_id: &str,
-        config: MfaConfig,
-    ) -> crate::Result<()> {
+    pub async fn configure_user(&self, user_id: &str, config: MfaConfig) -> crate::Result<()> {
         let mut configs = self.user_configs.write().await;
         configs.insert(user_id.to_string(), config);
         Ok(())
@@ -87,14 +82,16 @@ impl MfaAuthenticator {
     ) -> crate::Result<AuthStep> {
         // Verify password first
         let configs = self.user_configs.read().await;
-        let config = configs.get(username)
-            .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                "User not found".to_string()
-            ))?;
+        let config = configs
+            .get(username)
+            .ok_or_else(|| crate::RelayError::AuthenticationFailed("User not found".to_string()))?;
 
-        if !self.password_hasher.verify(password, &config.password_hash)? {
+        if !self
+            .password_hasher
+            .verify(password, &config.password_hash)?
+        {
             return Err(crate::RelayError::AuthenticationFailed(
-                "Invalid password".to_string()
+                "Invalid password".to_string(),
             ));
         }
 
@@ -109,11 +106,17 @@ impl MfaAuthenticator {
 
         let auth_id = uuid::Uuid::new_v4().to_string();
         let next_step = if config.totp_enabled {
-            AuthStep::TotpRequired { auth_id: auth_id.clone() }
+            AuthStep::TotpRequired {
+                auth_id: auth_id.clone(),
+            }
         } else if config.webauthn_enabled && self.webauthn_manager.is_some() {
-            AuthStep::WebAuthnChallenge { auth_id: auth_id.clone() }
+            AuthStep::WebAuthnChallenge {
+                auth_id: auth_id.clone(),
+            }
         } else {
-            AuthStep::Complete { user_id: username.to_string() }
+            AuthStep::Complete {
+                user_id: username.to_string(),
+            }
         };
 
         let mut pending_auths = self.pending_auths.write().await;
@@ -123,41 +126,39 @@ impl MfaAuthenticator {
     }
 
     /// Continue authentication with TOTP (Step 2)
-    pub async fn verify_totp(
-        &self,
-        auth_id: &str,
-        code: &str,
-    ) -> crate::Result<AuthStep> {
+    pub async fn verify_totp(&self, auth_id: &str, code: &str) -> crate::Result<AuthStep> {
         let mut pending_auths = self.pending_auths.write().await;
-        
-        let pending = pending_auths.get(auth_id)
-            .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                "Invalid or expired authentication session".to_string()
-            ))?;
+
+        let pending = pending_auths.get(auth_id).ok_or_else(|| {
+            crate::RelayError::AuthenticationFailed(
+                "Invalid or expired authentication session".to_string(),
+            )
+        })?;
 
         if pending.expires_at < Utc::now() {
             pending_auths.remove(auth_id);
             return Err(crate::RelayError::AuthenticationFailed(
-                "Authentication session expired".to_string()
+                "Authentication session expired".to_string(),
             ));
         }
 
         let configs = self.user_configs.read().await;
-        let config = configs.get(&pending.user_id)
-            .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                "User configuration not found".to_string()
-            ))?;
+        let config = configs.get(&pending.user_id).ok_or_else(|| {
+            crate::RelayError::AuthenticationFailed("User configuration not found".to_string())
+        })?;
 
         // Verify TOTP code
         if !self.totp_manager.verify(&config.totp_secret, code)? {
             return Err(crate::RelayError::AuthenticationFailed(
-                "Invalid TOTP code".to_string()
+                "Invalid TOTP code".to_string(),
             ));
         }
 
         // Check if WebAuthn is also required
         let next_step = if config.webauthn_enabled && self.webauthn_manager.is_some() {
-            AuthStep::WebAuthnChallenge { auth_id: auth_id.to_string() }
+            AuthStep::WebAuthnChallenge {
+                auth_id: auth_id.to_string(),
+            }
         } else {
             let user_id = pending.user_id.clone();
             pending_auths.remove(auth_id);
@@ -172,10 +173,11 @@ impl MfaAuthenticator {
         &self,
         certificate: &client_cert::ClientCertificate,
     ) -> crate::Result<String> {
-        let verifier = self.cert_verifier.as_ref()
-            .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                "Client certificate authentication not configured".to_string()
-            ))?;
+        let verifier = self.cert_verifier.as_ref().ok_or_else(|| {
+            crate::RelayError::AuthenticationFailed(
+                "Client certificate authentication not configured".to_string(),
+            )
+        })?;
 
         verifier.verify_certificate(certificate).await
     }
@@ -273,7 +275,7 @@ mod tests {
         assert_eq!(AuthMethod::Password.factor_count(), 1);
         assert_eq!(AuthMethod::PasswordTotp.factor_count(), 2);
         assert_eq!(AuthMethod::PasswordTotpWebAuthn.factor_count(), 3);
-        
+
         assert!(!AuthMethod::Password.is_mfa());
         assert!(AuthMethod::PasswordTotp.is_mfa());
         assert!(AuthMethod::PasswordWebAuthn.is_mfa());

@@ -5,14 +5,14 @@
 //! and advanced obfuscation techniques.
 
 use super::{AntiSurveillanceConfig, AntiSurveillanceError, Cell};
+use rand::rngs::StdRng;
+use rand::seq::{IteratorRandom, SliceRandom};
+use rand::Rng;
+use rand::SeedableRng;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand::seq::{IteratorRandom, SliceRandom};
 
 /// Flow correlation defense manager
 pub struct FlowCorrelationDefense {
@@ -74,7 +74,7 @@ impl FlowCorrelationDefense {
             rate: 10000, // 10KB/s cover traffic
             last_gen: Instant::now(),
         }));
-        
+
         Self {
             config,
             flows,
@@ -122,21 +122,28 @@ impl FlowCorrelationDefense {
             }
         }
 
-        flows.insert(flow_id, FlowInfo {
+        flows.insert(
             flow_id,
-            circuits: Vec::new(),
-            start_time: Instant::now(),
-            bytes_transferred: 0,
-        });
+            FlowInfo {
+                flow_id,
+                circuits: Vec::new(),
+                start_time: Instant::now(),
+                bytes_transferred: 0,
+            },
+        );
     }
 
     /// Apply flow correlation defenses
-    pub async fn defend(&self, flow_id: u32, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    pub async fn defend(
+        &self,
+        flow_id: u32,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let config = self.config.read().await;
-        
+
         // Update flow statistics
         self.update_flow_stats(flow_id, &cells).await;
-        
+
         match config.level {
             super::SecurityLevel::Standard => {
                 // Basic defense: random path selection
@@ -157,17 +164,21 @@ impl FlowCorrelationDefense {
     }
 
     /// Split cells across multiple paths
-    async fn split_across_paths(&self, cells: Vec<Cell>, num_paths: usize) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn split_across_paths(
+        &self,
+        cells: Vec<Cell>,
+        num_paths: usize,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut path_cells: Vec<Vec<Cell>> = vec![Vec::new(); num_paths];
         let mut rng = StdRng::from_entropy();
-        
+
         // Distribute cells using secret sharing approach
         for cell in cells {
             // Randomly assign to path
             let path_idx = rng.gen_range(0..num_paths);
             path_cells[path_idx].push(cell);
         }
-        
+
         // Add dummy cells to balance paths
         let max_len = path_cells.iter().map(|p| p.len()).max().unwrap_or(0);
         for path in &mut path_cells {
@@ -177,7 +188,7 @@ impl FlowCorrelationDefense {
             // Shuffle each path
             path.shuffle(&mut rng);
         }
-        
+
         // Interleave paths
         let mut output = Vec::new();
         for i in 0..max_len {
@@ -187,44 +198,51 @@ impl FlowCorrelationDefense {
                 }
             }
         }
-        
+
         Ok(output)
     }
 
     /// Add cover traffic to mask flow patterns
-    async fn add_cover_traffic(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn add_cover_traffic(
+        &self,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = cells;
         let mut cover = self.cover_traffic.write().await;
         let now = Instant::now();
-        
+
         // Calculate cover traffic to generate
         let elapsed = now.duration_since(cover.last_gen).as_secs_f64();
         let cover_bytes = (cover.rate as f64 * elapsed) as usize;
-        
+
         if cover_bytes > 0 {
             // Generate cover cells
             let cover_cells_needed = cover_bytes / 509;
-            for _ in 0..cover_cells_needed.min(10) { // Limit burst size
+            for _ in 0..cover_cells_needed.min(10) {
+                // Limit burst size
                 output.push(self.generate_dummy_cell());
             }
             cover.last_gen = now;
         }
-        
+
         Ok(output)
     }
 
     /// Apply advanced flow obfuscation
-    async fn apply_flow_obfuscation(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn apply_flow_obfuscation(
+        &self,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
         let mut rng = StdRng::from_entropy();
-        
+
         // Randomize cell order within windows
         let window_size = 10;
         let mut window = VecDeque::new();
-        
+
         for cell in cells {
             window.push_back(cell);
-            
+
             if window.len() >= window_size {
                 // Shuffle window
                 let mut window_vec: Vec<_> = window.drain(..).collect();
@@ -232,12 +250,12 @@ impl FlowCorrelationDefense {
                 output.extend(window_vec);
             }
         }
-        
+
         // Flush remaining
         let mut remaining: Vec<_> = window.drain(..).collect();
         remaining.shuffle(&mut rng);
         output.extend(remaining);
-        
+
         Ok(output)
     }
 
@@ -269,16 +287,17 @@ impl FlowCorrelationDefense {
     /// Detect potential correlation attack
     pub async fn detect_correlation_attack(&self) -> Option<CorrelationAlert> {
         let flows = self.flows.read().await;
-        
+
         // Check for suspicious patterns
         for (flow_id, flow) in flows.iter() {
             // Check if flow has unusual characteristics
             let duration = flow.start_time.elapsed().as_secs();
             if duration > 0 {
                 let rate = flow.bytes_transferred / duration;
-                
+
                 // High rate for extended period may indicate probing
-                if rate > 1000000 && duration > 300 { // 1MB/s for 5+ minutes
+                if rate > 1000000 && duration > 300 {
+                    // 1MB/s for 5+ minutes
                     return Some(CorrelationAlert {
                         flow_id: *flow_id,
                         alert_type: CorrelationAlertType::HighVolumeProbing,
@@ -287,7 +306,7 @@ impl FlowCorrelationDefense {
                 }
             }
         }
-        
+
         None
     }
 }
@@ -343,10 +362,7 @@ impl DeepCorrDefense {
             // Increased from 0.01 to 0.15 for effective perturbation (2025-2026 research)
             epsilon: 0.15,
             pattern_inserter: PatternInserter {
-                patterns: vec![
-                    vec![0u8; 100],
-                    vec![1u8; 100],
-                ],
+                patterns: vec![vec![0u8; 100], vec![1u8; 100]],
             },
         }
     }
@@ -354,7 +370,7 @@ impl DeepCorrDefense {
     /// Apply adversarial perturbations to defeat deep learning correlation
     pub fn apply_perturbations(&self, data: &mut [u8]) {
         let mut rng = StdRng::from_entropy();
-        
+
         // Add small random perturbations
         for byte in data.iter_mut() {
             if rng.gen::<f64>() < self.epsilon {
@@ -366,17 +382,20 @@ impl DeepCorrDefense {
     /// Insert adversarial patterns
     pub fn insert_adversarial_pattern(&self, cells: &mut Vec<Cell>) {
         let mut rng = StdRng::from_entropy();
-        
+
         // Randomly insert pattern
         if let Some(pattern) = self.pattern_inserter.patterns.choose(&mut rng) {
             let insert_pos = rng.gen_range(0..=cells.len());
-            cells.insert(insert_pos, Cell {
-                circuit_id: 0,
-                stream_id: 0,
-                command: super::CellCommand::Padding,
-                payload: pattern.clone(),
-                timestamp: Instant::now(),
-            });
+            cells.insert(
+                insert_pos,
+                Cell {
+                    circuit_id: 0,
+                    stream_id: 0,
+                    command: super::CellCommand::Padding,
+                    payload: pattern.clone(),
+                    timestamp: Instant::now(),
+                },
+            );
         }
     }
 }
@@ -413,7 +432,7 @@ impl MultiPathCoordinator {
     pub fn new(paths: Vec<PathInfo>) -> Self {
         let assignments = Arc::new(RwLock::new(HashMap::new()));
         let path_metrics = Arc::new(RwLock::new(HashMap::new()));
-        
+
         Self {
             paths,
             assignments,
@@ -424,9 +443,11 @@ impl MultiPathCoordinator {
     /// Select best path for flow
     pub async fn select_path(&self, flow_id: u32) -> Option<PathInfo> {
         let metrics = self.path_metrics.read().await;
-        
+
         // Find path with best metrics
-        let best_path = self.paths.iter()
+        let best_path = self
+            .paths
+            .iter()
             .map(|p| {
                 let m = metrics.get(&p.path_id).cloned().unwrap_or_default();
                 (p, m)
@@ -437,7 +458,7 @@ impl MultiPathCoordinator {
                 let score2 = m2.success_rate - m2.congestion_level;
                 score2.partial_cmp(&score1).unwrap()
             });
-        
+
         if let Some((path, _)) = best_path {
             let mut assignments = self.assignments.write().await;
             assignments.insert(flow_id, path.path_id);
@@ -457,12 +478,15 @@ impl MultiPathCoordinator {
     pub async fn rotate_paths(&self) {
         let mut assignments = self.assignments.write().await;
         let mut rng = StdRng::from_entropy();
-        
+
         for (_flow_id, current_path) in assignments.iter_mut() {
             // Select different path
-            if let Some(new_path) = self.paths.iter()
+            if let Some(new_path) = self
+                .paths
+                .iter()
                 .filter(|p| p.path_id != *current_path)
-                .choose(&mut rng) {
+                .choose(&mut rng)
+            {
                 *current_path = new_path.path_id;
             }
         }
@@ -477,19 +501,17 @@ mod tests {
     async fn test_flow_correlation_defense() {
         let config = Arc::new(RwLock::new(super::AntiSurveillanceConfig::default()));
         let defense = FlowCorrelationDefense::new(config);
-        
+
         defense.register_flow(1).await;
-        
-        let cells = vec![
-            Cell {
-                circuit_id: 1,
-                stream_id: 1,
-                command: super::super::CellCommand::Data,
-                payload: vec![1, 2, 3],
-                timestamp: Instant::now(),
-            },
-        ];
-        
+
+        let cells = vec![Cell {
+            circuit_id: 1,
+            stream_id: 1,
+            command: super::super::CellCommand::Data,
+            payload: vec![1, 2, 3],
+            timestamp: Instant::now(),
+        }];
+
         let result = defense.defend(1, cells).await;
         assert!(result.is_ok());
     }
@@ -498,9 +520,9 @@ mod tests {
     fn test_deep_corr_defense() {
         let defense = DeepCorrDefense::new();
         let mut data = vec![0u8; 100];
-        
+
         defense.apply_perturbations(&mut data);
-        
+
         // Data should be modified
         assert_ne!(data, vec![0u8; 100]);
     }

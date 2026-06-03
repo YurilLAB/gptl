@@ -10,12 +10,12 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Table};
-use gptl_relay::changes::{
-    ChangeCategory, ChangeFilter, ChangeStatus, ChangeTracker,
-    ChangeTrackerConfig, PlatformDetails, SystemChange,
-};
 use gptl_relay::auto_setup::{
-    FirewallAutomation, FirewallError, FirewallResult, FirewallStatus, FirewallType
+    FirewallAutomation, FirewallError, FirewallResult, FirewallStatus, FirewallType,
+};
+use gptl_relay::changes::{
+    ChangeCategory, ChangeFilter, ChangeStatus, ChangeTracker, ChangeTrackerConfig,
+    PlatformDetails, SystemChange,
 };
 use std::path::PathBuf;
 use std::process;
@@ -276,9 +276,7 @@ async fn main() {
             .await
         }
         Commands::Show { change_id } => cmd_show(&tracker, change_id).await,
-        Commands::Rollback { change_id, force } => {
-            cmd_rollback(&tracker, change_id, force).await
-        }
+        Commands::Rollback { change_id, force } => cmd_rollback(&tracker, change_id, force).await,
         Commands::ExportChanges {
             format,
             output,
@@ -291,16 +289,20 @@ async fn main() {
             category,
             description,
         } => cmd_simulate(&tracker, category, description).await,
-        Commands::Cleanup { older_than, dry_run } => cmd_cleanup(&tracker, older_than, dry_run).await,
-        Commands::FirewallOpen { port, protocol, description, yes } => {
-            cmd_firewall_open(port, &protocol, &description, yes).await
-        }
+        Commands::Cleanup {
+            older_than,
+            dry_run,
+        } => cmd_cleanup(&tracker, older_than, dry_run).await,
+        Commands::FirewallOpen {
+            port,
+            protocol,
+            description,
+            yes,
+        } => cmd_firewall_open(port, &protocol, &description, yes).await,
         Commands::FirewallStatus { detailed, tracked } => {
             cmd_firewall_status(detailed, tracked).await
         }
-        Commands::FirewallVerify { port, protocol } => {
-            cmd_firewall_verify(port, &protocol).await
-        }
+        Commands::FirewallVerify { port, protocol } => cmd_firewall_verify(port, &protocol).await,
         Commands::FirewallRollback { rule_id, force } => {
             cmd_firewall_rollback(rule_id, force).await
         }
@@ -333,7 +335,9 @@ async fn cmd_changes(
             Some(cat) => filter = filter.with_category(cat),
             None => {
                 eprintln!("Error: Unknown category '{}'. Valid categories:", cat_str);
-                eprintln!("  network, security, service, configuration, system, filesystem, usergroup");
+                eprintln!(
+                    "  network, security, service, configuration, system, filesystem, usergroup"
+                );
                 process::exit(1);
             }
         }
@@ -394,7 +398,8 @@ async fn cmd_changes(
         }
         OutputFormat::List => {
             for change in changes {
-                println!("{} | {} | {} | {}", 
+                println!(
+                    "{} | {} | {} | {}",
                     change.id.to_string().split('-').next().unwrap_or(""),
                     change.timestamp.format("%Y-%m-%d %H:%M"),
                     change.category,
@@ -453,7 +458,7 @@ async fn cmd_rollback(
     println!("  ID: {}", change.id);
     println!("  Description: {}", change.description);
     println!("  Category: {}", change.category);
-    
+
     if let Some(ref cmd) = change.rollback_command {
         println!("  Rollback command: {}", cmd);
     }
@@ -577,14 +582,9 @@ async fn cmd_simulate(
         }
     };
 
-    let change = SystemChange::new(
-        cat,
-        description,
-        "simulated command",
-        "cli/simulate",
-    )
-    .with_rollback("echo 'rollback simulated'")
-    .with_admin();
+    let change = SystemChange::new(cat, description, "simulated command", "cli/simulate")
+        .with_rollback("echo 'rollback simulated'")
+        .with_admin();
 
     let id = tracker.record_applied(change).await?;
     println!("Recorded simulated change with ID: {}", id);
@@ -603,12 +603,17 @@ async fn cmd_cleanup(
     let filter = ChangeFilter::new().with_until(cutoff);
     let old_changes = tracker.get_filtered(&filter).await;
 
-    println!("Found {} changes older than {} days", old_changes.len(), older_than);
+    println!(
+        "Found {} changes older than {} days",
+        old_changes.len(),
+        older_than
+    );
 
     if dry_run {
         println!("\nDry run - would delete the following changes:");
         for change in &old_changes {
-            println!("  {} - {} - {}", 
+            println!(
+                "  {} - {} - {}",
                 change.id.to_string().split('-').next().unwrap_or(""),
                 change.timestamp.format("%Y-%m-%d"),
                 change.description
@@ -629,13 +634,13 @@ async fn cmd_cleanup(
                 .into_iter()
                 .filter(|c| c.timestamp > cutoff)
                 .collect();
-            
+
             // Clear and re-add kept changes
             tracker.clear().await?;
             for change in to_keep {
                 tracker.record(change).await?;
             }
-            
+
             println!("Deleted {} old changes", old_changes.len());
         } else {
             println!("Cancelled");
@@ -682,7 +687,7 @@ fn print_changes_table(changes: &[SystemChange]) {
     for change in changes {
         let id_short = change.id.to_string();
         let id_short = id_short.split('-').next().unwrap_or(&id_short);
-        
+
         table.add_row(vec![
             id_short.to_string(),
             change.timestamp.format("%Y-%m-%d %H:%M").to_string(),
@@ -699,7 +704,7 @@ fn print_changes_table(changes: &[SystemChange]) {
 /// Print changes in CSV format
 fn print_changes_csv(changes: &[SystemChange]) -> Result<(), Box<dyn std::error::Error>> {
     println!("id,timestamp,category,status,description,command,requires_admin,component");
-    
+
     for change in changes {
         println!(
             "{},{},{},{},\"{}\",\"{}\",{},{}",
@@ -713,7 +718,7 @@ fn print_changes_csv(changes: &[SystemChange]) -> Result<(), Box<dyn std::error:
             change.component
         );
     }
-    
+
     Ok(())
 }
 
@@ -728,11 +733,14 @@ fn print_change_detail(change: &SystemChange) {
     println!("Status:           {}", change.status);
     println!("Component:        {}", change.component);
     println!("GPTL Version:     {}", change.gptl_version);
-    println!("Requires Admin:   {}", if change.requires_admin { "Yes" } else { "No" });
-    
+    println!(
+        "Requires Admin:   {}",
+        if change.requires_admin { "Yes" } else { "No" }
+    );
+
     println!("\nDescription:      {}", change.description);
     println!("Command/Action:   {}", change.command_or_action);
-    
+
     if let Some(ref cmd) = change.rollback_command {
         println!("Rollback Command: {}", cmd);
     } else {
@@ -759,7 +767,11 @@ fn print_change_detail(change: &SystemChange) {
 
     // Platform-specific details
     match &change.platform_details {
-        PlatformDetails::Windows { registry_keys, services, firewall_rules } => {
+        PlatformDetails::Windows {
+            registry_keys,
+            services,
+            firewall_rules,
+        } => {
             if !registry_keys.is_empty() {
                 println!("\nRegistry Keys:");
                 for key in registry_keys {
@@ -779,7 +791,12 @@ fn print_change_detail(change: &SystemChange) {
                 }
             }
         }
-        PlatformDetails::Linux { systemd_units, sysctl_params, net_namespaces, iptables_rules } => {
+        PlatformDetails::Linux {
+            systemd_units,
+            sysctl_params,
+            net_namespaces,
+            iptables_rules,
+        } => {
             if !systemd_units.is_empty() {
                 println!("\nSystemd Units:");
                 for unit in systemd_units {
@@ -805,7 +822,10 @@ fn print_change_detail(change: &SystemChange) {
                 }
             }
         }
-        PlatformDetails::MacOS { launchd_plists, pf_rules } => {
+        PlatformDetails::MacOS {
+            launchd_plists,
+            pf_rules,
+        } => {
             if !launchd_plists.is_empty() {
                 println!("\nLaunchd Plists:");
                 for plist in launchd_plists {
@@ -852,16 +872,16 @@ async fn cmd_firewall_open(
     if !automation.has_admin() {
         eprintln!("Error: Administrator privileges required");
         eprintln!();
-        
+
         #[cfg(windows)]
         eprintln!("Please run this command as Administrator:");
-        
+
         #[cfg(target_os = "linux")]
         eprintln!("Please run with sudo:");
-        
+
         #[cfg(target_os = "macos")]
         eprintln!("Please run with sudo:");
-        
+
         eprintln!("  sudo gptl-relay firewall-open {}", port);
         process::exit(1);
     }
@@ -884,24 +904,27 @@ async fn cmd_firewall_open(
     match automation.open_port(port, protocol, description).await {
         Ok(result) => {
             println!("\n✓ {}", result.message);
-            
+
             if let Some(ref rule_id) = result.rule_id {
-                println!("  Rule ID: {}", rule_id.split('-').next().unwrap_or(rule_id));
+                println!(
+                    "  Rule ID: {}",
+                    rule_id.split('-').next().unwrap_or(rule_id)
+                );
             }
-            
+
             if result.verification_passed {
                 println!("  ✓ Rule verified successfully");
             } else {
                 println!("  ⚠ Rule added but verification pending");
             }
-            
+
             if !result.warnings.is_empty() {
                 println!("\n  Warnings:");
                 for warning in &result.warnings {
                     println!("    - {}", warning);
                 }
             }
-            
+
             println!("\nTo rollback this change:");
             if let Some(ref rule_id) = result.rule_id {
                 println!("  gptl-relay firewall-rollback --rule-id {}", rule_id);
@@ -942,7 +965,7 @@ async fn cmd_firewall_status(
     if tracked_only {
         // Show only tracked rules
         let tracked = automation.get_tracked_rules();
-        
+
         if tracked.is_empty() {
             println!("No tracked firewall rules found.");
             println!();
@@ -952,12 +975,19 @@ async fn cmd_firewall_status(
             table
                 .load_preset(UTF8_FULL)
                 .apply_modifier(UTF8_ROUND_CORNERS)
-                .set_header(vec!["ID", "Port", "Protocol", "Firewall", "Verified", "Description"]);
+                .set_header(vec![
+                    "ID",
+                    "Port",
+                    "Protocol",
+                    "Firewall",
+                    "Verified",
+                    "Description",
+                ]);
 
             for rule in tracked {
                 let id_short = rule.id.split('-').next().unwrap_or(&rule.id);
                 let verified = if rule.verified { "✓" } else { "✗" };
-                
+
                 table.add_row(vec![
                     id_short.to_string(),
                     rule.port.to_string(),
@@ -976,15 +1006,29 @@ async fn cmd_firewall_status(
         match automation.get_status().await {
             Ok(status) => {
                 println!("Detected Firewall: {}", status.firewall_type);
-                println!("Status: {}", if status.is_active { "Active ✓" } else { "Inactive ✗" });
-                println!("Admin Privileges: {}", if status.has_admin { "Yes ✓" } else { "No ✗" });
+                println!(
+                    "Status: {}",
+                    if status.is_active {
+                        "Active ✓"
+                    } else {
+                        "Inactive ✗"
+                    }
+                );
+                println!(
+                    "Admin Privileges: {}",
+                    if status.has_admin {
+                        "Yes ✓"
+                    } else {
+                        "No ✗"
+                    }
+                );
                 println!("Tracked Rules: {}", status.tracked_rules_count);
                 println!();
 
                 if !status.rules.is_empty() {
                     println!("Current Firewall Rules:");
                     println!("----------------------");
-                    
+
                     let mut table = Table::new();
                     table
                         .load_preset(UTF8_FULL)
@@ -1017,7 +1061,7 @@ async fn cmd_firewall_status(
                 if detailed {
                     println!();
                     println!("Platform-specific Notes:");
-                    
+
                     match status.firewall_type {
                         FirewallType::Ufw => {
                             println!("  - UFW Status: sudo ufw status verbose");
@@ -1034,7 +1078,9 @@ async fn cmd_firewall_status(
                             println!("  - For persistence, install iptables-persistent");
                         }
                         FirewallType::WindowsNetsh | FirewallType::WindowsPowerShell => {
-                            println!("  - View all rules: netsh advfirewall firewall show rule name=all");
+                            println!(
+                                "  - View all rules: netsh advfirewall firewall show rule name=all"
+                            );
                             println!("  - Windows Firewall is controlled via Windows Security");
                         }
                         _ => {
@@ -1074,12 +1120,14 @@ async fn cmd_firewall_verify(
     if let Some(p) = port {
         // Verify specific port
         print!("Checking port {}/{}... ", p, protocol);
-        
+
         match automation.get_status().await {
             Ok(status) => {
-                let rule_exists = status.rules.iter().any(|r| r.port == p && 
-                    r.protocol.to_lowercase() == protocol.to_lowercase());
-                
+                let rule_exists = status
+                    .rules
+                    .iter()
+                    .any(|r| r.port == p && r.protocol.to_lowercase() == protocol.to_lowercase());
+
                 if rule_exists {
                     println!("✓ Rule found");
                 } else {
@@ -1097,7 +1145,7 @@ async fn cmd_firewall_verify(
     } else {
         // Verify all tracked rules
         let tracked = automation.get_tracked_rules();
-        
+
         if tracked.is_empty() {
             println!("No tracked rules to verify.");
             println!("Use 'gptl-relay firewall-open <port>' to open ports.");
@@ -1105,15 +1153,20 @@ async fn cmd_firewall_verify(
         }
 
         let mut all_verified = true;
-        
+
         for rule in tracked {
-            print!("Verifying {} ({}/{})... ", rule.description, rule.port, rule.protocol);
-            
+            print!(
+                "Verifying {} ({}/{})... ",
+                rule.description, rule.port, rule.protocol
+            );
+
             match automation.get_status().await {
                 Ok(status) => {
-                    let rule_exists = status.rules.iter().any(|r| r.port == rule.port && 
-                        r.protocol.to_lowercase() == rule.protocol.to_lowercase());
-                    
+                    let rule_exists = status.rules.iter().any(|r| {
+                        r.port == rule.port
+                            && r.protocol.to_lowercase() == rule.protocol.to_lowercase()
+                    });
+
                     if rule_exists {
                         println!("✓");
                     } else {
@@ -1127,7 +1180,7 @@ async fn cmd_firewall_verify(
                 }
             }
         }
-        
+
         println!();
         if all_verified {
             println!("✓ All tracked rules are in place");
@@ -1153,21 +1206,24 @@ async fn cmd_firewall_rollback(
     if !automation.has_admin() {
         eprintln!("Error: Administrator privileges required for rollback");
         eprintln!();
-        
+
         #[cfg(unix)]
         eprintln!("Please run with sudo: sudo gptl-relay firewall-rollback");
-        
+
         #[cfg(windows)]
         eprintln!("Please run as Administrator");
-        
+
         process::exit(1);
     }
 
     match rule_id {
         Some(id) => {
             // Rollback specific rule
-            println!("Rolling back rule: {}...", id.split('-').next().unwrap_or(&id));
-            
+            println!(
+                "Rolling back rule: {}...",
+                id.split('-').next().unwrap_or(&id)
+            );
+
             if !force {
                 print!("\nAre you sure? [y/N] ");
                 use std::io::Write;
@@ -1206,7 +1262,7 @@ async fn cmd_firewall_rollback(
         None => {
             // Rollback all tracked rules
             let tracked = automation.get_tracked_rules();
-            
+
             if tracked.is_empty() {
                 println!("No tracked rules to rollback.");
                 return Ok(());
@@ -1233,10 +1289,10 @@ async fn cmd_firewall_rollback(
 
             println!();
             let results = automation.rollback_all().await;
-            
+
             let mut success_count = 0;
             let mut fail_count = 0;
-            
+
             for result in results {
                 match result {
                     Ok(r) => {
@@ -1249,9 +1305,12 @@ async fn cmd_firewall_rollback(
                     }
                 }
             }
-            
+
             println!();
-            println!("Results: {} succeeded, {} failed", success_count, fail_count);
+            println!(
+                "Results: {} succeeded, {} failed",
+                success_count, fail_count
+            );
         }
     }
 
@@ -1270,7 +1329,10 @@ mod tests {
 
     #[test]
     fn test_parse_status() {
-        assert!(matches!(parse_status("applied"), Some(ChangeStatus::Applied)));
+        assert!(matches!(
+            parse_status("applied"),
+            Some(ChangeStatus::Applied)
+        ));
         assert!(matches!(parse_status("failed"), Some(ChangeStatus::Failed)));
         assert!(matches!(parse_status("unknown"), None));
     }

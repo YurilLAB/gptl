@@ -481,9 +481,7 @@ mod tests {
             0,
             &ipv4_prefix_payload(0x01, 24, 24, [8, 8, 8, 0], 15169),
         ));
-        let v6 = [
-            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
+        let v6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         s.extend_from_slice(&encode_pdu(
             1,
             pdu::IPV6_PREFIX,
@@ -508,8 +506,11 @@ mod tests {
             // Read the Reset Query the client sends.
             let mut header = [0u8; 8];
             server.read_exact(&mut header).await.unwrap();
-            assert_eq!(header[1], pdu::RESET_QUERY,
-                "client must send Reset Query as first PDU");
+            assert_eq!(
+                header[1],
+                pdu::RESET_QUERY,
+                "client must send Reset Query as first PDU"
+            );
             // Stream the fake response.
             server.write_all(&bytes).await.unwrap();
             // Half-close so the client doesn't hang waiting for more.

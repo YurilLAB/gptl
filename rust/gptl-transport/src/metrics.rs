@@ -230,9 +230,7 @@ impl crate::observer::CircuitObserver for MetricsObserver {
         self.metrics
             .circuits_built_total
             .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .active_circuits
-            .fetch_add(1, Ordering::Relaxed);
+        self.metrics.active_circuits.fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_success(&self, _circuit_id: u32, _latency: std::time::Duration, _bytes: u64) {
@@ -241,12 +239,7 @@ impl crate::observer::CircuitObserver for MetricsObserver {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_failure(
-        &self,
-        _circuit_id: u32,
-        kind: crate::observer::FailureKind,
-        _reason: &str,
-    ) {
+    fn record_failure(&self, _circuit_id: u32, kind: crate::observer::FailureKind, _reason: &str) {
         use crate::observer::FailureKind::*;
         match kind {
             Handshake | Extend => {
@@ -272,9 +265,7 @@ impl crate::observer::CircuitObserver for MetricsObserver {
         // counts somehow drift.
         let prev = self.metrics.active_circuits.load(Ordering::Relaxed);
         if prev > 0 {
-            self.metrics
-                .active_circuits
-                .fetch_sub(1, Ordering::Relaxed);
+            self.metrics.active_circuits.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }
@@ -306,10 +297,7 @@ fn push_gauge(out: &mut String, name: &str, help: &str, value: u64) {
 /// read until `\r\n\r\n`, look at the first request line, and stream
 /// a fixed response.  This is fine for a localhost-or-LAN /metrics
 /// endpoint; do NOT expose it to the public internet.
-pub async fn serve_metrics<F>(
-    addr: std::net::SocketAddr,
-    render: F,
-) -> Result<(), std::io::Error>
+pub async fn serve_metrics<F>(addr: std::net::SocketAddr, render: F) -> Result<(), std::io::Error>
 where
     F: Fn() -> String + Send + Sync + 'static,
 {
@@ -447,7 +435,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(b"GET /foo HTTP/1.0\r\n\r\n").await.unwrap();
+        stream
+            .write_all(b"GET /foo HTTP/1.0\r\n\r\n")
+            .await
+            .unwrap();
         let mut resp = Vec::new();
         stream.read_to_end(&mut resp).await.unwrap();
         let text = String::from_utf8_lossy(&resp);

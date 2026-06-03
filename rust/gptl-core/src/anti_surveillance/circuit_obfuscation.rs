@@ -4,14 +4,14 @@
 //! including preemptive circuit padding, vanguards, and circuit morphing.
 
 use super::{AntiSurveillanceConfig, AntiSurveillanceError, Cell, CellCommand};
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
+use rand::Rng;
+use rand::SeedableRng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use rand::Rng;
-use rand::rngs::StdRng;
-use rand::SeedableRng;
-use rand::seq::SliceRandom;
 
 /// Circuit shield for obfuscating circuit patterns
 pub struct CircuitShield {
@@ -75,7 +75,7 @@ impl CircuitShield {
     pub fn new(config: Arc<RwLock<AntiSurveillanceConfig>>) -> Self {
         let circuits = Arc::new(RwLock::new(HashMap::new()));
         let standard_sequences = StandardSequences::new();
-        
+
         Self {
             config,
             circuits,
@@ -108,24 +108,30 @@ impl CircuitShield {
             }
         }
 
-        circuits.insert(circuit_id, CircuitStateMachine {
+        circuits.insert(
             circuit_id,
-            circuit_type: ObfuscatedCircuitType::Standard,
-            state: CircuitState::Creating,
-            cells_sent: 0,
-            cells_received: 0,
-            created_at: Instant::now(),
-        });
+            CircuitStateMachine {
+                circuit_id,
+                circuit_type: ObfuscatedCircuitType::Standard,
+                state: CircuitState::Creating,
+                cells_sent: 0,
+                cells_received: 0,
+                created_at: Instant::now(),
+            },
+        );
     }
 
     /// Obfuscate cells from circuit
-    pub async fn obfuscate_cells(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    pub async fn obfuscate_cells(
+        &self,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         if cells.is_empty() {
             return Ok(Vec::new());
         }
 
         let config = self.config.read().await;
-        
+
         match config.level {
             super::SecurityLevel::Standard => {
                 // Basic obfuscation
@@ -143,47 +149,53 @@ impl CircuitShield {
     }
 
     /// Add preemptive padding to circuit
-    async fn add_preemptive_padding(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn add_preemptive_padding(
+        &self,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
         let mut rng = StdRng::from_entropy();
-        
+
         // Standard burst sizes to prevent circuit fingerprinting
         const BURST_SIZES: [usize; 3] = [6, 12, 18];
-        
+
         let target_burst = BURST_SIZES[rng.gen_range(0..BURST_SIZES.len())];
-        
+
         // Add cells
         output.extend(cells);
-        
+
         // Add padding to reach target burst size
         while output.len() < target_burst {
             output.push(self.generate_dummy_cell());
         }
-        
+
         Ok(output)
     }
 
     /// Morph cells to standard sequence
-    async fn morph_to_standard(&self, cells: Vec<Cell>) -> Result<Vec<Cell>, AntiSurveillanceError> {
+    async fn morph_to_standard(
+        &self,
+        cells: Vec<Cell>,
+    ) -> Result<Vec<Cell>, AntiSurveillanceError> {
         let mut output = Vec::new();
         let mut rng = StdRng::from_entropy();
-        
+
         // Use standard handshake pattern
         output.extend(self.standard_sequences.handshake.clone());
-        
+
         // Add cells with padding to standard burst sizes
         for cell in cells {
             output.push(cell);
-            
+
             // Random padding between cells
             if rng.gen::<f64>() < 0.3 {
                 output.push(self.generate_dummy_cell());
             }
         }
-        
+
         // Add standard closing
         output.extend(self.standard_sequences.keepalive.clone());
-        
+
         Ok(output)
     }
 
@@ -287,26 +299,26 @@ impl StandardSequences {
     /// Generate standard padding sequence
     fn generate_padding_sequence() -> Vec<Cell> {
         // Standard 10-cell padding burst with random payloads
-        (0..10).map(|_| Cell {
-            circuit_id: 0,
-            stream_id: 0,
-            command: CellCommand::Padding,
-            payload: Self::random_payload(),
-            timestamp: Instant::now(),
-        }).collect()
-    }
-
-    /// Generate standard keepalive sequence
-    fn generate_keepalive_sequence() -> Vec<Cell> {
-        vec![
-            Cell {
+        (0..10)
+            .map(|_| Cell {
                 circuit_id: 0,
                 stream_id: 0,
                 command: CellCommand::Padding,
                 payload: Self::random_payload(),
                 timestamp: Instant::now(),
-            },
-        ]
+            })
+            .collect()
+    }
+
+    /// Generate standard keepalive sequence
+    fn generate_keepalive_sequence() -> Vec<Cell> {
+        vec![Cell {
+            circuit_id: 0,
+            stream_id: 0,
+            command: CellCommand::Padding,
+            payload: Self::random_payload(),
+            timestamp: Instant::now(),
+        }]
     }
 }
 
@@ -383,7 +395,7 @@ impl VanguardManager {
     pub fn select_guards(&self) -> Vec<GuardInfo> {
         let mut rng = StdRng::from_entropy();
         let mut guards = Vec::new();
-        
+
         // Select one from each layer
         if let Some(guard) = self.first_layer.choose(&mut rng) {
             guards.push(guard.clone());
@@ -394,7 +406,7 @@ impl VanguardManager {
         if let Some(guard) = self.third_layer.choose(&mut rng) {
             guards.push(guard.clone());
         }
-        
+
         guards
     }
 
@@ -411,28 +423,28 @@ impl VanguardManager {
     pub fn check_rotations(&self) -> Vec<GuardLayer> {
         let now = Instant::now();
         let mut needs_rotation = Vec::new();
-        
+
         // Check first layer
         if self.first_layer.iter().any(|g| {
             now.duration_since(g.added_at).as_secs() > self.rotation_policy.first_layer_rotation
         }) {
             needs_rotation.push(GuardLayer::First);
         }
-        
+
         // Check second layer
         if self.second_layer.iter().any(|g| {
             now.duration_since(g.added_at).as_secs() > self.rotation_policy.second_layer_rotation
         }) {
             needs_rotation.push(GuardLayer::Second);
         }
-        
+
         // Check third layer
         if self.third_layer.iter().any(|g| {
             now.duration_since(g.added_at).as_secs() > self.rotation_policy.third_layer_rotation
         }) {
             needs_rotation.push(GuardLayer::Third);
         }
-        
+
         needs_rotation
     }
 
@@ -494,23 +506,26 @@ impl PreemptiveCircuitPadding {
             }
         }
 
-        machines.insert(circuit_id, PaddingMachine {
+        machines.insert(
             circuit_id,
-            next_padding: Instant::now() + Duration::from_millis(100),
-            padding_interval: Duration::from_millis(100),
-        });
+            PaddingMachine {
+                circuit_id,
+                next_padding: Instant::now() + Duration::from_millis(100),
+                padding_interval: Duration::from_millis(100),
+            },
+        );
     }
 
     /// Get padding cells for circuit if needed
     pub async fn get_padding_cells(&self, circuit_id: u32) -> Vec<Cell> {
         let mut machines = self.padding_machines.write().await;
-        
+
         if let Some(machine) = machines.get_mut(&circuit_id) {
             let now = Instant::now();
             if now >= machine.next_padding {
                 // Schedule next padding
                 machine.next_padding = now + machine.padding_interval;
-                
+
                 // Return padding cell with random payload (indistinguishable from real data)
                 let mut payload = vec![0u8; 509];
                 rand::thread_rng().fill(&mut payload[..]);
@@ -523,7 +538,7 @@ impl PreemptiveCircuitPadding {
                 }];
             }
         }
-        
+
         Vec::new()
     }
 }
@@ -535,7 +550,7 @@ mod tests {
     #[test]
     fn test_vanguard_manager() {
         let mut manager = VanguardManager::new();
-        
+
         // Add guards
         manager.add_guard(GuardInfo {
             identity: "guard1".to_string(),
@@ -544,7 +559,7 @@ mod tests {
             layer: GuardLayer::First,
             added_at: Instant::now(),
         });
-        
+
         // Select guards
         let guards = manager.select_guards();
         assert!(!guards.is_empty());
@@ -560,7 +575,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_obfuscation_maximum_level_adds_cells_to_input() {
-        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+        use crate::anti_surveillance::{AntiSurveillanceConfig, Cell, CellCommand, SecurityLevel};
 
         let mut config = AntiSurveillanceConfig::default();
         config.level = SecurityLevel::Maximum;
@@ -579,13 +594,15 @@ mod tests {
 
         let output = shield.obfuscate_cells(input.clone()).await.unwrap();
         // Maximum level adds handshake + keepalive cells, so output > input
-        assert!(output.len() > input.len(),
-            "maximum obfuscation must produce more cells than the input");
+        assert!(
+            output.len() > input.len(),
+            "maximum obfuscation must produce more cells than the input"
+        );
     }
 
     #[tokio::test]
     async fn test_obfuscation_output_differs_from_bare_input_sequence() {
-        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+        use crate::anti_surveillance::{AntiSurveillanceConfig, Cell, CellCommand, SecurityLevel};
 
         let mut config = AntiSurveillanceConfig::default();
         config.level = SecurityLevel::Maximum;
@@ -606,16 +623,18 @@ mod tests {
 
         // The obfuscated stream must contain cells that were NOT in the input
         // (i.e. the standard sequences injected Create/Created/Padding cells).
-        let has_injected = output.iter().any(|c| {
-            matches!(c.command, CellCommand::Create | CellCommand::Created)
-        });
-        assert!(has_injected,
-            "maximum obfuscation must inject Create/Created cells from the standard handshake");
+        let has_injected = output
+            .iter()
+            .any(|c| matches!(c.command, CellCommand::Create | CellCommand::Created));
+        assert!(
+            has_injected,
+            "maximum obfuscation must inject Create/Created cells from the standard handshake"
+        );
     }
 
     #[tokio::test]
     async fn test_obfuscation_standard_level_passes_through_cells() {
-        use crate::anti_surveillance::{AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand};
+        use crate::anti_surveillance::{AntiSurveillanceConfig, Cell, CellCommand, SecurityLevel};
 
         let mut config = AntiSurveillanceConfig::default();
         config.level = SecurityLevel::Standard;
@@ -641,32 +660,34 @@ mod tests {
     async fn test_register_unregistered_circuit_stats_returns_none() {
         use crate::anti_surveillance::AntiSurveillanceConfig;
 
-        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
-            AntiSurveillanceConfig::default(),
-        ));
+        let config =
+            std::sync::Arc::new(tokio::sync::RwLock::new(AntiSurveillanceConfig::default()));
         let shield = CircuitShield::new(config);
 
         // Circuit 9999 was never registered — stats must return None
         let stats = shield.get_circuit_stats(9999).await;
-        assert!(stats.is_none(),
-            "stats for an unregistered circuit ID must return None");
+        assert!(
+            stats.is_none(),
+            "stats for an unregistered circuit ID must return None"
+        );
     }
 
     #[tokio::test]
     async fn test_dummy_cell_payload_not_all_zeros() {
         use crate::anti_surveillance::AntiSurveillanceConfig;
 
-        let config = std::sync::Arc::new(tokio::sync::RwLock::new(
-            AntiSurveillanceConfig::default(),
-        ));
+        let config =
+            std::sync::Arc::new(tokio::sync::RwLock::new(AntiSurveillanceConfig::default()));
         let shield = CircuitShield::new(config);
 
         // generate_dummy_cell uses random fill — verify the security property
         for _ in 0..10 {
             let cell = shield.generate_dummy_cell();
             let all_zero = cell.payload.iter().all(|&b| b == 0);
-            assert!(!all_zero,
-                "dummy cell payload must not be all-zero (security requirement)");
+            assert!(
+                !all_zero,
+                "dummy cell payload must not be all-zero (security requirement)"
+            );
         }
     }
 
@@ -675,8 +696,10 @@ mod tests {
         let manager = VanguardManager::new();
         let selected = manager.select_guards();
         // No guards registered yet — selection must return empty vec, not panic
-        assert!(selected.is_empty(),
-            "selecting guards when none are registered must return empty vec");
+        assert!(
+            selected.is_empty(),
+            "selecting guards when none are registered must return empty vec"
+        );
     }
 
     #[test]
@@ -697,8 +720,10 @@ mod tests {
 
         // Freshly-added guard should NOT need rotation
         let needs = manager.check_rotations();
-        assert!(!needs.contains(&GuardLayer::First),
-            "freshly added first-layer guard must not need rotation immediately");
+        assert!(
+            !needs.contains(&GuardLayer::First),
+            "freshly added first-layer guard must not need rotation immediately"
+        );
     }
 
     #[tokio::test]
@@ -722,9 +747,15 @@ mod tests {
         }
 
         let cells = pcp.get_padding_cells(1).await;
-        assert_eq!(cells.len(), 1, "registered circuit with past next_padding should get 1 padding cell");
+        assert_eq!(
+            cells.len(),
+            1,
+            "registered circuit with past next_padding should get 1 padding cell"
+        );
         let all_zero = cells[0].payload.iter().all(|&b| b == 0);
-        assert!(!all_zero,
-            "preemptive padding cell payload must not be all-zero (security requirement)");
+        assert!(
+            !all_zero,
+            "preemptive padding cell payload must not be all-zero (security requirement)"
+        );
     }
 }

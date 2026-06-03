@@ -6,13 +6,13 @@
 //! - Automatic expiration and rotation
 //! - Sliding window refresh tokens
 
+use chrono::{DateTime, Duration, Utc};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use serde::{Deserialize, Serialize};
 
 /// Session manager for creating and validating sessions
 pub struct SessionManager {
@@ -111,12 +111,8 @@ impl SessionManager {
         }
 
         // Generate tokens
-        let access_token = self.generate_access_token(
-            &session_id,
-            user_id,
-            &client_ip,
-            fingerprint.as_deref(),
-        )?;
+        let access_token =
+            self.generate_access_token(&session_id, user_id, &client_ip, fingerprint.as_deref())?;
 
         let refresh_token = self.generate_refresh_token(&session_id, user_id)?;
 
@@ -148,7 +144,8 @@ impl SessionManager {
         // Check session exists and is valid
         {
             let sessions = self.sessions.read().await;
-            let session = sessions.get(&claims.sid)
+            let session = sessions
+                .get(&claims.sid)
                 .ok_or(crate::RelayError::InvalidSession)?;
 
             if session.revoked {
@@ -165,7 +162,7 @@ impl SessionManager {
             // Check IP binding
             if claims.ip != client_ip.to_string() {
                 return Err(crate::RelayError::SessionBindingMismatch(
-                    "IP address mismatch".to_string()
+                    "IP address mismatch".to_string(),
                 ));
             }
 
@@ -214,7 +211,8 @@ impl SessionManager {
         // Get session
         let mut session = {
             let sessions = self.sessions.read().await;
-            sessions.get(&claims.sid)
+            sessions
+                .get(&claims.sid)
                 .cloned()
                 .ok_or(crate::RelayError::InvalidSession)?
         };
@@ -258,7 +256,7 @@ impl SessionManager {
     /// Revoke a session
     pub async fn revoke_session(&self, session_id: &str) -> crate::Result<()> {
         let mut sessions = self.sessions.write().await;
-        
+
         if let Some(session) = sessions.get_mut(session_id) {
             session.revoked = true;
             Ok(())
@@ -285,7 +283,7 @@ impl SessionManager {
     /// Get session information
     pub async fn get_session(&self, session_id: &str) -> Option<SessionInfo> {
         let sessions = self.sessions.read().await;
-        
+
         sessions.get(session_id).map(|s| SessionInfo {
             id: s.id.clone(),
             user_id: s.user_id.clone(),
@@ -301,8 +299,9 @@ impl SessionManager {
     /// List active sessions for a user
     pub async fn list_user_sessions(&self, user_id: &str) -> Vec<SessionInfo> {
         let sessions = self.sessions.read().await;
-        
-        sessions.values()
+
+        sessions
+            .values()
             .filter(|s| s.user_id == user_id && !s.revoked && s.expires_at > Utc::now())
             .map(|s| SessionInfo {
                 id: s.id.clone(),
@@ -348,9 +347,7 @@ impl SessionManager {
         };
 
         encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
-            .map_err(|e| crate::RelayError::Internal(
-                format!("Token generation failed: {}", e)
-            ))
+            .map_err(|e| crate::RelayError::Internal(format!("Token generation failed: {}", e)))
     }
 
     /// Generate refresh token
@@ -367,9 +364,7 @@ impl SessionManager {
         };
 
         encode(&Header::new(Algorithm::HS256), &claims, &self.encoding_key)
-            .map_err(|e| crate::RelayError::Internal(
-                format!("Token generation failed: {}", e)
-            ))
+            .map_err(|e| crate::RelayError::Internal(format!("Token generation failed: {}", e)))
     }
 }
 
@@ -502,14 +497,17 @@ mod tests {
     async fn test_session_creation() {
         let manager = SessionManager::new(b"test_secret_key_for_testing_purposes");
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        
-        let tokens = manager.create_session(
-            "user123",
-            ip,
-            Some("device_fingerprint".to_string()),
-            SessionMetadata::default(),
-        ).await.unwrap();
-        
+
+        let tokens = manager
+            .create_session(
+                "user123",
+                ip,
+                Some("device_fingerprint".to_string()),
+                SessionMetadata::default(),
+            )
+            .await
+            .unwrap();
+
         assert!(!tokens.access_token.is_empty());
         assert!(!tokens.refresh_token.is_empty());
         assert_eq!(tokens.token_type, "Bearer");
@@ -520,48 +518,47 @@ mod tests {
     async fn test_token_validation() {
         let manager = SessionManager::new(b"test_secret_key_for_testing_purposes");
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        
-        let tokens = manager.create_session(
-            "user123",
-            ip,
-            Some("device_fingerprint".to_string()),
-            SessionMetadata::default(),
-        ).await.unwrap();
-        
+
+        let tokens = manager
+            .create_session(
+                "user123",
+                ip,
+                Some("device_fingerprint".to_string()),
+                SessionMetadata::default(),
+            )
+            .await
+            .unwrap();
+
         // Valid validation
-        let claims = manager.validate_access_token(
-            &tokens.access_token,
-            ip,
-            Some("device_fingerprint"),
-        ).await.unwrap();
-        
+        let claims = manager
+            .validate_access_token(&tokens.access_token, ip, Some("device_fingerprint"))
+            .await
+            .unwrap();
+
         assert_eq!(claims.sub, "user123");
         assert_eq!(claims.typ, "access");
-        
+
         // Wrong IP should fail
         let wrong_ip: IpAddr = "10.0.0.1".parse().unwrap();
-        let result = manager.validate_access_token(
-            &tokens.access_token,
-            wrong_ip,
-            Some("device_fingerprint"),
-        ).await;
+        let result = manager
+            .validate_access_token(&tokens.access_token, wrong_ip, Some("device_fingerprint"))
+            .await;
         assert!(result.is_err());
 
         // A token bound to a fingerprint must NOT validate when the caller
         // omits the fingerprint (regression: this previously skipped the check).
-        let result = manager.validate_access_token(
-            &tokens.access_token,
-            ip,
-            None,
-        ).await;
-        assert!(result.is_err(), "omitting a bound fingerprint must be rejected");
+        let result = manager
+            .validate_access_token(&tokens.access_token, ip, None)
+            .await;
+        assert!(
+            result.is_err(),
+            "omitting a bound fingerprint must be rejected"
+        );
 
         // Wrong fingerprint must also fail.
-        let result = manager.validate_access_token(
-            &tokens.access_token,
-            ip,
-            Some("wrong_fingerprint"),
-        ).await;
+        let result = manager
+            .validate_access_token(&tokens.access_token, ip, Some("wrong_fingerprint"))
+            .await;
         assert!(result.is_err(), "mismatched fingerprint must be rejected");
     }
 
@@ -569,19 +566,19 @@ mod tests {
     async fn test_session_revocation() {
         let manager = SessionManager::new(b"test_secret_key_for_testing_purposes");
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        
-        let tokens = manager.create_session(
-            "user123",
-            ip,
-            None,
-            SessionMetadata::default(),
-        ).await.unwrap();
-        
+
+        let tokens = manager
+            .create_session("user123", ip, None, SessionMetadata::default())
+            .await
+            .unwrap();
+
         // Revoke session
         manager.revoke_session(&tokens.session_id).await.unwrap();
-        
+
         // Token should be invalid now
-        let result = manager.validate_access_token(&tokens.access_token, ip, None).await;
+        let result = manager
+            .validate_access_token(&tokens.access_token, ip, None)
+            .await;
         assert!(result.is_err());
     }
 }

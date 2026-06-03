@@ -120,10 +120,9 @@ async fn probe_inner(relay: &RelayDescriptor) -> Result<(), TransportError> {
     // Parse the address (we re-do this even though BootstrapConfig::validate
     // also parses it, because validate runs on the whole directory and
     // self-test should report a per-relay failure rather than aborting).
-    let addr: std::net::SocketAddr = relay
-        .address
-        .parse()
-        .map_err(|e| TransportError::Bootstrap(format!("bad address '{}': {}", relay.address, e)))?;
+    let addr: std::net::SocketAddr = relay.address.parse().map_err(|e| {
+        TransportError::Bootstrap(format!("bad address '{}': {}", relay.address, e))
+    })?;
 
     // Decode the relay's static pubkey.
     let static_pub = relay.pubkey_bytes()?;
@@ -247,8 +246,11 @@ mod tests {
         let desc = spawn_real_relay(key).await;
         let results = probe_all(&[desc], Duration::from_secs(3)).await;
         assert_eq!(results.len(), 1);
-        assert!(results[0].outcome.is_healthy(),
-            "probe must succeed against a real relay; got {:?}", results[0].outcome);
+        assert!(
+            results[0].outcome.is_healthy(),
+            "probe must succeed against a real relay; got {:?}",
+            results[0].outcome
+        );
         assert!(results[0].elapsed < Duration::from_secs(3));
     }
 
@@ -257,8 +259,11 @@ mod tests {
         let desc = spawn_silent_relay().await;
         let results = probe_all(&[desc], Duration::from_millis(400)).await;
         assert_eq!(results.len(), 1);
-        assert!(matches!(results[0].outcome, ProbeOutcome::TimedOut),
-            "silent relay must time out; got {:?}", results[0].outcome);
+        assert!(
+            matches!(results[0].outcome, ProbeOutcome::TimedOut),
+            "silent relay must time out; got {:?}",
+            results[0].outcome
+        );
     }
 
     #[tokio::test]
@@ -284,7 +289,8 @@ mod tests {
                 results[0].outcome,
                 ProbeOutcome::Unreachable(_) | ProbeOutcome::TimedOut
             ),
-            "expected Unreachable or TimedOut, got {:?}", results[0].outcome
+            "expected Unreachable or TimedOut, got {:?}",
+            results[0].outcome
         );
     }
 
@@ -307,8 +313,11 @@ mod tests {
         }
         // Even on a slow machine, three local handshakes in parallel
         // should comfortably complete in <800ms.
-        assert!(elapsed < Duration::from_millis(800),
-            "probes did not run in parallel: total elapsed = {:?}", elapsed);
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "probes did not run in parallel: total elapsed = {:?}",
+            elapsed
+        );
     }
 
     #[tokio::test]

@@ -7,10 +7,10 @@
 //! - Custom threat feeds
 //! - C2 (Command & Control) detection
 
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 
 /// Threat intelligence manager
@@ -186,26 +186,18 @@ impl Default for ThreatIntelligence {
 #[derive(Debug, Clone)]
 pub enum ThreatFeed {
     /// AbuseIPDB feed
-    AbuseIpDb {
-        api_key: String,
-    },
+    AbuseIpDb { api_key: String },
     /// VirusTotal feed
-    VirusTotal {
-        api_key: String,
-    },
+    VirusTotal { api_key: String },
     /// AlienVault OTX
-    AlienVaultOtx {
-        api_key: String,
-    },
+    AlienVaultOtx { api_key: String },
     /// Custom CSV feed
     CustomCsv {
         url: String,
         refresh_interval: Duration,
     },
     /// Local blocklist
-    LocalBlocklist {
-        entries: Vec<(IpAddr, ThreatInfo)>,
-    },
+    LocalBlocklist { entries: Vec<(IpAddr, ThreatInfo)> },
 }
 
 impl ThreatFeed {
@@ -228,24 +220,17 @@ impl ThreatFeed {
     /// Query the feed for an IP
     pub async fn query(&self, ip: IpAddr) -> Option<ThreatInfo> {
         match self {
-            ThreatFeed::AbuseIpDb { api_key } => {
-                self.query_abuseipdb(ip, api_key).await
-            }
-            ThreatFeed::VirusTotal { api_key } => {
-                self.query_virustotal(ip, api_key).await
-            }
-            ThreatFeed::AlienVaultOtx { api_key } => {
-                self.query_alienvault(ip, api_key).await
-            }
+            ThreatFeed::AbuseIpDb { api_key } => self.query_abuseipdb(ip, api_key).await,
+            ThreatFeed::VirusTotal { api_key } => self.query_virustotal(ip, api_key).await,
+            ThreatFeed::AlienVaultOtx { api_key } => self.query_alienvault(ip, api_key).await,
             ThreatFeed::CustomCsv { .. } => {
                 // Would fetch and parse CSV
                 None
             }
-            ThreatFeed::LocalBlocklist { entries } => {
-                entries.iter()
-                    .find(|(eip, _)| *eip == ip)
-                    .map(|(_, info)| info.clone())
-            }
+            ThreatFeed::LocalBlocklist { entries } => entries
+                .iter()
+                .find(|(eip, _)| *eip == ip)
+                .map(|(_, info)| info.clone()),
         }
     }
 
@@ -261,7 +246,7 @@ impl ThreatFeed {
                 self.report_abuseipdb(ip, category, comment, api_key).await
             }
             _ => Err(crate::RelayError::Internal(
-                "Feed does not support reporting".to_string()
+                "Feed does not support reporting".to_string(),
             )),
         }
     }
@@ -270,12 +255,16 @@ impl ThreatFeed {
         // AbuseIPDB API v2: https://docs.abuseipdb.com/
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .build() {
+            .build()
+        {
             Ok(c) => c,
             Err(_) => return None,
         };
 
-        let url = format!("https://api.abuseipdb.com/api/v2/check?ipAddress={}&maxAgeInDays=90", ip);
+        let url = format!(
+            "https://api.abuseipdb.com/api/v2/check?ipAddress={}&maxAgeInDays=90",
+            ip
+        );
 
         let response = client
             .get(&url)
@@ -331,7 +320,8 @@ impl ThreatFeed {
         // VirusTotal API v3: https://developers.virustotal.com/reference/ip-info
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .build() {
+            .build()
+        {
             Ok(c) => c,
             Err(_) => return None,
         };
@@ -355,9 +345,10 @@ impl ThreatFeed {
         let stats = data.get("last_analysis_stats")?;
         let malicious = stats.get("malicious")?.as_u64().unwrap_or(0);
         let suspicious = stats.get("suspicious")?.as_u64().unwrap_or(0);
-        let total = malicious + suspicious +
-                    stats.get("harmless")?.as_u64().unwrap_or(0) +
-                    stats.get("undetected")?.as_u64().unwrap_or(0);
+        let total = malicious
+            + suspicious
+            + stats.get("harmless")?.as_u64().unwrap_or(0)
+            + stats.get("undetected")?.as_u64().unwrap_or(0);
 
         if total == 0 {
             return None;
@@ -401,12 +392,16 @@ impl ThreatFeed {
         // AlienVault OTX API: https://otx.alienvault.com/api
         let client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
-            .build() {
+            .build()
+        {
             Ok(c) => c,
             Err(_) => return None,
         };
 
-        let url = format!("https://otx.alienvault.com/api/v1/indicators/IPv4/{}/general", ip);
+        let url = format!(
+            "https://otx.alienvault.com/api/v1/indicators/IPv4/{}/general",
+            ip
+        );
 
         let response = client
             .get(&url)
@@ -421,7 +416,8 @@ impl ThreatFeed {
 
         let json: serde_json::Value = response.json().await.ok()?;
 
-        let pulse_count = json.get("pulse_info")
+        let pulse_count = json
+            .get("pulse_info")
             .and_then(|p| p.get("count"))
             .and_then(|c| c.as_u64())
             .unwrap_or(0);
@@ -435,10 +431,11 @@ impl ThreatFeed {
 
         let mut categories = Vec::new();
 
-        if let Some(pulses) = json.get("pulse_info")
+        if let Some(pulses) = json
+            .get("pulse_info")
             .and_then(|p| p.get("pulses"))
-            .and_then(|p| p.as_array()) {
-
+            .and_then(|p| p.as_array())
+        {
             for pulse in pulses.iter().take(5) {
                 if let Some(tags) = pulse.get("tags").and_then(|t| t.as_array()) {
                     for tag in tags {
@@ -513,9 +510,10 @@ impl ThreatFeed {
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(crate::RelayError::Internal(
-                format!("Report failed with status: {}", response.status())
-            ))
+            Err(crate::RelayError::Internal(format!(
+                "Report failed with status: {}",
+                response.status()
+            )))
         }
     }
 }
@@ -555,11 +553,13 @@ impl ThreatInfo {
 
     /// Get human-readable description
     pub fn description(&self) -> String {
-        let cat_str = self.categories.iter()
+        let cat_str = self
+            .categories
+            .iter()
             .map(|c| c.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         format!("Threat score: {}%, Categories: {}", self.score, cat_str)
     }
 }
@@ -602,22 +602,24 @@ pub enum ThreatCategory {
 impl ThreatCategory {
     /// Check if category indicates malicious activity
     pub fn is_malicious(&self) -> bool {
-        matches!(self, 
-            ThreatCategory::Malware |
-            ThreatCategory::C2 |
-            ThreatCategory::Botnet |
-            ThreatCategory::Phishing |
-            ThreatCategory::Ddos
+        matches!(
+            self,
+            ThreatCategory::Malware
+                | ThreatCategory::C2
+                | ThreatCategory::Botnet
+                | ThreatCategory::Phishing
+                | ThreatCategory::Ddos
         )
     }
 
     /// Check if category indicates suspicious but possibly legitimate activity
     pub fn is_suspicious(&self) -> bool {
-        matches!(self,
-            ThreatCategory::TorExit |
-            ThreatCategory::Proxy |
-            ThreatCategory::Hosting |
-            ThreatCategory::Scanner
+        matches!(
+            self,
+            ThreatCategory::TorExit
+                | ThreatCategory::Proxy
+                | ThreatCategory::Hosting
+                | ThreatCategory::Scanner
         )
     }
 }
@@ -760,12 +762,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_threat_intelligence_with_feeds() {
-        let mut ti = ThreatIntelligence::new()
-            .with_min_score(70);
+        let mut ti = ThreatIntelligence::new().with_min_score(70);
 
-        ti.add_feed(ThreatFeed::LocalBlocklist {
-            entries: vec![],
-        });
+        ti.add_feed(ThreatFeed::LocalBlocklist { entries: vec![] });
 
         assert_eq!(ti.feeds.len(), 1);
     }
@@ -813,9 +812,18 @@ mod tests {
     #[test]
     fn test_category_mapping() {
         // Test AbuseIPDB category mapping
-        assert_eq!(abuseipdb_category_to_threat(3), Some(ThreatCategory::BruteForce));
-        assert_eq!(abuseipdb_category_to_threat(5), Some(ThreatCategory::Botnet));
-        assert_eq!(abuseipdb_category_to_threat(9), Some(ThreatCategory::Malware));
+        assert_eq!(
+            abuseipdb_category_to_threat(3),
+            Some(ThreatCategory::BruteForce)
+        );
+        assert_eq!(
+            abuseipdb_category_to_threat(5),
+            Some(ThreatCategory::Botnet)
+        );
+        assert_eq!(
+            abuseipdb_category_to_threat(9),
+            Some(ThreatCategory::Malware)
+        );
         assert_eq!(abuseipdb_category_to_threat(999), None);
 
         // Test reverse mapping
@@ -836,22 +844,22 @@ mod tests {
 fn abuseipdb_category_to_threat(category_id: u32) -> Option<ThreatCategory> {
     // AbuseIPDB category IDs: https://www.abuseipdb.com/categories
     match category_id {
-        3 => Some(ThreatCategory::BruteForce),      // Brute-Force
-        4 => Some(ThreatCategory::WebAttack),       // Web App Attack
-        5 => Some(ThreatCategory::Botnet),          // Botnet
-        6 => Some(ThreatCategory::Scanner),         // Port Scan
-        9 => Some(ThreatCategory::Malware),         // Malware
-        10 => Some(ThreatCategory::Spam),           // Email Spam
-        11 => Some(ThreatCategory::Spam),           // Blog Spam
-        14 => Some(ThreatCategory::Scanner),        // Port Scan
-        15 => Some(ThreatCategory::BruteForce),     // Hacking
-        16 => Some(ThreatCategory::SqlInjection),   // SQL Injection
-        18 => Some(ThreatCategory::BruteForce),     // Brute-Force
-        19 => Some(ThreatCategory::Botnet),         // Bad Web Bot
-        20 => Some(ThreatCategory::WebAttack),      // Exploited Host
-        21 => Some(ThreatCategory::WebAttack),      // Web App Attack
-        22 => Some(ThreatCategory::SshFtpAttack),   // SSH
-        23 => Some(ThreatCategory::SshFtpAttack),   // IoT Targeted
+        3 => Some(ThreatCategory::BruteForce),    // Brute-Force
+        4 => Some(ThreatCategory::WebAttack),     // Web App Attack
+        5 => Some(ThreatCategory::Botnet),        // Botnet
+        6 => Some(ThreatCategory::Scanner),       // Port Scan
+        9 => Some(ThreatCategory::Malware),       // Malware
+        10 => Some(ThreatCategory::Spam),         // Email Spam
+        11 => Some(ThreatCategory::Spam),         // Blog Spam
+        14 => Some(ThreatCategory::Scanner),      // Port Scan
+        15 => Some(ThreatCategory::BruteForce),   // Hacking
+        16 => Some(ThreatCategory::SqlInjection), // SQL Injection
+        18 => Some(ThreatCategory::BruteForce),   // Brute-Force
+        19 => Some(ThreatCategory::Botnet),       // Bad Web Bot
+        20 => Some(ThreatCategory::WebAttack),    // Exploited Host
+        21 => Some(ThreatCategory::WebAttack),    // Web App Attack
+        22 => Some(ThreatCategory::SshFtpAttack), // SSH
+        23 => Some(ThreatCategory::SshFtpAttack), // IoT Targeted
         _ => None,
     }
 }

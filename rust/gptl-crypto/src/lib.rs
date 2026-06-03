@@ -19,7 +19,7 @@ pub mod ratchet;
 
 use std::time::Duration;
 
-pub use aead::{AesGcmCipher, ChaCha20Cipher, CellCipher};
+pub use aead::{AesGcmCipher, CellCipher, ChaCha20Cipher};
 pub use kex::{HybridKeyExchange, KeyExchange, X25519KeyExchange};
 pub use ratchet::ForwardSecrecy;
 
@@ -168,7 +168,10 @@ mod tests {
     fn test_default_config() {
         let config = CryptoConfig::default();
         assert_eq!(config.cell_cipher, CipherSuite::Aes256Gcm);
-        assert_eq!(config.key_exchange, KeyExchangeAlgorithm::HybridX25519Kyber768);
+        assert_eq!(
+            config.key_exchange,
+            KeyExchangeAlgorithm::HybridX25519Kyber768
+        );
         assert!(config.forward_secrecy);
     }
 }

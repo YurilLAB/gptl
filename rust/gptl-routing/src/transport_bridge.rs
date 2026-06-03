@@ -77,9 +77,7 @@ impl CircuitObserver for TransportBridge {
         let monitor = Arc::clone(&self.health);
         let health_kind = classify(kind);
         tokio::spawn(async move {
-            monitor
-                .record_failure(circuit_id as u64, health_kind)
-                .await;
+            monitor.record_failure(circuit_id as u64, health_kind).await;
         });
     }
 
@@ -289,17 +287,15 @@ mod tests {
         use gptl_core::relay_selector::RelaySelector;
 
         let registry = Arc::new(InMemoryRegistry::new());
-        let info = RelayInfo::new("10.0.0.1:9001", "abc", 1_000_000)
-            .with_nickname("alpha");
+        let info = RelayInfo::new("10.0.0.1:9001", "abc", 1_000_000).with_nickname("alpha");
         registry.register(info.clone()).await.unwrap();
 
         let selector = Arc::new(RelaySelector::new(Arc::clone(&registry)));
         let monitor = Arc::new(CircuitHealthMonitor::new());
-        let failover =
-            Arc::new(FailoverManager::new(Arc::clone(&registry), selector));
+        let failover = Arc::new(FailoverManager::new(Arc::clone(&registry), selector));
 
-        let bridge = FailoverBridge::new(Arc::clone(&failover))
-            .with_health_monitor(Arc::clone(&monitor));
+        let bridge =
+            FailoverBridge::new(Arc::clone(&failover)).with_health_monitor(Arc::clone(&monitor));
         bridge
             .set_known_relays(&[("alpha".to_string(), info)])
             .await;

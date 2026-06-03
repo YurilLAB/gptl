@@ -11,30 +11,30 @@
 //! - Circuit management with health monitoring and rotation
 
 pub mod bgp_protection;
+pub mod circuit;
+pub mod dns_protection;
+pub mod failover;
 pub mod guard_management;
 pub mod resource_protection;
-pub mod dns_protection;
-pub mod webrtc_protection;
-pub mod sybil_defense;
-pub mod failover;
-pub mod circuit;
 pub mod rpki_rtr;
+pub mod sybil_defense;
 pub mod transport_bridge;
+pub mod webrtc_protection;
 
 // Re-export failover types
 pub use failover::{
-    FailoverManager, FailoverConfig, FailoverEvent, FailoverResult, FailoverError,
-    FailoverStatistics, CircuitInfo, CircuitStatus, FailureType,
+    CircuitInfo, CircuitStatus, FailoverConfig, FailoverError, FailoverEvent, FailoverManager,
+    FailoverResult, FailoverStatistics, FailureType,
 };
 
 // Re-export circuit management types
 pub use circuit::{
-    CircuitManager, CircuitManagerConfig, CircuitManagerEvent, CircuitManagerStatistics,
-    CircuitHandle, CircuitHealthMonitor, CircuitPool, CircuitPoolConfig,
-    CircuitBuilder, CircuitId, HealthMonitorConfig, HealthStatistics, HealthStatus,
-    PoolCircuit, PoolCircuitState, PoolEvent, PoolError, PoolStatistics,
-    RetireReason, RotationEvent, RotationPolicy, RotationStatistics, RotationTrigger,
-    CircuitManagerBuilder, create_circuit_manager, create_circuit_manager_with_pool,
+    create_circuit_manager, create_circuit_manager_with_pool, CircuitBuilder, CircuitHandle,
+    CircuitHealthMonitor, CircuitId, CircuitManager, CircuitManagerBuilder, CircuitManagerConfig,
+    CircuitManagerEvent, CircuitManagerStatistics, CircuitPool, CircuitPoolConfig,
+    HealthMonitorConfig, HealthStatistics, HealthStatus, PoolCircuit, PoolCircuitState, PoolError,
+    PoolEvent, PoolStatistics, RetireReason, RotationEvent, RotationPolicy, RotationStatistics,
+    RotationTrigger,
 };
 
 use std::net::IpAddr;
@@ -125,7 +125,7 @@ impl RoutingManager {
     /// Create new routing manager
     pub fn new(config: RoutingConfig) -> Self {
         let config = Arc::new(RwLock::new(config));
-        
+
         Self {
             bgp_guard: Some(bgp_protection::BgpGuard::new(config.clone())),
             guard_manager: Some(guard_management::GuardManager::new(config.clone())),
@@ -140,43 +140,43 @@ impl RoutingManager {
     /// Initialize all routing protections
     pub async fn initialize(&self) -> Result<(), RoutingError> {
         let config = self.config.read().await;
-        
+
         if config.bgp_protection {
             if let Some(ref guard) = self.bgp_guard {
                 guard.initialize().await?;
             }
         }
-        
+
         if config.guard_management {
             if let Some(ref manager) = self.guard_manager {
                 manager.initialize().await?;
             }
         }
-        
+
         if config.resource_protection {
             if let Some(ref guard) = self.resource_guard {
                 guard.initialize().await?;
             }
         }
-        
+
         if config.dns_protection {
             if let Some(ref guard) = self.dns_guard {
                 guard.initialize().await?;
             }
         }
-        
+
         if config.webrtc_protection {
             if let Some(ref guard) = self.webrtc_guard {
                 guard.initialize().await?;
             }
         }
-        
+
         if config.sybil_defense {
             if let Some(ref shield) = self.sybil_shield {
                 shield.initialize().await?;
             }
         }
-        
+
         Ok(())
     }
 
@@ -188,14 +188,14 @@ impl RoutingManager {
                 return Err(RoutingError::BgpThreatDetected(threat));
             }
         }
-        
+
         // Get guards from guard manager
         let guards = if let Some(ref manager) = self.guard_manager {
             manager.select_guards().await?
         } else {
             Vec::new()
         };
-        
+
         // Verify guards against Sybil defense
         if let Some(ref shield) = self.sybil_shield {
             for guard in &guards {
@@ -204,7 +204,7 @@ impl RoutingManager {
                 }
             }
         }
-        
+
         // Build path
         Ok(Path {
             guards,
@@ -231,7 +231,10 @@ impl RoutingManager {
     }
 
     /// Allocate circuit resources
-    pub async fn allocate_circuit(&self, pow: ProofOfWork) -> Result<CircuitAllocation, RoutingError> {
+    pub async fn allocate_circuit(
+        &self,
+        pow: ProofOfWork,
+    ) -> Result<CircuitAllocation, RoutingError> {
         if let Some(ref guard) = self.resource_guard {
             guard.allocate(pow).await
         } else {
@@ -358,7 +361,7 @@ impl circuit::CircuitBuilder for RoutingCircuitBuilder {
         // In production, this would use the relay selector to build a real circuit
         // For now, simulate circuit building with a delay
         tokio::time::sleep(Duration::from_millis(50)).await;
-        
+
         // Generate a mock circuit path
         Ok(vec![
             format!("guard_{}_entry", circuit_id),

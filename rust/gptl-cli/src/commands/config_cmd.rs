@@ -49,11 +49,14 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = resolve_path(config_path)?;
     match cmd {
-        ConfigCommand::Show         => cmd_show(&path, &format),
+        ConfigCommand::Show => cmd_show(&path, &format),
         ConfigCommand::Set { key, value } => cmd_set(&path, &key, &value, yes),
-        ConfigCommand::Keys         => cmd_keys(&path),
-        ConfigCommand::Reset        => cmd_reset(&path, yes),
-        ConfigCommand::Path         => { println!("{}", path.display()); Ok(()) }
+        ConfigCommand::Keys => cmd_keys(&path),
+        ConfigCommand::Reset => cmd_reset(&path, yes),
+        ConfigCommand::Path => {
+            println!("{}", path.display());
+            Ok(())
+        }
     }
 }
 
@@ -64,7 +67,10 @@ fn cmd_show(path: &Path, format: &OutputFormat) -> Result<(), Box<dyn std::error
     match format {
         OutputFormat::Table => {
             display::print_config_table(&cfg);
-            println!("  Config file: {}", display::dim(&path.display().to_string()));
+            println!(
+                "  Config file: {}",
+                display::dim(&path.display().to_string())
+            );
         }
         OutputFormat::Json => {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
@@ -99,7 +105,12 @@ fn cmd_keys(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 // ── set ───────────────────────────────────────────────────────────────────────
 
-fn cmd_set(path: &Path, key: &str, value: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_set(
+    path: &Path,
+    key: &str,
+    value: &str,
+    yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = GptlConfig::load(path)?;
 
     // Validate key exists and get old value (returns error for unknown keys)
@@ -123,7 +134,10 @@ fn cmd_set(path: &Path, key: &str, value: &str, yes: bool) -> Result<(), Box<dyn
                 key, value
             ));
         } else {
-            println!("\n  {}  This is a security-sensitive setting.", display::warn_str("Note:"));
+            println!(
+                "\n  {}  This is a security-sensitive setting.",
+                display::warn_str("Note:")
+            );
         }
 
         println!("\n  {}", display::heading("Pending Change"));
@@ -132,7 +146,10 @@ fn cmd_set(path: &Path, key: &str, value: &str, yes: bool) -> Result<(), Box<dyn
         println!();
 
         if !display::confirm(&format!("Apply change to '{}'?", key), yes) {
-            println!("  {}  Aborted — no changes made.", display::warn_str("Cancelled:"));
+            println!(
+                "  {}  Aborted — no changes made.",
+                display::warn_str("Cancelled:")
+            );
             return Ok(());
         }
     }
@@ -152,27 +169,39 @@ fn cmd_set(path: &Path, key: &str, value: &str, yes: bool) -> Result<(), Box<dyn
 // ── reset ─────────────────────────────────────────────────────────────────────
 
 fn cmd_reset(path: &Path, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let current  = GptlConfig::load(path)?;
+    let current = GptlConfig::load(path)?;
     let defaults = GptlConfig::default();
-    let changes  = current.diff(&defaults);
+    let changes = current.diff(&defaults);
 
     if changes.is_empty() {
-        println!("  {}  Configuration is already at defaults.", display::info_str("info:"));
+        println!(
+            "  {}  Configuration is already at defaults.",
+            display::info_str("info:")
+        );
         return Ok(());
     }
 
-    println!("\n  {}", display::heading("Reset Summary — settings that will change:"));
+    println!(
+        "\n  {}",
+        display::heading("Reset Summary — settings that will change:")
+    );
     display::print_diff(&changes);
     println!();
     display::print_warning("This will overwrite ALL current settings with defaults.");
 
     if !display::confirm("Reset configuration to defaults?", yes) {
-        println!("  {}  Aborted — no changes made.", display::warn_str("Cancelled:"));
+        println!(
+            "  {}  Aborted — no changes made.",
+            display::warn_str("Cancelled:")
+        );
         return Ok(());
     }
 
     defaults.save(path)?;
-    println!("  {}  Configuration reset to defaults.", display::ok("Done:"));
+    println!(
+        "  {}  Configuration reset to defaults.",
+        display::ok("Done:")
+    );
     Ok(())
 }
 
@@ -183,7 +212,7 @@ pub(crate) fn resolve_path(
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let p = match override_path {
         Some(p) => p,
-        None    => GptlConfig::default_path()?,
+        None => GptlConfig::default_path()?,
     };
     Ok(p)
 }

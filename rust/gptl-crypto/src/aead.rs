@@ -4,9 +4,7 @@
 //! Based on 2025-2026 best practices using aws-lc-rs (FIPS-validated).
 
 use crate::{CellEncryptionError, CipherSuite};
-use aws_lc_rs::aead::{
-    Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305,
-};
+use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Cell cipher trait for AEAD operations
@@ -50,8 +48,9 @@ impl AesGcmCipher {
             });
         }
 
-        let unbound_key = UnboundKey::new(&AES_256_GCM, key)
-            .map_err(|e| CellEncryptionError::EncryptionFailed(format!("Key creation failed: {:?}", e)))?;
+        let unbound_key = UnboundKey::new(&AES_256_GCM, key).map_err(|e| {
+            CellEncryptionError::EncryptionFailed(format!("Key creation failed: {:?}", e))
+        })?;
 
         Ok(Self {
             key: LessSafeKey::new(unbound_key),
@@ -85,7 +84,9 @@ impl CellCipher for AesGcmCipher {
         let mut in_out = plaintext.to_vec();
         self.key
             .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
-            .map_err(|e| CellEncryptionError::EncryptionFailed(format!("AES-GCM encryption failed: {:?}", e)))?;
+            .map_err(|e| {
+                CellEncryptionError::EncryptionFailed(format!("AES-GCM encryption failed: {:?}", e))
+            })?;
 
         // Prepend nonce to ciphertext
         let mut output = nonce_bytes.to_vec();
@@ -108,9 +109,12 @@ impl CellCipher for AesGcmCipher {
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
         let mut in_out = ciphertext[12..].to_vec();
-        let plaintext = self.key
+        let plaintext = self
+            .key
             .open_in_place(nonce, Aad::empty(), &mut in_out)
-            .map_err(|e| CellEncryptionError::DecryptionFailed(format!("AES-GCM decryption failed: {:?}", e)))?;
+            .map_err(|e| {
+                CellEncryptionError::DecryptionFailed(format!("AES-GCM decryption failed: {:?}", e))
+            })?;
 
         Ok(plaintext.to_vec())
     }
@@ -150,8 +154,9 @@ impl ChaCha20Cipher {
             });
         }
 
-        let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key)
-            .map_err(|e| CellEncryptionError::EncryptionFailed(format!("Key creation failed: {:?}", e)))?;
+        let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, key).map_err(|e| {
+            CellEncryptionError::EncryptionFailed(format!("Key creation failed: {:?}", e))
+        })?;
 
         Ok(Self {
             key: LessSafeKey::new(unbound_key),
@@ -184,7 +189,12 @@ impl CellCipher for ChaCha20Cipher {
         let mut in_out = plaintext.to_vec();
         self.key
             .seal_in_place_append_tag(nonce, Aad::empty(), &mut in_out)
-            .map_err(|e| CellEncryptionError::EncryptionFailed(format!("ChaCha20 encryption failed: {:?}", e)))?;
+            .map_err(|e| {
+                CellEncryptionError::EncryptionFailed(format!(
+                    "ChaCha20 encryption failed: {:?}",
+                    e
+                ))
+            })?;
 
         // Prepend nonce to ciphertext
         let mut output = nonce_bytes.to_vec();
@@ -206,9 +216,15 @@ impl CellCipher for ChaCha20Cipher {
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
         let mut in_out = ciphertext[12..].to_vec();
-        let plaintext = self.key
+        let plaintext = self
+            .key
             .open_in_place(nonce, Aad::empty(), &mut in_out)
-            .map_err(|e| CellEncryptionError::DecryptionFailed(format!("ChaCha20 decryption failed: {:?}", e)))?;
+            .map_err(|e| {
+                CellEncryptionError::DecryptionFailed(format!(
+                    "ChaCha20 decryption failed: {:?}",
+                    e
+                ))
+            })?;
 
         Ok(plaintext.to_vec())
     }
@@ -455,7 +471,10 @@ mod tests {
         let ciphertext = cipher_a.encrypt(plaintext).unwrap();
 
         let result = cipher_b.decrypt(&ciphertext);
-        assert!(result.is_err(), "ChaCha20 decryption with wrong key must fail");
+        assert!(
+            result.is_err(),
+            "ChaCha20 decryption with wrong key must fail"
+        );
     }
 
     #[test]
@@ -465,15 +484,23 @@ mod tests {
         let cipher = AesGcmCipher::new(&key, nonce_prefix).unwrap();
 
         // Set counter to u64::MAX - 1 (one slot left before sentinel value)
-        cipher.nonce_counter.store(u64::MAX - 1, std::sync::atomic::Ordering::SeqCst);
+        cipher
+            .nonce_counter
+            .store(u64::MAX - 1, std::sync::atomic::Ordering::SeqCst);
 
         // This consume uses counter = u64::MAX - 1, increments to u64::MAX, succeeds
         let result1 = cipher.encrypt(b"first");
-        assert!(result1.is_ok(), "encryption at counter u64::MAX-1 must succeed");
+        assert!(
+            result1.is_ok(),
+            "encryption at counter u64::MAX-1 must succeed"
+        );
 
         // Counter is now u64::MAX; next fetch_add returns u64::MAX which equals the sentinel
         let result2 = cipher.encrypt(b"second");
-        assert!(result2.is_err(), "encryption when counter reaches u64::MAX must fail with NonceExhausted");
+        assert!(
+            result2.is_err(),
+            "encryption when counter reaches u64::MAX must fail with NonceExhausted"
+        );
     }
 
     #[test]
@@ -483,10 +510,17 @@ mod tests {
         let cipher = AesGcmCipher::new(&key, nonce_prefix).unwrap();
 
         // Just below the rotation threshold
-        cipher.nonce_counter.store((1u64 << 32) - 1, std::sync::atomic::Ordering::SeqCst);
-        assert!(!cipher.needs_rotation(), "below 2^32 should not need rotation");
+        cipher
+            .nonce_counter
+            .store((1u64 << 32) - 1, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            !cipher.needs_rotation(),
+            "below 2^32 should not need rotation"
+        );
 
-        cipher.nonce_counter.store(1u64 << 32, std::sync::atomic::Ordering::SeqCst);
+        cipher
+            .nonce_counter
+            .store(1u64 << 32, std::sync::atomic::Ordering::SeqCst);
         assert!(cipher.needs_rotation(), "at 2^32 must need rotation");
     }
 
@@ -504,7 +538,10 @@ mod tests {
         ciphertext[last] ^= 0xFF;
 
         let result = cipher.decrypt(&ciphertext);
-        assert!(result.is_err(), "flipping auth tag byte must cause auth failure");
+        assert!(
+            result.is_err(),
+            "flipping auth tag byte must cause auth failure"
+        );
     }
 
     #[test]
@@ -517,25 +554,36 @@ mod tests {
         let dec = AesGcmCipher::new(&key2, prefix).unwrap();
 
         let ct = enc.encrypt(b"private").unwrap();
-        assert!(dec.decrypt(&ct).is_err(),
-            "encrypt-then-decrypt with different keys must fail");
+        assert!(
+            dec.decrypt(&ct).is_err(),
+            "encrypt-then-decrypt with different keys must fail"
+        );
     }
 
     #[test]
     fn test_invalid_key_length_rejected() {
         // 16-byte key (too short for AES-256)
         let result = AesGcmCipher::new(&[0u8; 16], [0u8; 4]);
-        assert!(result.is_err(), "16-byte key must be rejected for AES-256-GCM");
+        assert!(
+            result.is_err(),
+            "16-byte key must be rejected for AES-256-GCM"
+        );
 
         // 64-byte key (too long)
         let result64 = AesGcmCipher::new(&[0u8; 64], [0u8; 4]);
-        assert!(result64.is_err(), "64-byte key must be rejected for AES-256-GCM");
+        assert!(
+            result64.is_err(),
+            "64-byte key must be rejected for AES-256-GCM"
+        );
     }
 
     #[test]
     fn test_chacha20_invalid_key_length_rejected() {
         let result = ChaCha20Cipher::new(&[0u8; 16], [0u8; 4]);
-        assert!(result.is_err(), "16-byte key must be rejected for ChaCha20-Poly1305");
+        assert!(
+            result.is_err(),
+            "16-byte key must be rejected for ChaCha20-Poly1305"
+        );
     }
 }
 

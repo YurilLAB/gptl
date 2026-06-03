@@ -48,11 +48,11 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = super::config_cmd::resolve_path(config_path)?;
     match cmd {
-        ProfileCommand::List             => cmd_list(&path),
-        ProfileCommand::Show { name }    => cmd_show(&path, &name),
-        ProfileCommand::Apply { name }   => cmd_apply(&path, &name, yes),
-        ProfileCommand::Save { name }    => cmd_save(&path, &name),
-        ProfileCommand::Delete { name }  => cmd_delete(&path, &name, yes),
+        ProfileCommand::List => cmd_list(&path),
+        ProfileCommand::Show { name } => cmd_show(&path, &name),
+        ProfileCommand::Apply { name } => cmd_apply(&path, &name, yes),
+        ProfileCommand::Save { name } => cmd_save(&path, &name),
+        ProfileCommand::Delete { name } => cmd_delete(&path, &name, yes),
     }
 }
 
@@ -70,14 +70,22 @@ fn cmd_list(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     t.set_header(vec!["Name", "Type", "Security Level", "Description"]);
 
     for (name, is_builtin) in &profiles {
-        let kind   = if *is_builtin { "built-in" } else { "saved" };
-        let pcfg   = profile::load(name, path)?;
-        let level  = display::level_badge(pcfg.security_level);
-        let desc   = pcfg.security_level.description().split('.').next().unwrap_or("");
+        let kind = if *is_builtin { "built-in" } else { "saved" };
+        let pcfg = profile::load(name, path)?;
+        let level = display::level_badge(pcfg.security_level);
+        let desc = pcfg
+            .security_level
+            .description()
+            .split('.')
+            .next()
+            .unwrap_or("");
         t.add_row(vec![
             comfy_table::Cell::new(name),
-            comfy_table::Cell::new(kind)
-                .fg(if *is_builtin { comfy_table::Color::Cyan } else { comfy_table::Color::White }),
+            comfy_table::Cell::new(kind).fg(if *is_builtin {
+                comfy_table::Color::Cyan
+            } else {
+                comfy_table::Color::White
+            }),
             comfy_table::Cell::new(level),
             comfy_table::Cell::new(desc),
         ]);
@@ -102,10 +110,14 @@ fn cmd_show(path: &std::path::Path, name: &str) -> Result<(), Box<dyn std::error
 
 // ── apply ─────────────────────────────────────────────────────────────────────
 
-fn cmd_apply(path: &std::path::Path, name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_apply(
+    path: &std::path::Path,
+    name: &str,
+    yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current = GptlConfig::load(path)?;
-    let profile  = profile::load(name, path)?;
-    let changes  = current.diff(&profile);
+    let profile = profile::load(name, path)?;
+    let changes = current.diff(&profile);
 
     if changes.is_empty() {
         println!(
@@ -117,13 +129,19 @@ fn cmd_apply(path: &std::path::Path, name: &str, yes: bool) -> Result<(), Box<dy
     }
 
     // Warn about security downgrades
-    if profile.security_level.is_dangerous_downgrade(current.security_level) {
+    if profile
+        .security_level
+        .is_dangerous_downgrade(current.security_level)
+    {
         display::print_danger(&format!(
             "Profile '{}' is a significant downgrade from your current {} level.",
             name,
             current.security_level.to_string().to_uppercase()
         ));
-    } else if profile.security_level.is_downgrade_from(current.security_level) {
+    } else if profile
+        .security_level
+        .is_downgrade_from(current.security_level)
+    {
         display::print_warning(&format!(
             "Profile '{}' lowers the security level from {} to {}.",
             name,
@@ -146,12 +164,19 @@ fn cmd_apply(path: &std::path::Path, name: &str, yes: bool) -> Result<(), Box<dy
         ));
     }
 
-    println!("\n  {} Applying profile '{}':", display::heading("Change Summary"), name);
+    println!(
+        "\n  {} Applying profile '{}':",
+        display::heading("Change Summary"),
+        name
+    );
     display::print_diff(&changes);
     println!();
 
     if !display::confirm(&format!("Apply profile '{}'?", name), yes) {
-        println!("  {}  Aborted — no changes made.", display::warn_str("Cancelled:"));
+        println!(
+            "  {}  Aborted — no changes made.",
+            display::warn_str("Cancelled:")
+        );
         return Ok(());
     }
 
@@ -184,17 +209,20 @@ fn cmd_save(path: &std::path::Path, name: &str) -> Result<(), Box<dyn std::error
 
 // ── delete ────────────────────────────────────────────────────────────────────
 
-fn cmd_delete(path: &std::path::Path, name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_delete(
+    path: &std::path::Path,
+    name: &str,
+    yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Confirm deletion
     if !display::confirm(&format!("Delete profile '{}'?", name), yes) {
-        println!("  {}  Aborted — profile not deleted.", display::warn_str("Cancelled:"));
+        println!(
+            "  {}  Aborted — profile not deleted.",
+            display::warn_str("Cancelled:")
+        );
         return Ok(());
     }
     profile::delete(name, path)?;
-    println!(
-        "  {}  Profile '{}' deleted.",
-        display::ok("Deleted:"),
-        name
-    );
+    println!("  {}  Profile '{}' deleted.", display::ok("Deleted:"), name);
     Ok(())
 }

@@ -4,11 +4,11 @@
 //! including proof-of-work, memory limits, and circuit prioritization.
 
 use super::{CircuitAllocation, ProofOfWork, RoutingConfig, RoutingError};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use sha2::{Sha256, Digest};
 
 /// Constant-time byte slice equality.  Returns false for mismatched lengths;
 /// for equal lengths runs in time proportional to the slice length.
@@ -108,24 +108,24 @@ impl ResourceGuard {
             allocated: 0,
             circuit_limit: 100 * 1024 * 1024, // 100MB per circuit
         }));
-        
+
         let circuit_quotas = Arc::new(RwLock::new(HashMap::new()));
-        
+
         let pow_verifier = Arc::new(RwLock::new(PowVerifier {
             difficulty, // required leading zero bits
             verified_cache: HashMap::new(),
         }));
-        
+
         let rate_limiter = Arc::new(RwLock::new(RateLimiter {
             max_per_minute: 10,
             client_counts: HashMap::new(),
         }));
-        
+
         let oom_handler = Arc::new(RwLock::new(OomHandler {
             threshold: 0.9, // 90%
             kill_queue: Vec::new(),
         }));
-        
+
         Self {
             config,
             memory_pool,
@@ -142,16 +142,16 @@ impl ResourceGuard {
         let pool = self.memory_pool.clone();
         let oom = self.oom_handler.clone();
         let quotas = self.circuit_quotas.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
                 interval.tick().await;
-                
+
                 let pool_read = pool.read().await;
                 let usage = pool_read.allocated as f64 / pool_read.total_available as f64;
                 drop(pool_read);
-                
+
                 if usage > 0.9 {
                     // OOM condition - kill circuits, freeing their reserved
                     // memory back into the pool (otherwise `allocated` never
@@ -173,7 +173,7 @@ impl ResourceGuard {
                 }
             }
         });
-        
+
         Ok(())
     }
 
@@ -187,7 +187,7 @@ impl ResourceGuard {
             let mut verifier = self.pow_verifier.write().await;
             if !verifier.verify(&pow).await {
                 return Err(RoutingError::ResourceAllocationFailed(
-                    "Invalid proof-of-work".to_string()
+                    "Invalid proof-of-work".to_string(),
                 ));
             }
             pow.difficulty.min(verifier.difficulty)
@@ -202,7 +202,7 @@ impl ResourceGuard {
             let mut pool = self.memory_pool.write().await;
             if pool.allocated + memory_quota > pool.total_available {
                 return Err(RoutingError::ResourceAllocationFailed(
-                    "Memory exhausted".to_string()
+                    "Memory exhausted".to_string(),
                 ));
             }
             pool.allocated += memory_quota;
@@ -211,12 +211,15 @@ impl ResourceGuard {
         // Store quota
         {
             let mut quotas = self.circuit_quotas.write().await;
-            quotas.insert(circuit_id, CircuitQuota {
-                max_memory: memory_quota,
-                max_bandwidth: bandwidth_quota,
-                current_memory: 0,
-                current_bandwidth: 0,
-            });
+            quotas.insert(
+                circuit_id,
+                CircuitQuota {
+                    max_memory: memory_quota,
+                    max_bandwidth: bandwidth_quota,
+                    current_memory: 0,
+                    current_bandwidth: 0,
+                },
+            );
         }
 
         // Add to kill queue, ordered so the lowest-priority (lowest verified
@@ -237,24 +240,24 @@ impl ResourceGuard {
     /// Release circuit resources
     pub async fn release(&self, circuit_id: u32) -> Result<(), RoutingError> {
         let mut quotas = self.circuit_quotas.write().await;
-        
+
         if let Some(quota) = quotas.remove(&circuit_id) {
             let mut pool = self.memory_pool.write().await;
             // Free the reserved quota, not just current usage
             pool.allocated = pool.allocated.saturating_sub(quota.max_memory);
         }
-        
+
         // Remove from kill queue
         let mut oom = self.oom_handler.write().await;
         oom.kill_queue.retain(|&(id, _)| id != circuit_id);
-        
+
         Ok(())
     }
 
     /// Check memory usage for circuit
     pub async fn check_memory(&self, circuit_id: u32, additional: usize) -> bool {
         let quotas = self.circuit_quotas.read().await;
-        
+
         if let Some(quota) = quotas.get(&circuit_id) {
             quota.current_memory + additional <= quota.max_memory
         } else {
@@ -265,7 +268,7 @@ impl ResourceGuard {
     /// Record memory usage
     pub async fn record_memory(&self, circuit_id: u32, bytes: usize) {
         let mut quotas = self.circuit_quotas.write().await;
-        
+
         if let Some(quota) = quotas.get_mut(&circuit_id) {
             quota.current_memory += bytes;
         }
@@ -323,9 +326,7 @@ impl PowVerifier {
             return false;
         }
 
-        let leading_zeros = computed.iter()
-            .take_while(|&&b| b == 0)
-            .count() * 8;
+        let leading_zeros = computed.iter().take_while(|&&b| b == 0).count() * 8;
 
         // The threshold is the SERVER's difficulty, never the attacker-supplied
         // `pow.difficulty` (which would let a client send difficulty: 0 and pass
@@ -467,19 +468,19 @@ impl SniperDetector {
     /// Check for sniper attack pattern
     pub async fn detect_sniper(&self, circuit_id: u32) -> bool {
         let stats = self.circuit_stats.read().await;
-        
+
         if let Some(stat) = stats.get(&circuit_id) {
             // Check for stalled circuit (many cells received, few acked)
             if stat.cells_received > 1000 {
                 let ack_ratio = stat.cells_acked as f64 / stat.cells_received as f64;
-                
+
                 // Low ack ratio indicates sniper attack
                 if ack_ratio < self.threshold {
                     return true;
                 }
             }
         }
-        
+
         false
     }
 
@@ -487,7 +488,7 @@ impl SniperDetector {
     pub async fn get_victims(&self) -> Vec<u32> {
         let stats = self.circuit_stats.read().await;
         let mut victims = Vec::new();
-        
+
         for (circuit_id, stat) in stats.iter() {
             if stat.cells_received > 1000 {
                 let ack_ratio = stat.cells_acked as f64 / stat.cells_received as f64;
@@ -496,7 +497,7 @@ impl SniperDetector {
                 }
             }
         }
-        
+
         victims
     }
 }
@@ -516,18 +517,16 @@ impl PowGenerator {
     pub fn generate(&self, circuit_id: u32) -> ProofOfWork {
         let mut nonce: u64 = rand::random();
         let target_zeros = self.difficulty as usize;
-        
+
         loop {
             let mut hasher = Sha256::new();
             hasher.update(circuit_id.to_le_bytes());
             hasher.update(nonce.to_le_bytes());
             let result = hasher.finalize();
-            
+
             // Count leading zeros
-            let leading_zeros = result.iter()
-                .take_while(|&&b| b == 0)
-                .count() * 8;
-            
+            let leading_zeros = result.iter().take_while(|&&b| b == 0).count() * 8;
+
             if leading_zeros >= target_zeros {
                 return ProofOfWork {
                     difficulty: self.difficulty,
@@ -536,7 +535,7 @@ impl PowGenerator {
                     hash: result.to_vec(),
                 };
             }
-            
+
             nonce = nonce.wrapping_add(1);
         }
     }
@@ -575,9 +574,7 @@ mod tests {
         hasher.update(pow.nonce.to_le_bytes());
         let result = hasher.finalize();
 
-        let leading_zeros = result.iter()
-            .take_while(|&&b| b == 0)
-            .count() * 8;
+        let leading_zeros = result.iter().take_while(|&&b| b == 0).count() * 8;
 
         assert!(leading_zeros >= 10);
     }
@@ -639,7 +636,11 @@ mod tests {
         assert!(guard.check_memory(allocation.circuit_id, 1024).await);
 
         // Check memory exceeding quota
-        assert!(!guard.check_memory(allocation.circuit_id, allocation.memory_quota + 1).await);
+        assert!(
+            !guard
+                .check_memory(allocation.circuit_id, allocation.memory_quota + 1)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -758,9 +759,7 @@ mod tests {
         let pow = generator.generate(99999);
 
         // Verify hash has correct difficulty
-        let leading_zeros = pow.hash.iter()
-            .take_while(|&&b| b == 0)
-            .count() * 8;
+        let leading_zeros = pow.hash.iter().take_while(|&&b| b == 0).count() * 8;
 
         assert!(leading_zeros >= 16);
         assert_eq!(pow.difficulty, 16);
@@ -795,8 +794,10 @@ mod tests {
         pow.hash = vec![0xFFu8; 32]; // no leading zeros
 
         let result = guard.allocate(pow).await;
-        assert!(result.is_err(),
-            "PoW with hash lacking required leading zeros must be rejected");
+        assert!(
+            result.is_err(),
+            "PoW with hash lacking required leading zeros must be rejected"
+        );
     }
 
     #[tokio::test]
@@ -826,7 +827,10 @@ mod tests {
         let generator = PowGenerator::new(8);
         let pow = generator.generate(31337);
 
-        assert!(guard.allocate(pow.clone()).await.is_ok(), "first use succeeds");
+        assert!(
+            guard.allocate(pow.clone()).await.is_ok(),
+            "first use succeeds"
+        );
         assert!(
             guard.allocate(pow).await.is_err(),
             "replaying the same PoW must be rejected"
@@ -864,8 +868,10 @@ mod tests {
         let generator = PowGenerator::new(8);
         let pow = generator.generate(777);
         let result = guard.allocate(pow).await;
-        assert!(result.is_err(),
-            "allocation must fail when memory pool is exhausted");
+        assert!(
+            result.is_err(),
+            "allocation must fail when memory pool is exhausted"
+        );
     }
 
     #[tokio::test]
@@ -880,8 +886,10 @@ mod tests {
         // Trying to add more than the quota must be rejected
         let over_quota = allocation.memory_quota + 1;
         let ok = guard.check_memory(allocation.circuit_id, over_quota).await;
-        assert!(!ok,
-            "check_memory must return false when additional bytes would exceed max_memory");
+        assert!(
+            !ok,
+            "check_memory must return false when additional bytes would exceed max_memory"
+        );
     }
 
     #[test]
@@ -902,7 +910,9 @@ mod tests {
 
         // leading_zeros = 0 >= 0 → should pass
         let leading_zeros = pow.hash.iter().take_while(|&&b| b == 0).count() * 8;
-        assert!(leading_zeros >= pow.difficulty as usize,
-            "difficulty 0 must accept a hash with zero leading zero bits");
+        assert!(
+            leading_zeros >= pow.difficulty as usize,
+            "difficulty 0 must accept a hash with zero leading zero bits"
+        );
     }
 }

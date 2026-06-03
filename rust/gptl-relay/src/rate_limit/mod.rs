@@ -7,17 +7,17 @@
 //! - Account lockout after N failures
 //! - CAPTCHA challenges
 
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 
-pub mod governor;
 pub mod captcha;
+pub mod governor;
 
-pub use governor::{GovernorRateLimiter, Quota};
 pub use captcha::{CaptchaChallenge, CaptchaGenerator, CaptchaVerification};
+pub use governor::{GovernorRateLimiter, Quota};
 
 /// Main rate limiter combining all protection mechanisms
 #[derive(Debug)]
@@ -83,8 +83,10 @@ impl AuthRateLimiter {
             // Calculate backoff
             let backoff = self.calculate_backoff(state.consecutive_failures);
             state.backoff_until = Some(Utc::now() + backoff);
-            
-            return Err(crate::RelayError::RateLimitExceeded(backoff.num_seconds() as u64));
+
+            return Err(crate::RelayError::RateLimitExceeded(
+                backoff.num_seconds() as u64
+            ));
         }
 
         state.requests += 1;
@@ -103,15 +105,18 @@ impl AuthRateLimiter {
             if let Some(lockout) = locked.get(username) {
                 if lockout.expires_at > Utc::now() {
                     let remaining = (lockout.expires_at - Utc::now()).num_seconds() as u64;
-                    return Err(crate::RelayError::AccountLocked(
-                        format!("Account locked for {} more seconds", remaining)
-                    ));
+                    return Err(crate::RelayError::AccountLocked(format!(
+                        "Account locked for {} more seconds",
+                        remaining
+                    )));
                 }
             }
         }
 
         let mut limiter = self.account_limiter.write().await;
-        let state = limiter.entry(username.to_string()).or_insert_with(AccountRateLimitState::new);
+        let state = limiter
+            .entry(username.to_string())
+            .or_insert_with(AccountRateLimitState::new);
 
         // Reset the counter once the sliding window has elapsed (see check_ip).
         let now = Utc::now();
@@ -173,7 +178,9 @@ impl AuthRateLimiter {
         // Update account failure record
         let account_failure_count = {
             let mut failures = self.account_failures.write().await;
-            let record = failures.entry(username.to_string()).or_insert_with(FailureRecord::new);
+            let record = failures
+                .entry(username.to_string())
+                .or_insert_with(FailureRecord::new);
             record.count += 1;
             record.last_failure = now;
             record.count
@@ -189,14 +196,17 @@ impl AuthRateLimiter {
         // Check if account should be locked
         if account_failure_count >= self.config.account_lockout_threshold {
             let lockout_duration = self.calculate_lockout_duration(account_failure_count);
-            
+
             let mut locked = self.locked_accounts.write().await;
-            locked.insert(username.to_string(), AccountLockoutEntry {
-                username: username.to_string(),
-                locked_at: now,
-                expires_at: now + lockout_duration,
-                failure_count: account_failure_count,
-            });
+            locked.insert(
+                username.to_string(),
+                AccountLockoutEntry {
+                    username: username.to_string(),
+                    locked_at: now,
+                    expires_at: now + lockout_duration,
+                    failure_count: account_failure_count,
+                },
+            );
 
             return FailureAction::AccountLocked {
                 duration_secs: lockout_duration.num_seconds() as u64,
@@ -211,7 +221,7 @@ impl AuthRateLimiter {
         // Check if exponential backoff should be applied
         if ip_failure_count >= self.config.backoff_threshold {
             let backoff = self.calculate_backoff(ip_failure_count);
-            
+
             let mut limiter = self.ip_limiter.write().await;
             if let Some(state) = limiter.get_mut(&ip) {
                 state.backoff_until = Some(now + backoff);
@@ -228,7 +238,7 @@ impl AuthRateLimiter {
     /// Check if account is locked
     pub async fn is_account_locked(&self, username: &str) -> Option<AccountLockoutInfo> {
         let locked = self.locked_accounts.read().await;
-        
+
         locked.get(username).map(|lockout| {
             let remaining = (lockout.expires_at - Utc::now()).num_seconds().max(0) as u64;
             AccountLockoutInfo {
@@ -243,11 +253,11 @@ impl AuthRateLimiter {
     pub async fn unlock_account(&self, username: &str) -> crate::Result<()> {
         let mut locked = self.locked_accounts.write().await;
         locked.remove(username);
-        
+
         // Also clear failure count
         let mut failures = self.account_failures.write().await;
         failures.remove(username);
-        
+
         Ok(())
     }
 
@@ -255,10 +265,14 @@ impl AuthRateLimiter {
     pub async fn get_ip_stats(&self, ip: IpAddr) -> IpFailureStats {
         let failures = self.ip_failures.read().await;
         let limiter = self.ip_limiter.read().await;
-        
+
         let failure_count = failures.get(&ip).map(|f| f.count).unwrap_or(0);
-        let consecutive_failures = limiter.get(&ip).map(|s| s.consecutive_failures).unwrap_or(0);
-        let in_backoff = limiter.get(&ip)
+        let consecutive_failures = limiter
+            .get(&ip)
+            .map(|s| s.consecutive_failures)
+            .unwrap_or(0);
+        let in_backoff = limiter
+            .get(&ip)
             .and_then(|s| s.backoff_until)
             .map(|t| t > Utc::now())
             .unwrap_or(false);
@@ -289,14 +303,14 @@ impl AuthRateLimiter {
         let base_duration = Duration::minutes(15);
         let multiplier = 2u32.pow((failures / self.config.account_lockout_threshold).min(5));
         let max_duration = Duration::hours(24);
-        
+
         (base_duration * multiplier as i32).min(max_duration)
     }
 
     /// Cleanup expired entries
     async fn cleanup_expired(&self) {
         let cutoff = Utc::now() - Duration::hours(24);
-        
+
         // Cleanup IP failures
         {
             let mut failures = self.ip_failures.write().await;
@@ -516,7 +530,7 @@ mod tests {
 
         // Reset limiter state
         limiter.record_success(ip, username).await;
-        
+
         // Test CAPTCHA threshold
         for _ in 0..5 {
             limiter.record_failure(ip, username).await;
@@ -564,10 +578,10 @@ mod tests {
         // Test exponential growth
         let b1 = limiter.calculate_backoff(3);
         assert_eq!(b1.num_seconds(), 2); // 2^1
-        
+
         let b2 = limiter.calculate_backoff(4);
         assert_eq!(b2.num_seconds(), 4); // 2^2
-        
+
         let b3 = limiter.calculate_backoff(5);
         assert_eq!(b3.num_seconds(), 8); // 2^3
     }

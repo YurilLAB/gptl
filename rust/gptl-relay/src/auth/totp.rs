@@ -7,7 +7,7 @@
 //!   * cryptographically random per-user backup codes,
 //!   * constant-time code comparison (delegated to totp-rs internals).
 
-use base32::{Alphabet, encode as base32_encode_lib};
+use base32::{encode as base32_encode_lib, Alphabet};
 use rand::RngCore;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -180,7 +180,10 @@ mod tests {
         let setup = mgr.setup_for_user("alice").await.unwrap();
         // "000000" is overwhelmingly unlikely to be the current valid code.
         let result = mgr.verify(&setup.secret, "000000").unwrap();
-        assert!(!result, "TOTP must reject a fixed wrong code (was a stub returning Ok(true))");
+        assert!(
+            !result,
+            "TOTP must reject a fixed wrong code (was a stub returning Ok(true))"
+        );
     }
 
     #[tokio::test]
@@ -191,13 +194,21 @@ mod tests {
         // Compute the current valid code the same way the manager does.
         let secret_bytes = Secret::Encoded(setup.secret.clone()).to_bytes().unwrap();
         let totp = TOTP::new(
-            Algorithm::SHA1, 6, 1, 30, secret_bytes,
-            Some("GPTL".to_string()), "GPTL".to_string(),
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("GPTL".to_string()),
+            "GPTL".to_string(),
         )
         .unwrap();
         let code = totp.generate_current().unwrap();
 
-        assert!(mgr.verify(&setup.secret, &code).unwrap(), "first use must be accepted");
+        assert!(
+            mgr.verify(&setup.secret, &code).unwrap(),
+            "first use must be accepted"
+        );
         assert!(
             !mgr.verify(&setup.secret, &code).unwrap(),
             "the same code must not be accepted twice (replay)"
@@ -218,8 +229,10 @@ mod tests {
         let mgr = TotpManager::default();
         let a = mgr.setup_for_user("a").await.unwrap();
         let b = mgr.setup_for_user("b").await.unwrap();
-        assert_ne!(a.backup_codes, b.backup_codes,
-            "backup codes must not be a deterministic function of position");
+        assert_ne!(
+            a.backup_codes, b.backup_codes,
+            "backup codes must not be a deterministic function of position"
+        );
         let unique: std::collections::HashSet<_> = a.backup_codes.iter().collect();
         assert_eq!(unique.len(), 10, "all 10 backup codes must be unique");
     }
@@ -232,7 +245,8 @@ mod tests {
         for c in setup.secret.chars() {
             assert!(
                 c.is_ascii_uppercase() || ('2'..='7').contains(&c),
-                "secret must be RFC 4648 base32; saw {:?}", c,
+                "secret must be RFC 4648 base32; saw {:?}",
+                c,
             );
         }
     }

@@ -7,13 +7,13 @@
 //! - JsonFileRegistry: Persistent local storage
 //! - Secure registration with proof of ownership
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::fs;
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -132,11 +132,7 @@ pub struct RelayInfo {
 
 impl RelayInfo {
     /// Create a new relay info
-    pub fn new(
-        address: impl Into<String>,
-        public_key: impl Into<String>,
-        bandwidth: u64,
-    ) -> Self {
+    pub fn new(address: impl Into<String>, public_key: impl Into<String>, bandwidth: u64) -> Self {
         let now = SystemTime::now();
         Self {
             id: Uuid::new_v4().to_string(),
@@ -190,8 +186,13 @@ impl RelayInfo {
     pub fn matches_criteria(&self, criteria: &RelayCriteria) -> bool {
         // Check security level
         if let Some(min_level) = criteria.min_security_level {
-            let level_ord = matches!((self.security_level, min_level), (SecurityLevel::Maximum, _) | (SecurityLevel::Enhanced, SecurityLevel::Standard) |
-                (SecurityLevel::Enhanced, SecurityLevel::Enhanced) | (SecurityLevel::Standard, SecurityLevel::Standard));
+            let level_ord = matches!(
+                (self.security_level, min_level),
+                (SecurityLevel::Maximum, _)
+                    | (SecurityLevel::Enhanced, SecurityLevel::Standard)
+                    | (SecurityLevel::Enhanced, SecurityLevel::Enhanced)
+                    | (SecurityLevel::Standard, SecurityLevel::Standard)
+            );
             if !level_ord {
                 return false;
             }
@@ -242,8 +243,8 @@ impl RelayInfo {
 
     /// Verify ownership proof
     pub fn verify_ownership(&self) -> Result<bool, RegistryError> {
-        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
-        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         let proof = match &self.ownership_proof {
             Some(p) => p,
@@ -251,11 +252,14 @@ impl RelayInfo {
         };
 
         // Decode public key
-        let pk_bytes = BASE64.decode(&self.public_key)
+        let pk_bytes = BASE64
+            .decode(&self.public_key)
             .map_err(|e| RegistryError::InvalidKey(format!("Invalid public key: {}", e)))?;
-        
+
         if pk_bytes.len() != 32 {
-            return Err(RegistryError::InvalidKey("Public key must be 32 bytes".to_string()));
+            return Err(RegistryError::InvalidKey(
+                "Public key must be 32 bytes".to_string(),
+            ));
         }
 
         let mut pk_array = [0u8; 32];
@@ -264,11 +268,14 @@ impl RelayInfo {
             .map_err(|e| RegistryError::InvalidKey(format!("Invalid verifying key: {:?}", e)))?;
 
         // Decode signature
-        let sig_bytes = BASE64.decode(proof)
+        let sig_bytes = BASE64
+            .decode(proof)
             .map_err(|e| RegistryError::InvalidProof(format!("Invalid proof: {}", e)))?;
-        
+
         if sig_bytes.len() != 64 {
-            return Err(RegistryError::InvalidProof("Signature must be 64 bytes".to_string()));
+            return Err(RegistryError::InvalidProof(
+                "Signature must be 64 bytes".to_string(),
+            ));
         }
 
         let mut sig_array = [0u8; 64];
@@ -406,10 +413,17 @@ pub trait RelayRegistry: Send + Sync {
     async fn list_relays(&self) -> Result<Vec<RelayInfo>, RegistryError>;
 
     /// List relays matching criteria
-    async fn list_matching(&self, criteria: &RelayCriteria) -> Result<Vec<RelayInfo>, RegistryError>;
+    async fn list_matching(
+        &self,
+        criteria: &RelayCriteria,
+    ) -> Result<Vec<RelayInfo>, RegistryError>;
 
     /// Update relay health status
-    async fn update_health(&self, relay_id: &str, status: HealthStatus) -> Result<(), RegistryError>;
+    async fn update_health(
+        &self,
+        relay_id: &str,
+        status: HealthStatus,
+    ) -> Result<(), RegistryError>;
 
     /// Update relay last_seen timestamp
     async fn update_last_seen(&self, relay_id: &str) -> Result<(), RegistryError>;
@@ -442,11 +456,9 @@ impl InMemoryRegistry {
 
     /// Create with pre-populated relays
     pub fn with_relays(relays: Vec<RelayInfo>) -> Self {
-        let map: HashMap<String, RelayInfo> = relays
-            .into_iter()
-            .map(|r| (r.id.clone(), r))
-            .collect();
-        
+        let map: HashMap<String, RelayInfo> =
+            relays.into_iter().map(|r| (r.id.clone(), r)).collect();
+
         Self {
             relays: Arc::new(RwLock::new(map)),
         }
@@ -469,7 +481,7 @@ impl Default for InMemoryRegistry {
 impl RelayRegistry for InMemoryRegistry {
     async fn register(&self, relay: RelayInfo) -> Result<(), RegistryError> {
         let mut relays = self.relays.write().await;
-        
+
         if relays.contains_key(&relay.id) {
             return Err(RegistryError::AlreadyExists(relay.id));
         }
@@ -477,9 +489,10 @@ impl RelayRegistry for InMemoryRegistry {
         // Check for duplicate address
         for existing in relays.values() {
             if existing.address == relay.address {
-                return Err(RegistryError::AlreadyExists(
-                    format!("Address {} already registered", relay.address)
-                ));
+                return Err(RegistryError::AlreadyExists(format!(
+                    "Address {} already registered",
+                    relay.address
+                )));
             }
         }
 
@@ -490,7 +503,7 @@ impl RelayRegistry for InMemoryRegistry {
 
     async fn unregister(&self, relay_id: &str) -> Result<(), RegistryError> {
         let mut relays = self.relays.write().await;
-        
+
         if relays.remove(relay_id).is_none() {
             return Err(RegistryError::NotFound(relay_id.to_string()));
         }
@@ -501,7 +514,7 @@ impl RelayRegistry for InMemoryRegistry {
 
     async fn get_relay(&self, relay_id: &str) -> Result<RelayInfo, RegistryError> {
         let relays = self.relays.read().await;
-        
+
         relays
             .get(relay_id)
             .cloned()
@@ -510,7 +523,7 @@ impl RelayRegistry for InMemoryRegistry {
 
     async fn get_relay_by_address(&self, address: &str) -> Result<RelayInfo, RegistryError> {
         let relays = self.relays.read().await;
-        
+
         relays
             .values()
             .find(|r| r.address == address)
@@ -523,11 +536,14 @@ impl RelayRegistry for InMemoryRegistry {
         Ok(relays.values().cloned().collect())
     }
 
-    async fn list_matching(&self, criteria: &RelayCriteria) -> Result<Vec<RelayInfo>, RegistryError> {
+    async fn list_matching(
+        &self,
+        criteria: &RelayCriteria,
+    ) -> Result<Vec<RelayInfo>, RegistryError> {
         let relays = self.relays.read().await;
-        
+
         let now = SystemTime::now();
-        
+
         Ok(relays
             .values()
             .filter(|r| {
@@ -545,13 +561,17 @@ impl RelayRegistry for InMemoryRegistry {
             .collect())
     }
 
-    async fn update_health(&self, relay_id: &str, status: HealthStatus) -> Result<(), RegistryError> {
+    async fn update_health(
+        &self,
+        relay_id: &str,
+        status: HealthStatus,
+    ) -> Result<(), RegistryError> {
         let mut relays = self.relays.write().await;
-        
+
         let relay = relays
             .get_mut(relay_id)
             .ok_or_else(|| RegistryError::NotFound(relay_id.to_string()))?;
-        
+
         relay.health_status = status;
         debug!("Updated relay {} health status to {:?}", relay_id, status);
         Ok(())
@@ -559,33 +579,33 @@ impl RelayRegistry for InMemoryRegistry {
 
     async fn update_last_seen(&self, relay_id: &str) -> Result<(), RegistryError> {
         let mut relays = self.relays.write().await;
-        
+
         let relay = relays
             .get_mut(relay_id)
             .ok_or_else(|| RegistryError::NotFound(relay_id.to_string()))?;
-        
+
         relay.last_seen = SystemTime::now();
         Ok(())
     }
 
     async fn update_bandwidth(&self, relay_id: &str, bandwidth: u64) -> Result<(), RegistryError> {
         let mut relays = self.relays.write().await;
-        
+
         let relay = relays
             .get_mut(relay_id)
             .ok_or_else(|| RegistryError::NotFound(relay_id.to_string()))?;
-        
+
         relay.bandwidth = bandwidth;
         Ok(())
     }
 
     async fn verify_ownership(&self, relay_id: &str) -> Result<bool, RegistryError> {
         let relays = self.relays.read().await;
-        
+
         let relay = relays
             .get(relay_id)
             .ok_or_else(|| RegistryError::NotFound(relay_id.to_string()))?;
-        
+
         relay.verify_ownership()
     }
 
@@ -596,7 +616,10 @@ impl RelayRegistry for InMemoryRegistry {
 
     async fn healthy_count(&self) -> Result<usize, RegistryError> {
         let relays = self.relays.read().await;
-        Ok(relays.values().filter(|r| r.health_status.is_usable()).count())
+        Ok(relays
+            .values()
+            .filter(|r| r.health_status.is_usable())
+            .count())
     }
 }
 
@@ -611,7 +634,7 @@ impl JsonFileRegistry {
     /// Create new file-backed registry
     pub async fn new(file_path: impl AsRef<Path>) -> Result<Self, RegistryError> {
         let file_path = file_path.as_ref().to_path_buf();
-        
+
         // Load existing data if file exists
         let inner = if file_path.exists() {
             Self::load_from_file(&file_path).await?
@@ -645,13 +668,17 @@ impl JsonFileRegistry {
     pub async fn save(&self) -> Result<(), RegistryError> {
         let relays = self.inner.list_relays().await?;
         let content = serde_json::to_string_pretty(&relays)?;
-        
+
         // Write to temp file first for atomicity
         let temp_path = self.file_path.with_extension("tmp");
         fs::write(&temp_path, content).await?;
         fs::rename(&temp_path, &self.file_path).await?;
-        
-        debug!("Saved {} relays to {}", relays.len(), self.file_path.display());
+
+        debug!(
+            "Saved {} relays to {}",
+            relays.len(),
+            self.file_path.display()
+        );
         Ok(())
     }
 
@@ -659,12 +686,16 @@ impl JsonFileRegistry {
     pub async fn force_save(&self) -> Result<(), RegistryError> {
         let relays = self.inner.list_relays().await?;
         let content = serde_json::to_string_pretty(&relays)?;
-        
+
         let temp_path = self.file_path.with_extension("tmp");
         fs::write(&temp_path, content).await?;
         fs::rename(&temp_path, &self.file_path).await?;
-        
-        info!("Force saved {} relays to {}", relays.len(), self.file_path.display());
+
+        info!(
+            "Force saved {} relays to {}",
+            relays.len(),
+            self.file_path.display()
+        );
         Ok(())
     }
 }
@@ -699,11 +730,18 @@ impl RelayRegistry for JsonFileRegistry {
         self.inner.list_relays().await
     }
 
-    async fn list_matching(&self, criteria: &RelayCriteria) -> Result<Vec<RelayInfo>, RegistryError> {
+    async fn list_matching(
+        &self,
+        criteria: &RelayCriteria,
+    ) -> Result<Vec<RelayInfo>, RegistryError> {
         self.inner.list_matching(criteria).await
     }
 
-    async fn update_health(&self, relay_id: &str, status: HealthStatus) -> Result<(), RegistryError> {
+    async fn update_health(
+        &self,
+        relay_id: &str,
+        status: HealthStatus,
+    ) -> Result<(), RegistryError> {
         self.inner.update_health(relay_id, status).await?;
         if self.auto_save {
             self.save().await?;
@@ -772,24 +810,23 @@ impl SignedRelayList {
         let mut to_sign = self.clone();
         to_sign.signature.clear();
         to_sign.authority_key.clear();
-        
-        let message = serde_json::to_vec(&to_sign)
-            .map_err(RegistryError::SerializationError)?;
-        
-        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-        
+
+        let message = serde_json::to_vec(&to_sign).map_err(RegistryError::SerializationError)?;
+
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
         let signature = signing_key.sign(&message);
-        
+
         self.signature = BASE64.encode(signature.to_bytes());
         self.authority_key = BASE64.encode(signing_key.verifying_key().as_bytes());
-        
+
         Ok(())
     }
 
     /// Verify the signature
     pub fn verify(&self) -> Result<bool, RegistryError> {
-        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
-        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
         if self.signature.is_empty() || self.authority_key.is_empty() {
             return Ok(false);
@@ -798,7 +835,8 @@ impl SignedRelayList {
         // Decode authority key. Length-check BEFORE converting: copy_from_slice
         // panics on a length mismatch, and this data is deserialized from an
         // untrusted directory blob (a malformed key would be a remote DoS).
-        let pk_bytes = BASE64.decode(&self.authority_key)
+        let pk_bytes = BASE64
+            .decode(&self.authority_key)
             .map_err(|e| RegistryError::InvalidKey(format!("Invalid authority key: {}", e)))?;
         let pk_array: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
             RegistryError::InvalidKey(format!(
@@ -810,7 +848,8 @@ impl SignedRelayList {
             .map_err(|e| RegistryError::InvalidKey(format!("Invalid verifying key: {:?}", e)))?;
 
         // Decode signature (same length-check rationale).
-        let sig_bytes = BASE64.decode(&self.signature)
+        let sig_bytes = BASE64
+            .decode(&self.signature)
             .map_err(|e| RegistryError::InvalidProof(format!("Invalid signature: {}", e)))?;
         let sig_array: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
             RegistryError::InvalidProof(format!(
@@ -824,9 +863,8 @@ impl SignedRelayList {
         let mut to_verify = self.clone();
         to_verify.signature.clear();
         to_verify.authority_key.clear();
-        
-        let message = serde_json::to_vec(&to_verify)
-            .map_err(RegistryError::SerializationError)?;
+
+        let message = serde_json::to_vec(&to_verify).map_err(RegistryError::SerializationError)?;
 
         match verifying_key.verify(&message, &signature) {
             Ok(_) => Ok(true),
@@ -859,19 +897,20 @@ impl RegistryRateLimiter {
     pub async fn check(&self, client_id: &str) -> Result<(), RegistryError> {
         let mut requests = self.requests.write().await;
         let now = SystemTime::now();
-        
-        let client_requests = requests.entry(client_id.to_string()).or_insert_with(Vec::new);
-        
+
+        let client_requests = requests
+            .entry(client_id.to_string())
+            .or_insert_with(Vec::new);
+
         // Remove old requests outside the window
-        client_requests.retain(|&time| {
-            now.duration_since(time).unwrap_or(Duration::MAX) < self.window
-        });
-        
+        client_requests
+            .retain(|&time| now.duration_since(time).unwrap_or(Duration::MAX) < self.window);
+
         if client_requests.len() >= self.max_requests {
             warn!("Rate limit exceeded for client {}", client_id);
             return Err(RegistryError::RateLimited);
         }
-        
+
         client_requests.push(now);
         Ok(())
     }
@@ -880,11 +919,9 @@ impl RegistryRateLimiter {
     pub async fn cleanup(&self) {
         let mut requests = self.requests.write().await;
         let now = SystemTime::now();
-        
+
         requests.retain(|_, times| {
-            times.retain(|&time| {
-                now.duration_since(time).unwrap_or(Duration::MAX) < self.window
-            });
+            times.retain(|&time| now.duration_since(time).unwrap_or(Duration::MAX) < self.window);
             !times.is_empty()
         });
     }
@@ -941,20 +978,20 @@ mod tests {
     #[tokio::test]
     async fn test_in_memory_registry() {
         let registry = InMemoryRegistry::new();
-        
+
         // Register a relay
-        let relay = RelayInfo::new("192.168.1.1:9001", "test_key", 1000000)
-            .with_nickname("test_relay");
-        
+        let relay =
+            RelayInfo::new("192.168.1.1:9001", "test_key", 1000000).with_nickname("test_relay");
+
         registry.register(relay.clone()).await.unwrap();
-        
+
         // Retrieve it
         let retrieved = registry.get_relay(&relay.id).await.unwrap();
         assert_eq!(retrieved.address, "192.168.1.1:9001");
-        
+
         // Check count
         assert_eq!(registry.count().await.unwrap(), 1);
-        
+
         // Unregister
         registry.unregister(&relay.id).await.unwrap();
         assert_eq!(registry.count().await.unwrap(), 0);
@@ -964,18 +1001,17 @@ mod tests {
     async fn test_relay_criteria() {
         let relay = RelayInfo::new("192.168.1.1:9001", "test_key", 1000000)
             .with_security_level(SecurityLevel::Enhanced);
-        
+
         // Should match enhanced criteria
         let criteria = RelayCriteria::new()
             .with_min_security_level(SecurityLevel::Enhanced)
             .require_healthy();
-        
+
         assert!(relay.matches_criteria(&criteria));
-        
+
         // Should not match maximum criteria
-        let criteria_max = RelayCriteria::new()
-            .with_min_security_level(SecurityLevel::Maximum);
-        
+        let criteria_max = RelayCriteria::new().with_min_security_level(SecurityLevel::Maximum);
+
         assert!(!relay.matches_criteria(&criteria_max));
     }
 
@@ -991,15 +1027,15 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiter() {
         let limiter = RegistryRateLimiter::new(3, Duration::from_secs(60));
-        
+
         // First 3 should succeed
         for _ in 0..3 {
             limiter.check("client1").await.unwrap();
         }
-        
+
         // 4th should fail
         assert!(limiter.check("client1").await.is_err());
-        
+
         // Different client should succeed
         limiter.check("client2").await.unwrap();
     }

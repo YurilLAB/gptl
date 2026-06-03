@@ -10,10 +10,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, mpsc};
-use tracing::{debug, info, warn, error, trace};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, trace, warn};
 
-use gptl_core::relay_registry::{RelayRegistry, RelayInfo, HealthStatus, RelayCriteria};
+use gptl_core::relay_registry::{HealthStatus, RelayCriteria, RelayInfo, RelayRegistry};
 use gptl_core::relay_selector::RelaySelector;
 
 /// Convert local FailureType to gptl-core FailureType
@@ -128,9 +128,17 @@ pub enum FailoverEvent {
     /// Circuit was created
     CircuitCreated { circuit_id: u32, relay_id: String },
     /// Circuit failed
-    CircuitFailed { circuit_id: u32, relay_id: String, reason: FailureType },
+    CircuitFailed {
+        circuit_id: u32,
+        relay_id: String,
+        reason: FailureType,
+    },
     /// Failover initiated
-    FailoverStarted { circuit_id: u32, old_relay: String, new_relay: String },
+    FailoverStarted {
+        circuit_id: u32,
+        old_relay: String,
+        new_relay: String,
+    },
     /// Failover completed successfully
     FailoverCompleted { circuit_id: u32, new_relay: String },
     /// Failover failed
@@ -255,18 +263,21 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
-                
+
                 // Check for stale circuits
-                Self::check_stale_circuits(&active_circuits, &failed_relays, &registry, &sender).await;
-                
+                Self::check_stale_circuits(&active_circuits, &failed_relays, &registry, &sender)
+                    .await;
+
                 // Check for recoverable relays
                 Self::check_recoverable_relays(&failed_relays, &registry, &sender).await;
             }
         });
 
-        info!("Failover manager initialized with backup pool size {}", 
-            self.backup_pool.read().await.len());
-        
+        info!(
+            "Failover manager initialized with backup pool size {}",
+            self.backup_pool.read().await.len()
+        );
+
         Ok(())
     }
 
@@ -296,11 +307,12 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         self.assign_backup_relay(circuit_id).await?;
 
         let relay_id = relay.id.clone();
-        
+
         self.send_event(FailoverEvent::CircuitCreated {
             circuit_id,
             relay_id: relay_id.clone(),
-        }).await;
+        })
+        .await;
 
         debug!("Registered circuit {} with relay {}", circuit_id, relay_id);
         Ok(())
@@ -313,13 +325,13 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         failure_type: FailureType,
     ) -> Result<FailoverResult, FailoverError> {
         let mut circuits = self.active_circuits.write().await;
-        
+
         let circuit = circuits
             .get_mut(&circuit_id)
             .ok_or(FailoverError::CircuitNotFound(circuit_id))?;
 
         let old_relay_id = circuit.primary_relay.id.clone();
-        
+
         // Update circuit status
         circuit.status = CircuitStatus::Failed;
 
@@ -331,25 +343,30 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
             circuit_id,
             relay_id: old_relay_id.clone(),
             reason: failure_type,
-        }).await;
+        })
+        .await;
 
         // Trigger failover
-        info!("Initiating failover for circuit {} from relay {}", 
-            circuit_id, old_relay_id);
+        info!(
+            "Initiating failover for circuit {} from relay {}",
+            circuit_id, old_relay_id
+        );
 
         match self.perform_failover(circuit_id, &old_relay_id).await {
             Ok(new_relay) => {
                 self.send_event(FailoverEvent::FailoverCompleted {
                     circuit_id,
                     new_relay: new_relay.id.clone(),
-                }).await;
+                })
+                .await;
                 Ok(FailoverResult::Success { new_relay })
             }
             Err(e) => {
                 self.send_event(FailoverEvent::FailoverFailed {
                     circuit_id,
                     error: e.to_string(),
-                }).await;
+                })
+                .await;
                 Err(e)
             }
         }
@@ -358,11 +375,11 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
     /// Report circuit activity (heartbeat)
     pub async fn report_activity(&self, circuit_id: u32, bytes: u64) -> Result<(), FailoverError> {
         let mut circuits = self.active_circuits.write().await;
-        
+
         if let Some(circuit) = circuits.get_mut(&circuit_id) {
             circuit.last_activity = Instant::now();
             circuit.bytes_transferred += bytes;
-            
+
             if circuit.status == CircuitStatus::Degraded {
                 circuit.status = CircuitStatus::Active;
             }
@@ -374,7 +391,7 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
     /// Close a circuit
     pub async fn close_circuit(&self, circuit_id: u32) -> Result<(), FailoverError> {
         let mut circuits = self.active_circuits.write().await;
-        
+
         if let Some(mut circuit) = circuits.remove(&circuit_id) {
             circuit.status = CircuitStatus::Closed;
             debug!("Closed circuit {}", circuit_id);
@@ -458,9 +475,8 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         drop(pool);
 
         if size_diff > 0 {
-            self.send_event(FailoverEvent::BackupPoolRefilled {
-                count: size_diff,
-            }).await;
+            self.send_event(FailoverEvent::BackupPoolRefilled { count: size_diff })
+                .await;
         }
 
         Ok(new_size)
@@ -470,11 +486,11 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
 
     async fn assign_backup_relay(&self, circuit_id: u32) -> Result<(), FailoverError> {
         let mut pool = self.backup_pool.write().await;
-        
+
         if let Some(backup) = pool.pop_front() {
             let need_refill = pool.len() < self.min_backup_pool_size / 2;
             drop(pool);
-            
+
             let mut circuits = self.active_circuits.write().await;
             if let Some(circuit) = circuits.get_mut(&circuit_id) {
                 circuit.backup_relay = Some(backup);
@@ -495,7 +511,7 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         failed_relay_id: &str,
     ) -> Result<RelayInfo, FailoverError> {
         let mut circuits = self.active_circuits.write().await;
-        
+
         let circuit = circuits
             .get_mut(&circuit_id)
             .ok_or(FailoverError::CircuitNotFound(circuit_id))?;
@@ -503,14 +519,17 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         // Try backup relay first
         if let Some(backup) = circuit.backup_relay.take() {
             if backup.id != failed_relay_id {
-                debug!("Using backup relay {} for circuit {}", backup.id, circuit_id);
+                debug!(
+                    "Using backup relay {} for circuit {}",
+                    backup.id, circuit_id
+                );
                 circuit.primary_relay = backup.clone();
                 circuit.status = CircuitStatus::Recovering;
-                
+
                 // Pre-assign new backup
                 drop(circuits);
                 self.assign_backup_relay(circuit_id).await?;
-                
+
                 return Ok(backup);
             }
         }
@@ -534,7 +553,8 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
                     circuit_id,
                     old_relay: failed_relay_id.to_string(),
                     new_relay: selection.relay.id.clone(),
-                }).await;
+                })
+                .await;
 
                 Ok(selection.relay)
             }
@@ -547,7 +567,7 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
 
     async fn record_relay_failure(&self, relay_id: &str, failure_type: FailureType) {
         let mut failures = self.failed_relays.write().await;
-        
+
         let info = failures.entry(relay_id.to_string()).or_insert(FailureInfo {
             relay_id: relay_id.to_string(),
             failure_count: 0,
@@ -567,17 +587,24 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         }
 
         // Report to selector
-        self.selector.report_failure(relay_id, to_selector_failure_type(failure_type)).await;
+        self.selector
+            .report_failure(relay_id, to_selector_failure_type(failure_type))
+            .await;
 
         // Mark unhealthy if too many failures
         if info.consecutive_failures >= 3 {
-            if let Err(e) = self.registry.update_health(relay_id, HealthStatus::Degraded).await {
+            if let Err(e) = self
+                .registry
+                .update_health(relay_id, HealthStatus::Degraded)
+                .await
+            {
                 warn!("Failed to update health status for {}: {}", relay_id, e);
             }
-            
+
             self.send_event(FailoverEvent::RelayUnhealthy {
                 relay_id: relay_id.to_string(),
-            }).await;
+            })
+            .await;
         }
     }
 
@@ -594,8 +621,7 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         let stale: Vec<_> = circuits
             .iter()
             .filter(|(_, c)| {
-                c.status == CircuitStatus::Active 
-                    && now.duration_since(c.last_activity) > timeout
+                c.status == CircuitStatus::Active && now.duration_since(c.last_activity) > timeout
             })
             .map(|(id, _)| *id)
             .collect();
@@ -626,16 +652,21 @@ impl<R: RelayRegistry + 'static> FailoverManager<R> {
         for relay_id in recoverable {
             if let Some(info) = failures.get_mut(&relay_id) {
                 info.consecutive_failures = 0;
-                
+
                 // Mark as healthy in registry
-                if let Err(e) = registry.update_health(&relay_id, HealthStatus::Healthy).await {
+                if let Err(e) = registry
+                    .update_health(&relay_id, HealthStatus::Healthy)
+                    .await
+                {
                     trace!("Failed to update health for {}: {}", relay_id, e);
                 }
 
                 if let Some(ref s) = sender {
-                    let _ = s.send(FailoverEvent::RelayRecovered {
-                        relay_id: relay_id.clone(),
-                    }).await;
+                    let _ = s
+                        .send(FailoverEvent::RelayRecovered {
+                            relay_id: relay_id.clone(),
+                        })
+                        .await;
                 }
             }
         }
@@ -682,7 +713,11 @@ pub trait FailoverManagerTrait: Send + Sync {
     /// Report circuit activity
     async fn report_activity(&self, circuit_id: u32, bytes: u64) -> Result<(), FailoverError>;
     /// Report circuit failure
-    async fn report_failure(&self, circuit_id: u32, failure_type: FailureType) -> Result<FailoverResult, FailoverError>;
+    async fn report_failure(
+        &self,
+        circuit_id: u32,
+        failure_type: FailureType,
+    ) -> Result<FailoverResult, FailoverError>;
     /// Close circuit
     async fn close_circuit(&self, circuit_id: u32) -> Result<(), FailoverError>;
 }
@@ -693,7 +728,11 @@ impl<R: RelayRegistry> FailoverManagerTrait for FailoverManager<R> {
         FailoverManager::report_activity(self, circuit_id, bytes).await
     }
 
-    async fn report_failure(&self, circuit_id: u32, failure_type: FailureType) -> Result<FailoverResult, FailoverError> {
+    async fn report_failure(
+        &self,
+        circuit_id: u32,
+        failure_type: FailureType,
+    ) -> Result<FailoverResult, FailoverError> {
         FailoverManager::report_failure(self, circuit_id, failure_type).await
     }
 
@@ -710,7 +749,7 @@ mod tests {
 
     async fn create_test_setup() -> (Arc<InMemoryRegistry>, Arc<RelaySelector<InMemoryRegistry>>) {
         let registry = Arc::new(InMemoryRegistry::new());
-        
+
         // Add test relays (bandwidth must exceed the selector's 1 MiB/s minimum)
         for i in 0..5 {
             let relay = RelayInfo::new(
@@ -720,7 +759,7 @@ mod tests {
             );
             registry.register(relay).await.unwrap();
         }
-        
+
         let selector = Arc::new(RelaySelector::new(registry.clone()));
         (registry, selector)
     }
@@ -729,7 +768,7 @@ mod tests {
     async fn test_failover_manager_creation() {
         let (registry, selector) = create_test_setup().await;
         let manager = FailoverManager::new(registry, selector);
-        
+
         assert!(manager.initialize().await.is_ok());
     }
 
@@ -738,12 +777,12 @@ mod tests {
         let (registry, selector) = create_test_setup().await;
         let manager = FailoverManager::new(registry, selector);
         manager.initialize().await.unwrap();
-        
+
         let relay = RelayInfo::new("192.168.1.10:9001", "test_key", 1_000_000);
         manager.register_circuit(1, relay).await.unwrap();
-        
+
         assert_eq!(manager.active_circuit_count().await, 1);
-        
+
         let info = manager.get_circuit_info(1).await.unwrap();
         assert_eq!(info.circuit_id, 1);
         assert_eq!(info.status, CircuitStatus::Active);
@@ -754,18 +793,23 @@ mod tests {
         let (registry, selector) = create_test_setup().await;
         let manager = FailoverManager::new(registry.clone(), selector);
         manager.initialize().await.unwrap();
-        
+
         // Register circuit with first relay
         let relays = registry.list_relays().await.unwrap();
         let first_relay = relays[0].clone();
-        manager.register_circuit(1, first_relay.clone()).await.unwrap();
-        
+        manager
+            .register_circuit(1, first_relay.clone())
+            .await
+            .unwrap();
+
         // Report failure
-        let result = manager.report_failure(1, FailureType::ConnectionFailed).await;
-        
+        let result = manager
+            .report_failure(1, FailureType::ConnectionFailed)
+            .await;
+
         // Should succeed with a new relay
         assert!(matches!(result, Ok(FailoverResult::Success { .. })));
-        
+
         // Verify circuit has new relay
         let info = manager.get_circuit_info(1).await.unwrap();
         assert_ne!(info.primary_relay.id, first_relay.id);
@@ -804,7 +848,9 @@ mod tests {
 
         // Report multiple failures
         for _ in 0..3 {
-            let result = manager.report_failure(1, FailureType::ConnectionFailed).await;
+            let result = manager
+                .report_failure(1, FailureType::ConnectionFailed)
+                .await;
             assert!(result.is_ok());
         }
 
@@ -827,7 +873,9 @@ mod tests {
         assert_eq!(manager.active_circuit_count().await, 1);
 
         // Report failure to trigger failover
-        let _ = manager.report_failure(1, FailureType::ConnectionFailed).await;
+        let _ = manager
+            .report_failure(1, FailureType::ConnectionFailed)
+            .await;
 
         // Circuit should be in failed or recovering state
         let stats = manager.get_statistics().await;
@@ -854,16 +902,20 @@ mod tests {
         // Register multiple circuits
         let relays = registry.list_relays().await.unwrap();
         for i in 0..3 {
-            manager.register_circuit(i as u32, relays[i].clone()).await.unwrap();
+            manager
+                .register_circuit(i as u32, relays[i].clone())
+                .await
+                .unwrap();
         }
 
         // Simulate concurrent failures
         let mut handles = vec![];
         for i in 0..3 {
             let mgr = manager.clone();
-            let handle = tokio::spawn(async move {
-                mgr.report_failure(i as u32, FailureType::Timeout).await
-            });
+            let handle =
+                tokio::spawn(
+                    async move { mgr.report_failure(i as u32, FailureType::Timeout).await },
+                );
             handles.push(handle);
         }
 
@@ -887,7 +939,10 @@ mod tests {
         assert_eq!(info.status, CircuitStatus::Active);
 
         // Report failure
-        manager.report_failure(1, FailureType::ConnectionFailed).await.ok();
+        manager
+            .report_failure(1, FailureType::ConnectionFailed)
+            .await
+            .ok();
 
         // Status should change (either to Recovering or have new relay)
         let info = manager.get_circuit_info(1).await;
@@ -906,8 +961,14 @@ mod tests {
 
         // Report different failure types
         manager.report_failure(1, FailureType::Timeout).await.ok();
-        manager.report_failure(1, FailureType::ProtocolError).await.ok();
-        manager.report_failure(1, FailureType::AuthenticationFailed).await.ok();
+        manager
+            .report_failure(1, FailureType::ProtocolError)
+            .await
+            .ok();
+        manager
+            .report_failure(1, FailureType::AuthenticationFailed)
+            .await
+            .ok();
 
         let stats = manager.get_statistics().await;
         // 3 different failure types were reported for the same circuit;
@@ -926,7 +987,9 @@ mod tests {
 
         // Exhaust all relays by repeated failures
         for _ in 0..20 {
-            let result = manager.report_failure(1, FailureType::ConnectionFailed).await;
+            let result = manager
+                .report_failure(1, FailureType::ConnectionFailed)
+                .await;
             if result.is_err() {
                 // Expected when relays are exhausted
                 break;

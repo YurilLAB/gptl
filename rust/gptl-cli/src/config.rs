@@ -51,7 +51,7 @@ impl std::fmt::Display for SecurityLevel {
         match self {
             SecurityLevel::Standard => write!(f, "standard"),
             SecurityLevel::Enhanced => write!(f, "enhanced"),
-            SecurityLevel::Maximum  => write!(f, "maximum"),
+            SecurityLevel::Maximum => write!(f, "maximum"),
         }
     }
 }
@@ -62,7 +62,7 @@ impl std::str::FromStr for SecurityLevel {
         match s.to_lowercase().as_str() {
             "standard" => Ok(SecurityLevel::Standard),
             "enhanced" => Ok(SecurityLevel::Enhanced),
-            "maximum"  => Ok(SecurityLevel::Maximum),
+            "maximum" => Ok(SecurityLevel::Maximum),
             _ => Err(ConfigError::InvalidValue {
                 key: "security_level".to_string(),
                 message: format!("expected standard, enhanced, or maximum — got '{}'", s),
@@ -88,25 +88,25 @@ impl SecurityLevel {
     pub fn recommended_core(self) -> CoreSettings {
         match self {
             SecurityLevel::Standard => CoreSettings {
-                traffic_shaping:         true,
-                adaptive_padding:        true,
-                timing_protection:       false,
-                circuit_obfuscation:     false,
+                traffic_shaping: true,
+                adaptive_padding: true,
+                timing_protection: false,
+                circuit_obfuscation: false,
                 flow_correlation_defense: false,
-                target_rate:             100.0,
-                max_jitter_ms:           20,
-                batch_size:              5,
+                target_rate: 100.0,
+                max_jitter_ms: 20,
+                batch_size: 5,
             },
             SecurityLevel::Enhanced => CoreSettings::default(),
             SecurityLevel::Maximum => CoreSettings {
-                traffic_shaping:         true,
-                adaptive_padding:        true,
-                timing_protection:       true,
-                circuit_obfuscation:     true,
+                traffic_shaping: true,
+                adaptive_padding: true,
+                timing_protection: true,
+                circuit_obfuscation: true,
                 flow_correlation_defense: true,
-                target_rate:             200.0,
-                max_jitter_ms:           100,
-                batch_size:              20,
+                target_rate: 200.0,
+                max_jitter_ms: 100,
+                batch_size: 20,
             },
         }
     }
@@ -115,21 +115,21 @@ impl SecurityLevel {
     pub fn recommended_routing(self) -> RoutingSettings {
         match self {
             SecurityLevel::Standard => RoutingSettings {
-                bgp_protection:      false,
-                guard_management:    false,
+                bgp_protection: false,
+                guard_management: false,
                 resource_protection: true,
-                dns_protection:      true,
-                webrtc_protection:   true,
-                sybil_defense:       true,
+                dns_protection: true,
+                webrtc_protection: true,
+                sybil_defense: true,
             },
             SecurityLevel::Enhanced => RoutingSettings::default(),
-            SecurityLevel::Maximum  => RoutingSettings {
-                bgp_protection:      true,
-                guard_management:    true,
+            SecurityLevel::Maximum => RoutingSettings {
+                bgp_protection: true,
+                guard_management: true,
                 resource_protection: true,
-                dns_protection:      true,
-                webrtc_protection:   true,
-                sybil_defense:       true,
+                dns_protection: true,
+                webrtc_protection: true,
+                sybil_defense: true,
             },
         }
     }
@@ -140,7 +140,7 @@ impl SecurityLevel {
         let rank = |l: SecurityLevel| match l {
             SecurityLevel::Standard => 0_u8,
             SecurityLevel::Enhanced => 1,
-            SecurityLevel::Maximum  => 2,
+            SecurityLevel::Maximum => 2,
         };
         rank(self) < rank(from)
     }
@@ -151,7 +151,7 @@ impl SecurityLevel {
         matches!(
             (from, self),
             (SecurityLevel::Enhanced, SecurityLevel::Standard)
-            | (SecurityLevel::Maximum, SecurityLevel::Standard)
+                | (SecurityLevel::Maximum, SecurityLevel::Standard)
         )
     }
 }
@@ -183,14 +183,14 @@ pub struct CoreSettings {
 impl Default for CoreSettings {
     fn default() -> Self {
         Self {
-            traffic_shaping:          true,
-            adaptive_padding:         true,
-            timing_protection:        true,
-            circuit_obfuscation:      true,
+            traffic_shaping: true,
+            adaptive_padding: true,
+            timing_protection: true,
+            circuit_obfuscation: true,
             flow_correlation_defense: true,
-            target_rate:              100.0,
-            max_jitter_ms:            50,
-            batch_size:               10,
+            target_rate: 100.0,
+            max_jitter_ms: 50,
+            batch_size: 10,
         }
     }
 }
@@ -218,12 +218,12 @@ pub struct RoutingSettings {
 impl Default for RoutingSettings {
     fn default() -> Self {
         Self {
-            bgp_protection:      true,
-            guard_management:    true,
+            bgp_protection: true,
+            guard_management: true,
             resource_protection: true,
-            dns_protection:      true,
-            webrtc_protection:   true,
-            sybil_defense:       true,
+            dns_protection: true,
+            webrtc_protection: true,
+            sybil_defense: true,
         }
     }
 }
@@ -246,8 +246,8 @@ impl Default for GptlConfig {
     fn default() -> Self {
         Self {
             security_level: SecurityLevel::Enhanced,
-            core:           CoreSettings::default(),
-            routing:        RoutingSettings::default(),
+            core: CoreSettings::default(),
+            routing: RoutingSettings::default(),
         }
     }
 }
@@ -288,21 +288,81 @@ impl GptlConfig {
     /// Returns all settable keys with their current value and a short description.
     pub fn all_keys(&self) -> Vec<(String, String, &'static str)> {
         vec![
-            ("security_level".into(),               self.security_level.to_string(), "standard | enhanced | maximum"),
-            ("core.traffic_shaping".into(),          self.core.traffic_shaping.to_string(),          "true/false — traffic confirmation defense"),
-            ("core.adaptive_padding".into(),         self.core.adaptive_padding.to_string(),         "true/false — website fingerprinting defense"),
-            ("core.timing_protection".into(),        self.core.timing_protection.to_string(),        "true/false — timing attack defense"),
-            ("core.circuit_obfuscation".into(),      self.core.circuit_obfuscation.to_string(),      "true/false — circuit fingerprinting defense"),
-            ("core.flow_correlation_defense".into(), self.core.flow_correlation_defense.to_string(), "true/false — flow correlation defense"),
-            ("core.target_rate".into(),              self.core.target_rate.to_string(),              "float  — cover traffic rate (cells/second)"),
-            ("core.max_jitter_ms".into(),            self.core.max_jitter_ms.to_string(),            "integer — max jitter in milliseconds"),
-            ("core.batch_size".into(),               self.core.batch_size.to_string(),               "integer — cell batch size"),
-            ("routing.bgp_protection".into(),        self.routing.bgp_protection.to_string(),        "true/false — BGP hijacking defense"),
-            ("routing.guard_management".into(),      self.routing.guard_management.to_string(),      "true/false — guard discovery defense"),
-            ("routing.resource_protection".into(),   self.routing.resource_protection.to_string(),   "true/false — sniper attack defense"),
-            ("routing.dns_protection".into(),        self.routing.dns_protection.to_string(),        "true/false — DNS leak prevention"),
-            ("routing.webrtc_protection".into(),     self.routing.webrtc_protection.to_string(),     "true/false — WebRTC leak prevention"),
-            ("routing.sybil_defense".into(),         self.routing.sybil_defense.to_string(),         "true/false — Sybil attack defense"),
+            (
+                "security_level".into(),
+                self.security_level.to_string(),
+                "standard | enhanced | maximum",
+            ),
+            (
+                "core.traffic_shaping".into(),
+                self.core.traffic_shaping.to_string(),
+                "true/false — traffic confirmation defense",
+            ),
+            (
+                "core.adaptive_padding".into(),
+                self.core.adaptive_padding.to_string(),
+                "true/false — website fingerprinting defense",
+            ),
+            (
+                "core.timing_protection".into(),
+                self.core.timing_protection.to_string(),
+                "true/false — timing attack defense",
+            ),
+            (
+                "core.circuit_obfuscation".into(),
+                self.core.circuit_obfuscation.to_string(),
+                "true/false — circuit fingerprinting defense",
+            ),
+            (
+                "core.flow_correlation_defense".into(),
+                self.core.flow_correlation_defense.to_string(),
+                "true/false — flow correlation defense",
+            ),
+            (
+                "core.target_rate".into(),
+                self.core.target_rate.to_string(),
+                "float  — cover traffic rate (cells/second)",
+            ),
+            (
+                "core.max_jitter_ms".into(),
+                self.core.max_jitter_ms.to_string(),
+                "integer — max jitter in milliseconds",
+            ),
+            (
+                "core.batch_size".into(),
+                self.core.batch_size.to_string(),
+                "integer — cell batch size",
+            ),
+            (
+                "routing.bgp_protection".into(),
+                self.routing.bgp_protection.to_string(),
+                "true/false — BGP hijacking defense",
+            ),
+            (
+                "routing.guard_management".into(),
+                self.routing.guard_management.to_string(),
+                "true/false — guard discovery defense",
+            ),
+            (
+                "routing.resource_protection".into(),
+                self.routing.resource_protection.to_string(),
+                "true/false — sniper attack defense",
+            ),
+            (
+                "routing.dns_protection".into(),
+                self.routing.dns_protection.to_string(),
+                "true/false — DNS leak prevention",
+            ),
+            (
+                "routing.webrtc_protection".into(),
+                self.routing.webrtc_protection.to_string(),
+                "true/false — WebRTC leak prevention",
+            ),
+            (
+                "routing.sybil_defense".into(),
+                self.routing.sybil_defense.to_string(),
+                "true/false — Sybil attack defense",
+            ),
         ]
     }
 
@@ -414,21 +474,21 @@ impl GptlConfig {
     /// Gets the string value of a key.
     pub fn get_key(&self, key: &str) -> Result<String, ConfigError> {
         let v = match key {
-            "security_level"                => self.security_level.to_string(),
-            "core.traffic_shaping"          => self.core.traffic_shaping.to_string(),
-            "core.adaptive_padding"         => self.core.adaptive_padding.to_string(),
-            "core.timing_protection"        => self.core.timing_protection.to_string(),
-            "core.circuit_obfuscation"      => self.core.circuit_obfuscation.to_string(),
+            "security_level" => self.security_level.to_string(),
+            "core.traffic_shaping" => self.core.traffic_shaping.to_string(),
+            "core.adaptive_padding" => self.core.adaptive_padding.to_string(),
+            "core.timing_protection" => self.core.timing_protection.to_string(),
+            "core.circuit_obfuscation" => self.core.circuit_obfuscation.to_string(),
             "core.flow_correlation_defense" => self.core.flow_correlation_defense.to_string(),
-            "core.target_rate"              => self.core.target_rate.to_string(),
-            "core.max_jitter_ms"            => self.core.max_jitter_ms.to_string(),
-            "core.batch_size"               => self.core.batch_size.to_string(),
-            "routing.bgp_protection"        => self.routing.bgp_protection.to_string(),
-            "routing.guard_management"      => self.routing.guard_management.to_string(),
-            "routing.resource_protection"   => self.routing.resource_protection.to_string(),
-            "routing.dns_protection"        => self.routing.dns_protection.to_string(),
-            "routing.webrtc_protection"     => self.routing.webrtc_protection.to_string(),
-            "routing.sybil_defense"         => self.routing.sybil_defense.to_string(),
+            "core.target_rate" => self.core.target_rate.to_string(),
+            "core.max_jitter_ms" => self.core.max_jitter_ms.to_string(),
+            "core.batch_size" => self.core.batch_size.to_string(),
+            "routing.bgp_protection" => self.routing.bgp_protection.to_string(),
+            "routing.guard_management" => self.routing.guard_management.to_string(),
+            "routing.resource_protection" => self.routing.resource_protection.to_string(),
+            "routing.dns_protection" => self.routing.dns_protection.to_string(),
+            "routing.webrtc_protection" => self.routing.webrtc_protection.to_string(),
+            "routing.sybil_defense" => self.routing.sybil_defense.to_string(),
             _ => return Err(ConfigError::UnknownKey(key.to_string())),
         };
         Ok(v)
@@ -447,21 +507,77 @@ impl GptlConfig {
                 }
             }};
         }
-        chk!("security_level",               self.security_level,               other.security_level);
-        chk!("core.traffic_shaping",         self.core.traffic_shaping,         other.core.traffic_shaping);
-        chk!("core.adaptive_padding",        self.core.adaptive_padding,        other.core.adaptive_padding);
-        chk!("core.timing_protection",       self.core.timing_protection,       other.core.timing_protection);
-        chk!("core.circuit_obfuscation",     self.core.circuit_obfuscation,     other.core.circuit_obfuscation);
-        chk!("core.flow_correlation_defense",self.core.flow_correlation_defense,other.core.flow_correlation_defense);
-        chk!("core.target_rate",             self.core.target_rate,             other.core.target_rate);
-        chk!("core.max_jitter_ms",           self.core.max_jitter_ms,           other.core.max_jitter_ms);
-        chk!("core.batch_size",              self.core.batch_size,              other.core.batch_size);
-        chk!("routing.bgp_protection",       self.routing.bgp_protection,       other.routing.bgp_protection);
-        chk!("routing.guard_management",     self.routing.guard_management,     other.routing.guard_management);
-        chk!("routing.resource_protection",  self.routing.resource_protection,  other.routing.resource_protection);
-        chk!("routing.dns_protection",       self.routing.dns_protection,       other.routing.dns_protection);
-        chk!("routing.webrtc_protection",    self.routing.webrtc_protection,    other.routing.webrtc_protection);
-        chk!("routing.sybil_defense",        self.routing.sybil_defense,        other.routing.sybil_defense);
+        chk!("security_level", self.security_level, other.security_level);
+        chk!(
+            "core.traffic_shaping",
+            self.core.traffic_shaping,
+            other.core.traffic_shaping
+        );
+        chk!(
+            "core.adaptive_padding",
+            self.core.adaptive_padding,
+            other.core.adaptive_padding
+        );
+        chk!(
+            "core.timing_protection",
+            self.core.timing_protection,
+            other.core.timing_protection
+        );
+        chk!(
+            "core.circuit_obfuscation",
+            self.core.circuit_obfuscation,
+            other.core.circuit_obfuscation
+        );
+        chk!(
+            "core.flow_correlation_defense",
+            self.core.flow_correlation_defense,
+            other.core.flow_correlation_defense
+        );
+        chk!(
+            "core.target_rate",
+            self.core.target_rate,
+            other.core.target_rate
+        );
+        chk!(
+            "core.max_jitter_ms",
+            self.core.max_jitter_ms,
+            other.core.max_jitter_ms
+        );
+        chk!(
+            "core.batch_size",
+            self.core.batch_size,
+            other.core.batch_size
+        );
+        chk!(
+            "routing.bgp_protection",
+            self.routing.bgp_protection,
+            other.routing.bgp_protection
+        );
+        chk!(
+            "routing.guard_management",
+            self.routing.guard_management,
+            other.routing.guard_management
+        );
+        chk!(
+            "routing.resource_protection",
+            self.routing.resource_protection,
+            other.routing.resource_protection
+        );
+        chk!(
+            "routing.dns_protection",
+            self.routing.dns_protection,
+            other.routing.dns_protection
+        );
+        chk!(
+            "routing.webrtc_protection",
+            self.routing.webrtc_protection,
+            other.routing.webrtc_protection
+        );
+        chk!(
+            "routing.sybil_defense",
+            self.routing.sybil_defense,
+            other.routing.sybil_defense
+        );
         out
     }
 
@@ -493,7 +609,7 @@ impl GptlConfig {
 
 pub(crate) fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
     match value.to_lowercase().as_str() {
-        "true" | "1" | "yes" | "on"  => Ok(true),
+        "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
         _ => Err(ConfigError::InvalidValue {
             key: key.to_string(),

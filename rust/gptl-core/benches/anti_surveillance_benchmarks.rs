@@ -1,16 +1,11 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use gptl_core::{
-    anti_surveillance::{
-        AntiSurveillanceConfig, SecurityLevel, Cell, CellCommand,
-        padding::PaddingEngine,
-        timing_protection::TimingShield,
-        traffic_shaping::TrafficShaper,
-        circuit_obfuscation::CircuitShield,
-    },
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use gptl_core::anti_surveillance::{
+    circuit_obfuscation::CircuitShield, padding::PaddingEngine, timing_protection::TimingShield,
+    traffic_shaping::TrafficShaper, AntiSurveillanceConfig, Cell, CellCommand, SecurityLevel,
 };
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use std::time::Instant;
+use tokio::sync::RwLock;
 
 fn create_test_cells(count: usize, circuit_id: u32) -> Vec<Cell> {
     (0..count)
@@ -203,23 +198,27 @@ fn bench_concurrent_circuits(c: &mut Criterion) {
     rt.block_on(padding.initialize()).unwrap();
 
     for num_circuits in [5, 10, 20].iter() {
-        group.bench_with_input(BenchmarkId::from_parameter(num_circuits), num_circuits, |b, &n| {
-            b.to_async(&rt).iter(|| async {
-                let mut handles = vec![];
-                for i in 0..n {
-                    let p = padding.clone();
-                    let handle = tokio::spawn(async move {
-                        let cells = create_test_cells(10, i as u32);
-                        p.pad_cells(cells).await
-                    });
-                    handles.push(handle);
-                }
+        group.bench_with_input(
+            BenchmarkId::from_parameter(num_circuits),
+            num_circuits,
+            |b, &n| {
+                b.to_async(&rt).iter(|| async {
+                    let mut handles = vec![];
+                    for i in 0..n {
+                        let p = padding.clone();
+                        let handle = tokio::spawn(async move {
+                            let cells = create_test_cells(10, i as u32);
+                            p.pad_cells(cells).await
+                        });
+                        handles.push(handle);
+                    }
 
-                for handle in handles {
-                    black_box(handle.await.unwrap().unwrap());
-                }
-            });
-        });
+                    for handle in handles {
+                        black_box(handle.await.unwrap().unwrap());
+                    }
+                });
+            },
+        );
     }
 
     group.finish();

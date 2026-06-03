@@ -37,7 +37,7 @@ pub fn level_badge(level: SecurityLevel) -> String {
     match level {
         SecurityLevel::Standard => " STANDARD ".white().on_blue().bold().to_string(),
         SecurityLevel::Enhanced => " ENHANCED ".black().on_bright_green().bold().to_string(),
-        SecurityLevel::Maximum  => " MAXIMUM  ".white().on_bright_red().bold().to_string(),
+        SecurityLevel::Maximum => " MAXIMUM  ".white().on_bright_red().bold().to_string(),
     }
 }
 
@@ -67,11 +67,36 @@ pub fn print_config_table(config: &GptlConfig) {
     println!("{}", heading("Anti-Surveillance (core)"));
     let mut t = base_table();
     t.set_header(vec!["Setting", "Value", "Defense"]);
-    add_bool(&mut t, "traffic_shaping",          config.core.traffic_shaping,          "Traffic confirmation (Murdoch-Danezis)");
-    add_bool(&mut t, "adaptive_padding",         config.core.adaptive_padding,         "Website fingerprinting (WTF-PAD)");
-    add_bool(&mut t, "timing_protection",        config.core.timing_protection,        "Timing attacks");
-    add_bool(&mut t, "circuit_obfuscation",      config.core.circuit_obfuscation,      "Circuit fingerprinting (Kwon et al.)");
-    add_bool(&mut t, "flow_correlation_defense", config.core.flow_correlation_defense, "Flow correlation (DeepCorr)");
+    add_bool(
+        &mut t,
+        "traffic_shaping",
+        config.core.traffic_shaping,
+        "Traffic confirmation (Murdoch-Danezis)",
+    );
+    add_bool(
+        &mut t,
+        "adaptive_padding",
+        config.core.adaptive_padding,
+        "Website fingerprinting (WTF-PAD)",
+    );
+    add_bool(
+        &mut t,
+        "timing_protection",
+        config.core.timing_protection,
+        "Timing attacks",
+    );
+    add_bool(
+        &mut t,
+        "circuit_obfuscation",
+        config.core.circuit_obfuscation,
+        "Circuit fingerprinting (Kwon et al.)",
+    );
+    add_bool(
+        &mut t,
+        "flow_correlation_defense",
+        config.core.flow_correlation_defense,
+        "Flow correlation (DeepCorr)",
+    );
     t.add_row(vec![
         Cell::new("target_rate"),
         Cell::new(format!("{:.1} cells/s", config.core.target_rate)),
@@ -94,12 +119,42 @@ pub fn print_config_table(config: &GptlConfig) {
     println!("{}", heading("Routing Defenses (routing)"));
     let mut t = base_table();
     t.set_header(vec!["Setting", "Value", "Defense"]);
-    add_bool(&mut t, "bgp_protection",      config.routing.bgp_protection,      "BGP hijacking / RAPTOR (RPKI validation)");
-    add_bool(&mut t, "guard_management",    config.routing.guard_management,    "Guard discovery (vanguard architecture)");
-    add_bool(&mut t, "resource_protection", config.routing.resource_protection, "Sniper attacks (PoW + memory limits)");
-    add_bool(&mut t, "dns_protection",      config.routing.dns_protection,      "DNS leakage (DoH / DoT)");
-    add_bool(&mut t, "webrtc_protection",   config.routing.webrtc_protection,   "WebRTC leakage (ICE filtering)");
-    add_bool(&mut t, "sybil_defense",       config.routing.sybil_defense,       "Sybil attacks (reputation + stake)");
+    add_bool(
+        &mut t,
+        "bgp_protection",
+        config.routing.bgp_protection,
+        "BGP hijacking / RAPTOR (RPKI validation)",
+    );
+    add_bool(
+        &mut t,
+        "guard_management",
+        config.routing.guard_management,
+        "Guard discovery (vanguard architecture)",
+    );
+    add_bool(
+        &mut t,
+        "resource_protection",
+        config.routing.resource_protection,
+        "Sniper attacks (PoW + memory limits)",
+    );
+    add_bool(
+        &mut t,
+        "dns_protection",
+        config.routing.dns_protection,
+        "DNS leakage (DoH / DoT)",
+    );
+    add_bool(
+        &mut t,
+        "webrtc_protection",
+        config.routing.webrtc_protection,
+        "WebRTC leakage (ICE filtering)",
+    );
+    add_bool(
+        &mut t,
+        "sybil_defense",
+        config.routing.sybil_defense,
+        "Sybil attacks (reputation + stake)",
+    );
     println!("{t}");
     println!();
 }
@@ -115,11 +170,7 @@ pub fn print_diff(changes: &[(String, String, String)]) {
     let mut t = base_table();
     t.set_header(vec!["Setting", "Current Value", "New Value"]);
     for (key, old, new) in changes {
-        t.add_row(vec![
-            Cell::new(key),
-            value_cell(old),
-            value_cell(new),
-        ]);
+        t.add_row(vec![Cell::new(key), value_cell(old), value_cell(new)]);
     }
     println!("{t}");
 }
@@ -129,17 +180,37 @@ pub fn print_diff(changes: &[(String, String, String)]) {
 /// Print the protection checklist used by `gptl status` and `gptl security status`.
 pub fn print_protection_list(config: &GptlConfig) {
     let items: &[(&str, bool, &str)] = &[
-        ("traffic_shaping",          config.core.traffic_shaping,          "core"),
-        ("adaptive_padding",         config.core.adaptive_padding,         "core"),
-        ("timing_protection",        config.core.timing_protection,        "core"),
-        ("circuit_obfuscation",      config.core.circuit_obfuscation,      "core"),
-        ("flow_correlation_defense", config.core.flow_correlation_defense, "core"),
-        ("bgp_protection",           config.routing.bgp_protection,        "routing"),
-        ("guard_management",         config.routing.guard_management,      "routing"),
-        ("resource_protection",      config.routing.resource_protection,   "routing"),
-        ("dns_protection",           config.routing.dns_protection,        "routing"),
-        ("webrtc_protection",        config.routing.webrtc_protection,     "routing"),
-        ("sybil_defense",            config.routing.sybil_defense,         "routing"),
+        ("traffic_shaping", config.core.traffic_shaping, "core"),
+        ("adaptive_padding", config.core.adaptive_padding, "core"),
+        ("timing_protection", config.core.timing_protection, "core"),
+        (
+            "circuit_obfuscation",
+            config.core.circuit_obfuscation,
+            "core",
+        ),
+        (
+            "flow_correlation_defense",
+            config.core.flow_correlation_defense,
+            "core",
+        ),
+        ("bgp_protection", config.routing.bgp_protection, "routing"),
+        (
+            "guard_management",
+            config.routing.guard_management,
+            "routing",
+        ),
+        (
+            "resource_protection",
+            config.routing.resource_protection,
+            "routing",
+        ),
+        ("dns_protection", config.routing.dns_protection, "routing"),
+        (
+            "webrtc_protection",
+            config.routing.webrtc_protection,
+            "routing",
+        ),
+        ("sybil_defense", config.routing.sybil_defense, "routing"),
     ];
 
     for (name, enabled, module) in items {
@@ -148,7 +219,13 @@ pub fn print_protection_list(config: &GptlConfig) {
         } else {
             (err_str("✘"), err_str("disabled"))
         };
-        println!("  {}  {:<30}  {}  {}", mark, name, label, dim(&format!("({})", module)));
+        println!(
+            "  {}  {:<30}  {}  {}",
+            mark,
+            name,
+            label,
+            dim(&format!("({})", module))
+        );
     }
 }
 
@@ -226,11 +303,11 @@ fn add_bool(table: &mut Table, key: &str, value: bool, description: &str) {
 
 fn value_cell(val: &str) -> Cell {
     match val.to_lowercase().as_str() {
-        "true"     => Cell::new(val).fg(Color::Green),
-        "false"    => Cell::new(val).fg(Color::Red),
+        "true" => Cell::new(val).fg(Color::Green),
+        "false" => Cell::new(val).fg(Color::Red),
         "standard" => Cell::new(val).fg(Color::Cyan),
         "enhanced" => Cell::new(val).fg(Color::Green),
-        "maximum"  => Cell::new(val).fg(Color::Yellow),
-        _          => Cell::new(val),
+        "maximum" => Cell::new(val).fg(Color::Yellow),
+        _ => Cell::new(val),
     }
 }

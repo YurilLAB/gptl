@@ -8,11 +8,11 @@
 //! - Denial of service attacks
 
 use gptl_crypto::{
-    AesGcmCipher, CellCipher, CipherSuite,
     kex::{KeyExchange, X25519KeyExchange},
+    AesGcmCipher, CellCipher, CipherSuite,
 };
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 #[test]
 fn test_timing_attack_resistance() {
@@ -120,7 +120,11 @@ fn test_ciphertext_malleability() {
 
         // Decryption should fail
         let result = cipher.decrypt(&ciphertext);
-        assert!(result.is_err(), "Modified ciphertext accepted at position {}", i);
+        assert!(
+            result.is_err(),
+            "Modified ciphertext accepted at position {}",
+            i
+        );
 
         // Restore
         ciphertext[i] = original;
@@ -242,7 +246,8 @@ fn test_side_channel_constant_time() {
 
     // Calculate variance
     let avg: Duration = times.iter().sum::<Duration>() / times.len() as u32;
-    let variance: f64 = times.iter()
+    let variance: f64 = times
+        .iter()
         .map(|t| {
             let diff = if *t > avg {
                 (*t - avg).as_nanos() as f64
@@ -251,7 +256,8 @@ fn test_side_channel_constant_time() {
             };
             diff * diff
         })
-        .sum::<f64>() / times.len() as f64;
+        .sum::<f64>()
+        / times.len() as f64;
 
     // Variance should be relatively low for constant-time operations
     // This is a weak test; real constant-time verification requires specialized tools
@@ -259,7 +265,11 @@ fn test_side_channel_constant_time() {
     let coefficient_of_variation = std_dev / avg.as_nanos() as f64;
 
     // Allow some variance but not excessive
-    assert!(coefficient_of_variation < 1.0, "Timing variance too high: {}", coefficient_of_variation);
+    assert!(
+        coefficient_of_variation < 1.0,
+        "Timing variance too high: {}",
+        coefficient_of_variation
+    );
 }
 
 #[test]
@@ -277,7 +287,11 @@ fn test_dos_resource_exhaustion() {
     let elapsed = start.elapsed();
 
     // Should complete in reasonable time (< 1 second)
-    assert!(elapsed < Duration::from_secs(1), "Encryption too slow: {:?}", elapsed);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "Encryption too slow: {:?}",
+        elapsed
+    );
     assert!(result.is_ok());
 }
 
@@ -306,7 +320,12 @@ fn test_padding_oracle_attack() {
     }
 
     // Should have only one error type (no padding oracle)
-    assert_eq!(error_types.len(), 1, "Multiple error types detected: {:?}", error_types);
+    assert_eq!(
+        error_types.len(),
+        1,
+        "Multiple error types detected: {:?}",
+        error_types
+    );
 }
 
 #[test]

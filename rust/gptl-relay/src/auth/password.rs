@@ -15,7 +15,8 @@ impl PasswordHasher {
     pub fn hash(&self, password: &str) -> crate::Result<String> {
         let salt = argon2::password_hash::SaltString::generate(&mut rand::thread_rng());
         let argon2 = Argon2::default();
-        let hash = argon2.hash_password(password.as_bytes(), &salt)
+        let hash = argon2
+            .hash_password(password.as_bytes(), &salt)
             .map_err(|e| crate::RelayError::Internal(format!("Hashing failed: {}", e)))?;
         Ok(hash.to_string())
     }
@@ -24,7 +25,9 @@ impl PasswordHasher {
     pub fn verify(&self, password: &str, hash: &str) -> crate::Result<bool> {
         let parsed = PasswordHash::new(hash)
             .map_err(|e| crate::RelayError::Internal(format!("Invalid hash: {}", e)))?;
-        Ok(Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+        Ok(Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok())
     }
 }
 

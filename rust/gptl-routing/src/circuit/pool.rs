@@ -154,7 +154,7 @@ impl Default for CircuitPoolConfig {
             max_circuit_age: Duration::from_secs(600), // 10 minutes
             max_idle_time: Duration::from_secs(300),   // 5 minutes
             max_use_count: 100,
-            max_bytes_transferred: 100 * 1024 * 1024,  // 100 MB
+            max_bytes_transferred: 100 * 1024 * 1024, // 100 MB
             build_timeout: Duration::from_secs(30),
             refill_interval: Duration::from_secs(10),
             enable_background_build: true,
@@ -171,13 +171,19 @@ pub enum PoolEvent {
     /// Circuit is ready
     CircuitReady { circuit_id: CircuitId },
     /// Circuit build failed
-    CircuitBuildFailed { circuit_id: CircuitId, error: String },
+    CircuitBuildFailed {
+        circuit_id: CircuitId,
+        error: String,
+    },
     /// Circuit acquired for use
     CircuitAcquired { circuit_id: CircuitId },
     /// Circuit released back to pool
     CircuitReleased { circuit_id: CircuitId },
     /// Circuit retired
-    CircuitRetired { circuit_id: CircuitId, reason: RetireReason },
+    CircuitRetired {
+        circuit_id: CircuitId,
+        reason: RetireReason,
+    },
     /// Pool refilled
     PoolRefilled { count: usize },
     /// Pool is empty
@@ -228,10 +234,10 @@ pub struct CircuitPool {
 pub trait CircuitBuilder: Send + Sync {
     /// Build a new circuit
     async fn build_circuit(&self, circuit_id: CircuitId) -> Result<Vec<String>, PoolError>;
-    
+
     /// Test if a circuit is working
     async fn test_circuit(&self, path: &[String]) -> Result<bool, PoolError>;
-    
+
     /// Close a circuit
     async fn close_circuit(&self, circuit_id: CircuitId) -> Result<(), PoolError>;
 }
@@ -265,7 +271,7 @@ impl CircuitPool {
         builder: Arc<dyn CircuitBuilder>,
     ) -> Self {
         let build_semaphore = Arc::new(Semaphore::new(config.max_concurrent_builds));
-        
+
         Self {
             config,
             circuits: Arc::new(RwLock::new(HashMap::new())),
@@ -286,18 +292,21 @@ impl CircuitPool {
 
     /// Initialize the pool with pre-built circuits
     pub async fn initialize(&self) -> Result<(), PoolError> {
-        info!("Initializing circuit pool with {} pre-built circuits", self.config.pre_build_count);
-        
+        info!(
+            "Initializing circuit pool with {} pre-built circuits",
+            self.config.pre_build_count
+        );
+
         // Build initial circuits
         for _ in 0..self.config.pre_build_count {
             self.build_circuit().await?;
         }
-        
+
         // Start background tasks
         if self.config.enable_background_build {
             self.start_background_tasks();
         }
-        
+
         info!("Circuit pool initialized");
         Ok(())
     }
@@ -310,7 +319,7 @@ impl CircuitPool {
                 let mut queue = self.available_queue.write().await;
                 queue.pop_front()
             };
-            
+
             match circuit_id {
                 Some(id) => {
                     // Check health before returning
@@ -319,29 +328,30 @@ impl CircuitPool {
                         let _ = self.retire_circuit(id, RetireReason::HealthCheck).await;
                         continue;
                     }
-                    
+
                     // Mark as in use
                     let mut circuits = self.circuits.write().await;
                     if let Some(circuit) = circuits.get_mut(&id) {
                         circuit.mark_in_use();
                     }
                     drop(circuits);
-                    
-                    self.send_event(PoolEvent::CircuitAcquired { circuit_id: id }).await;
-                    
+
+                    self.send_event(PoolEvent::CircuitAcquired { circuit_id: id })
+                        .await;
+
                     // Trigger refill if needed
                     self.check_and_refill().await;
-                    
+
                     return Ok(id);
                 }
                 None => break,
             }
         }
-        
+
         // No available circuit - try to build one immediately
         warn!("Pool is empty, building circuit on-demand");
         self.send_event(PoolEvent::PoolEmpty).await;
-        
+
         match self.build_circuit().await {
             Ok(id) => {
                 let mut circuits = self.circuits.write().await;
@@ -349,8 +359,9 @@ impl CircuitPool {
                     circuit.mark_in_use();
                 }
                 drop(circuits);
-                
-                self.send_event(PoolEvent::CircuitAcquired { circuit_id: id }).await;
+
+                self.send_event(PoolEvent::CircuitAcquired { circuit_id: id })
+                    .await;
                 Ok(id)
             }
             Err(_e) => Err(PoolError::PoolEmpty),
@@ -360,27 +371,30 @@ impl CircuitPool {
     /// Return a circuit to the pool
     pub async fn release_circuit(&self, circuit_id: CircuitId) -> Result<(), PoolError> {
         let mut circuits = self.circuits.write().await;
-        
+
         let Some(circuit) = circuits.get_mut(&circuit_id) else {
             return Err(PoolError::CircuitNotFound(circuit_id));
         };
-        
+
         // Check if circuit should be retired
         if self.should_retire(circuit) {
             drop(circuits);
-            return self.retire_circuit(circuit_id, RetireReason::UseCount).await;
+            return self
+                .retire_circuit(circuit_id, RetireReason::UseCount)
+                .await;
         }
-        
+
         circuit.mark_available();
         drop(circuits);
-        
+
         // Add back to available queue
         let mut queue = self.available_queue.write().await;
         queue.push_back(circuit_id);
         drop(queue);
-        
-        self.send_event(PoolEvent::CircuitReleased { circuit_id }).await;
-        
+
+        self.send_event(PoolEvent::CircuitReleased { circuit_id })
+            .await;
+
         Ok(())
     }
 
@@ -391,34 +405,35 @@ impl CircuitPool {
         reason: RetireReason,
     ) -> Result<(), PoolError> {
         let mut circuits = self.circuits.write().await;
-        
+
         let Some(mut circuit) = circuits.remove(&circuit_id) else {
             return Err(PoolError::CircuitNotFound(circuit_id));
         };
-        
+
         circuit.mark_retiring();
         drop(circuits);
-        
+
         // Remove from available queue if present
         let mut queue = self.available_queue.write().await;
         queue.retain(|&id| id != circuit_id);
         drop(queue);
-        
+
         // Unregister from health monitor
         self.health_monitor.unregister_circuit(circuit_id).await;
-        
+
         // Close the circuit
         if let Err(e) = self.builder.close_circuit(circuit_id).await {
             warn!(circuit_id, error = %e, "Error closing retired circuit");
         }
-        
-        self.send_event(PoolEvent::CircuitRetired { circuit_id, reason }).await;
-        
+
+        self.send_event(PoolEvent::CircuitRetired { circuit_id, reason })
+            .await;
+
         debug!(circuit_id, reason = ?reason, "Circuit retired");
-        
+
         // Trigger refill
         self.check_and_refill().await;
-        
+
         Ok(())
     }
 
@@ -426,14 +441,14 @@ impl CircuitPool {
     pub async fn get_statistics(&self) -> PoolStatistics {
         let circuits = self.circuits.read().await;
         let available = self.available_queue.read().await;
-        
+
         let mut building = 0;
         let mut ready = 0;
         let mut in_use = 0;
         let mut retiring = 0;
         let mut total_bytes = 0u64;
         let mut total_uses = 0u64;
-        
+
         for circuit in circuits.values() {
             match circuit.state {
                 PoolCircuitState::Building => building += 1,
@@ -445,7 +460,7 @@ impl CircuitPool {
             total_bytes += circuit.bytes_transferred;
             total_uses += circuit.use_count;
         }
-        
+
         PoolStatistics {
             total_circuits: circuits.len(),
             building_circuits: building,
@@ -471,19 +486,21 @@ impl CircuitPool {
         bytes_transferred: u64,
     ) -> Result<(), PoolError> {
         let mut circuits = self.circuits.write().await;
-        
+
         let Some(circuit) = circuits.get_mut(&circuit_id) else {
             return Err(PoolError::CircuitNotFound(circuit_id));
         };
-        
+
         circuit.bytes_transferred += bytes_transferred;
-        
+
         // Check if should retire due to bytes
         if circuit.bytes_transferred >= self.config.max_bytes_transferred {
             drop(circuits);
-            return self.retire_circuit(circuit_id, RetireReason::BytesTransferred).await;
+            return self
+                .retire_circuit(circuit_id, RetireReason::BytesTransferred)
+                .await;
         }
-        
+
         Ok(())
     }
 
@@ -495,14 +512,14 @@ impl CircuitPool {
             return Err(PoolError::PoolAtCapacity);
         }
         drop(circuits);
-        
+
         // Acquire build permit
         let _permit = self
             .build_semaphore
             .acquire()
             .await
             .map_err(|_| PoolError::TooManyBuilds)?;
-        
+
         // Generate new circuit ID
         let circuit_id = {
             let mut next_id = self.next_id.write().await;
@@ -510,27 +527,28 @@ impl CircuitPool {
             *next_id += 1;
             id
         };
-        
+
         // Register with health monitor
         self.health_monitor.register_circuit(circuit_id).await;
-        
+
         // Create placeholder circuit
         let placeholder = PoolCircuit::new(circuit_id, Vec::new());
-        
+
         {
             let mut circuits = self.circuits.write().await;
             circuits.insert(circuit_id, placeholder);
         }
-        
-        self.send_event(PoolEvent::CircuitBuilding { circuit_id }).await;
-        
+
+        self.send_event(PoolEvent::CircuitBuilding { circuit_id })
+            .await;
+
         // Build circuit with timeout
         let build_result = tokio::time::timeout(
             self.config.build_timeout,
             self.builder.build_circuit(circuit_id),
         )
         .await;
-        
+
         match build_result {
             Ok(Ok(path)) => {
                 // Update circuit
@@ -540,14 +558,15 @@ impl CircuitPool {
                     circuit.mark_ready();
                 }
                 drop(circuits);
-                
+
                 // Add to available queue
                 let mut queue = self.available_queue.write().await;
                 queue.push_back(circuit_id);
                 drop(queue);
-                
-                self.send_event(PoolEvent::CircuitReady { circuit_id }).await;
-                
+
+                self.send_event(PoolEvent::CircuitReady { circuit_id })
+                    .await;
+
                 debug!(circuit_id, "Circuit built successfully");
                 Ok(circuit_id)
             }
@@ -556,15 +575,15 @@ impl CircuitPool {
                 let mut circuits = self.circuits.write().await;
                 circuits.remove(&circuit_id);
                 drop(circuits);
-                
+
                 self.health_monitor.unregister_circuit(circuit_id).await;
-                
+
                 self.send_event(PoolEvent::CircuitBuildFailed {
                     circuit_id,
                     error: e.to_string(),
                 })
                 .await;
-                
+
                 Err(PoolError::BuildFailed(e.to_string()))
             }
             Err(_) => {
@@ -572,15 +591,15 @@ impl CircuitPool {
                 let mut circuits = self.circuits.write().await;
                 circuits.remove(&circuit_id);
                 drop(circuits);
-                
+
                 self.health_monitor.unregister_circuit(circuit_id).await;
-                
+
                 self.send_event(PoolEvent::CircuitBuildFailed {
                     circuit_id,
                     error: "Timeout".to_string(),
                 })
                 .await;
-                
+
                 Err(PoolError::BuildTimeout)
             }
         }
@@ -592,36 +611,36 @@ impl CircuitPool {
         if circuit.age() > self.config.max_circuit_age {
             return true;
         }
-        
+
         // Check idle time
         if let Some(idle) = circuit.idle_time() {
             if idle > self.config.max_idle_time {
                 return true;
             }
         }
-        
+
         // Check use count
         if circuit.use_count >= self.config.max_use_count {
             return true;
         }
-        
+
         // Check bytes transferred
         if circuit.bytes_transferred >= self.config.max_bytes_transferred {
             return true;
         }
-        
+
         false
     }
 
     /// Check pool level and refill if needed
     async fn check_and_refill(&self) {
         let available = self.available_queue.read().await.len();
-        
+
         if available < self.config.min_pool_size {
             let needed = self.config.min_pool_size - available;
-            
+
             debug!(needed, "Refilling circuit pool");
-            
+
             let mut built = 0;
             for _ in 0..needed {
                 match self.build_circuit().await {
@@ -632,9 +651,10 @@ impl CircuitPool {
                     }
                 }
             }
-            
+
             if built > 0 {
-                self.send_event(PoolEvent::PoolRefilled { count: built }).await;
+                self.send_event(PoolEvent::PoolRefilled { count: built })
+                    .await;
             }
         }
     }
@@ -655,30 +675,30 @@ impl CircuitPool {
         let build_semaphore = self.build_semaphore.clone();
         let event_sender = self.event_sender.clone();
         let next_id = self.next_id.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(config.refill_interval);
-            
+
             loop {
                 interval.tick().await;
-                
+
                 // Check available count
                 let available_count = available.read().await.len();
-                
+
                 if available_count < config.min_pool_size {
                     let needed = config.min_pool_size - available_count;
-                    
+
                     for _ in 0..needed {
                         // Check capacity
                         if circuits.read().await.len() >= config.max_pool_size {
                             break;
                         }
-                        
+
                         // Try to acquire build permit
                         let Ok(_permit) = build_semaphore.try_acquire() else {
                             break;
                         };
-                        
+
                         // Generate circuit ID
                         let circuit_id = {
                             let mut id = next_id.write().await;
@@ -686,10 +706,10 @@ impl CircuitPool {
                             *id += 1;
                             cid
                         };
-                        
+
                         // Register with health monitor
                         health_monitor.register_circuit(circuit_id).await;
-                        
+
                         // Build circuit
                         if let Ok(Ok(path)) = tokio::time::timeout(
                             config.build_timeout,
@@ -709,10 +729,10 @@ impl CircuitPool {
                                 bandwidth_estimate: 0,
                                 is_dirty: false,
                             };
-                            
+
                             circuits.write().await.insert(circuit_id, circuit);
                             available.write().await.push_back(circuit_id);
-                            
+
                             if let Some(ref sender) = event_sender {
                                 let _ = sender.send(PoolEvent::CircuitReady { circuit_id }).await;
                             }
@@ -729,13 +749,13 @@ impl CircuitPool {
     fn start_refresh_task(&self) {
         let circuits = self.circuits.clone();
         let config = self.config.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let _now = Instant::now();
                 let mut to_refresh = Vec::new();
 
@@ -748,7 +768,7 @@ impl CircuitPool {
                         }
                     }
                 }
-                
+
                 // Mark circuits for refresh (they'll be replaced when used)
                 for id in to_refresh {
                     let mut circuits_guard = circuits.write().await;
@@ -756,7 +776,7 @@ impl CircuitPool {
                         circuit.state = PoolCircuitState::Refreshing;
                     }
                 }
-                
+
                 trace!("Refresh check completed");
             }
         });
@@ -803,7 +823,7 @@ pub struct MockCircuitBuilder {
 impl CircuitBuilder for MockCircuitBuilder {
     async fn build_circuit(&self, circuit_id: CircuitId) -> Result<Vec<String>, PoolError> {
         tokio::time::sleep(self.build_delay).await;
-        
+
         if rand::random::<f64>() < self.success_rate {
             Ok(vec![
                 format!("relay1_{}", circuit_id),
@@ -814,11 +834,11 @@ impl CircuitBuilder for MockCircuitBuilder {
             Err(PoolError::BuildFailed("Random failure".to_string()))
         }
     }
-    
+
     async fn test_circuit(&self, _path: &[String]) -> Result<bool, PoolError> {
         Ok(true)
     }
-    
+
     async fn close_circuit(&self, _circuit_id: CircuitId) -> Result<(), PoolError> {
         Ok(())
     }
@@ -831,20 +851,20 @@ mod tests {
     #[test]
     fn test_pool_circuit_states() {
         let mut circuit = PoolCircuit::new(1, vec!["r1".to_string(), "r2".to_string()]);
-        
+
         assert_eq!(circuit.state, PoolCircuitState::Building);
         assert!(!circuit.is_available());
-        
+
         circuit.mark_ready();
         assert_eq!(circuit.state, PoolCircuitState::Ready);
         assert!(circuit.is_available());
-        
+
         circuit.mark_in_use();
         assert_eq!(circuit.state, PoolCircuitState::InUse);
         assert!(!circuit.is_available());
         assert_eq!(circuit.use_count, 1);
         assert!(circuit.is_dirty);
-        
+
         circuit.mark_available();
         assert_eq!(circuit.state, PoolCircuitState::Ready);
     }
@@ -852,10 +872,10 @@ mod tests {
     #[test]
     fn test_pool_circuit_age() {
         let circuit = PoolCircuit::new(1, vec!["r1".to_string()]);
-        
+
         // Circuit should be fresh
         assert!(!circuit.needs_refresh(Duration::from_secs(60)));
-        
+
         // Age check should work
         assert!(circuit.age() < Duration::from_secs(60));
     }
@@ -869,16 +889,16 @@ mod tests {
             build_timeout: Duration::from_secs(5),
             ..Default::default()
         };
-        
+
         let health_monitor = Arc::new(CircuitHealthMonitor::new());
         let builder = Arc::new(MockCircuitBuilder {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let pool = CircuitPool::new(config, health_monitor, builder);
         pool.initialize().await.unwrap();
-        
+
         // Check statistics
         let stats = pool.get_statistics().await;
         assert_eq!(stats.ready_circuits, 2);
@@ -893,16 +913,16 @@ mod tests {
             build_timeout: Duration::from_secs(5),
             ..Default::default()
         };
-        
+
         let health_monitor = Arc::new(CircuitHealthMonitor::new());
         let builder = Arc::new(MockCircuitBuilder {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let pool = CircuitPool::new(config, health_monitor, builder);
         pool.initialize().await.unwrap();
-        
+
         // Acquire a circuit
         let circuit_id = pool.acquire_circuit().await.unwrap();
 
@@ -930,26 +950,26 @@ mod tests {
             max_use_count: 3,
             ..Default::default()
         };
-        
+
         let health_monitor = Arc::new(CircuitHealthMonitor::new());
         let builder = Arc::new(MockCircuitBuilder {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let pool = CircuitPool::new(config, health_monitor, builder);
         pool.initialize().await.unwrap();
-        
+
         // Acquire and release circuit multiple times
         let circuit_id = pool.acquire_circuit().await.unwrap();
         pool.release_circuit(circuit_id).await.unwrap();
-        
+
         let circuit_id = pool.acquire_circuit().await.unwrap();
         pool.release_circuit(circuit_id).await.unwrap();
-        
+
         let circuit_id = pool.acquire_circuit().await.unwrap();
         pool.release_circuit(circuit_id).await.unwrap();
-        
+
         // Fourth release should retire the circuit due to use count
         let circuit_id = pool.acquire_circuit().await.unwrap();
         pool.release_circuit(circuit_id).await.unwrap();
@@ -964,16 +984,16 @@ mod tests {
             build_timeout: Duration::from_secs(5),
             ..Default::default()
         };
-        
+
         let health_monitor = Arc::new(CircuitHealthMonitor::new());
         let builder = Arc::new(MockCircuitBuilder {
             success_rate: 1.0,
             build_delay: Duration::from_millis(10),
         });
-        
+
         let pool = CircuitPool::new(config, health_monitor, builder);
         pool.initialize().await.unwrap();
-        
+
         // Pool is empty, but acquire should build on demand
         let circuit_id = pool.acquire_circuit().await.unwrap();
         assert!(circuit_id > 0);
@@ -991,7 +1011,7 @@ mod tests {
             total_bytes_transferred: 1024000,
             total_circuit_uses: 100,
         };
-        
+
         assert_eq!(stats.total_circuits, 10);
         assert_eq!(stats.total_bytes_transferred, 1024000);
     }

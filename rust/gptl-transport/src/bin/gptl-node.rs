@@ -201,7 +201,9 @@ fn print_usage() {
     println!("  --log <LEVEL>            Log level (default: info)");
     println!("  --allow-private          (testing only) permit loopback / RFC1918 destinations");
     println!("  --max-circuits <N>       Override the per-process circuit cap (default: 1000)");
-    println!("  --metrics-addr <ADDR>    Bind a Prometheus /metrics endpoint here (e.g. 127.0.0.1:9100)");
+    println!(
+        "  --metrics-addr <ADDR>    Bind a Prometheus /metrics endpoint here (e.g. 127.0.0.1:9100)"
+    );
     println!("  -h, --help               Print this help");
     println!();
     println!("EXAMPLE:");

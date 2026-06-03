@@ -70,27 +70,23 @@ impl WebrtcGuard {
     /// Create new WebRTC guard
     pub fn new(config: Arc<RwLock<RoutingConfig>>) -> Self {
         let stun_config = Arc::new(RwLock::new(StunConfig {
-            servers: vec![
-                "stun:vpn-provider.com:3478".to_string(),
-            ],
+            servers: vec!["stun:vpn-provider.com:3478".to_string()],
             block_public: true,
         }));
-        
+
         let turn_config = Arc::new(RwLock::new(TurnConfig {
-            servers: vec![
-                "turn:vpn-provider.com:3478".to_string(),
-            ],
+            servers: vec!["turn:vpn-provider.com:3478".to_string()],
             force_relay: true,
             credentials: TurnCredentials {
                 username: "vpn-user".to_string(),
                 credential: "vpn-pass".to_string(),
             },
         }));
-        
+
         let ice_policy = Arc::new(RwLock::new(IcePolicy::RelayOnly));
-        
+
         let blocked_interfaces = Arc::new(RwLock::new(HashSet::new()));
-        
+
         Self {
             config,
             stun_config,
@@ -107,7 +103,7 @@ impl WebrtcGuard {
         blocked.insert("eth0".to_string());
         blocked.insert("wlan0".to_string());
         blocked.insert("en0".to_string());
-        
+
         Ok(())
     }
 
@@ -116,7 +112,7 @@ impl WebrtcGuard {
         let stun = self.stun_config.read().await;
         let turn = self.turn_config.read().await;
         let ice = self.ice_policy.read().await;
-        
+
         Ok(WebrtcConfig {
             stun_servers: stun.servers.clone(),
             turn_servers: turn.servers.clone(),
@@ -129,8 +125,9 @@ impl WebrtcGuard {
     pub async fn filter_candidates(&self, candidates: Vec<IceCandidate>) -> Vec<IceCandidate> {
         let ice_policy = self.ice_policy.read().await;
         let blocked = self.blocked_interfaces.read().await;
-        
-        candidates.into_iter()
+
+        candidates
+            .into_iter()
             .filter(|c| {
                 match *ice_policy {
                     IcePolicy::All => true,
@@ -159,7 +156,7 @@ impl WebrtcGuard {
     pub async fn test_for_leak(&self) -> Option<WebrtcLeakResult> {
         // In production, use browser automation or native API
         // to check if real IP is exposed
-        
+
         // Make STUN request and check returned address
         None
     }
@@ -173,11 +170,11 @@ impl WebrtcGuard {
     /// Disable WebRTC entirely
     pub async fn disable_webrtc(&self) -> Result<(), RoutingError> {
         self.set_ice_policy(IcePolicy::RelayOnly).await;
-        
+
         let mut turn = self.turn_config.write().await;
         turn.force_relay = true;
         turn.servers.clear(); // No TURN = no WebRTC
-        
+
         Ok(())
     }
 }
@@ -196,9 +193,9 @@ pub struct IceCandidate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateType {
     Host,
-    ServerReflexive,  // STUN
+    ServerReflexive, // STUN
     PeerReflexive,
-    Relay,            // TURN
+    Relay, // TURN
 }
 
 impl IceCandidate {
@@ -210,9 +207,9 @@ impl IceCandidate {
                 // Check for VPN tunnel ranges
                 let octets = v4.octets();
                 // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 are typical VPN ranges
-                octets[0] == 10 ||
-                (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) ||
-                (octets[0] == 192 && octets[1] == 168)
+                octets[0] == 10
+                    || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31)
+                    || (octets[0] == 192 && octets[1] == 168)
             }
             IpAddr::V6(_) => {
                 // Check for VPN IPv6 ranges
@@ -293,15 +290,24 @@ impl BrowserPolicyEnforcer {
     /// Firefox configuration
     fn firefox_config(&self) -> BrowserConfig {
         let mut prefs = Vec::new();
-        
+
         if self.settings.disable_webrtc {
-            prefs.push(("media.peerconnection.enabled".to_string(), "false".to_string()));
+            prefs.push((
+                "media.peerconnection.enabled".to_string(),
+                "false".to_string(),
+            ));
         } else {
             // Limit ICE candidates
-            prefs.push(("media.peerconnection.ice.default_address_only".to_string(), "true".to_string()));
-            prefs.push(("media.peerconnection.ice.no_host".to_string(), "true".to_string()));
+            prefs.push((
+                "media.peerconnection.ice.default_address_only".to_string(),
+                "true".to_string(),
+            ));
+            prefs.push((
+                "media.peerconnection.ice.no_host".to_string(),
+                "true".to_string(),
+            ));
         }
-        
+
         BrowserConfig { preferences: prefs }
     }
 
@@ -309,9 +315,10 @@ impl BrowserPolicyEnforcer {
     fn chrome_config(&self) -> BrowserConfig {
         // Chrome uses command-line flags and extensions
         BrowserConfig {
-            preferences: vec![
-                ("webrtc.ip_handling_policy".to_string(), "disable_non_proxied_udp".to_string()),
-            ],
+            preferences: vec![(
+                "webrtc.ip_handling_policy".to_string(),
+                "disable_non_proxied_udp".to_string(),
+            )],
         }
     }
 
@@ -333,9 +340,10 @@ impl BrowserPolicyEnforcer {
     fn brave_config(&self) -> BrowserConfig {
         // Brave has built-in WebRTC protection
         BrowserConfig {
-            preferences: vec![
-                ("webrtc.ip_handling_policy".to_string(), "default_public_and_private_interfaces".to_string()),
-            ],
+            preferences: vec![(
+                "webrtc.ip_handling_policy".to_string(),
+                "default_public_and_private_interfaces".to_string(),
+            )],
         }
     }
 }
@@ -372,30 +380,31 @@ impl StunTurnTester {
 
     /// Test STUN server (RFC 5389 - STUN protocol)
     pub async fn test_stun(&self, server: &str) -> Result<StunResult, StunError> {
-        use tokio::net::UdpSocket;
         use std::time::Duration;
+        use tokio::net::UdpSocket;
 
         // Parse server address
-        let addr = server.parse::<std::net::SocketAddr>()
+        let addr = server
+            .parse::<std::net::SocketAddr>()
             .map_err(|e| StunError::ConnectionFailed(format!("Invalid address: {}", e)))?;
 
         // Bind to local socket
-        let socket = UdpSocket::bind("0.0.0.0:0").await
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .await
             .map_err(|e| StunError::ConnectionFailed(format!("Bind failed: {}", e)))?;
 
         // Build STUN Binding Request (RFC 5389)
         let stun_request = build_stun_binding_request();
 
         // Send request
-        socket.send_to(&stun_request, addr).await
+        socket
+            .send_to(&stun_request, addr)
+            .await
             .map_err(|e| StunError::ConnectionFailed(format!("Send failed: {}", e)))?;
 
         // Receive response with timeout
         let mut buf = [0u8; 1024];
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            socket.recv_from(&mut buf)
-        ).await;
+        let result = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut buf)).await;
 
         match result {
             Ok(Ok((len, _))) => {
@@ -736,7 +745,10 @@ mod tests {
         // Test Firefox
         let firefox = BrowserPolicyEnforcer::new(BrowserType::Firefox);
         let config = firefox.generate_config();
-        assert!(config.preferences.iter().any(|(k, _)| k.contains("peerconnection")));
+        assert!(config
+            .preferences
+            .iter()
+            .any(|(k, _)| k.contains("peerconnection")));
 
         // Test Chrome
         let chrome = BrowserPolicyEnforcer::new(BrowserType::Chrome);
@@ -827,8 +839,11 @@ mod tests {
         ];
 
         let filtered = guard.filter_candidates(candidates).await;
-        assert!(filtered.is_empty(),
-            "all Host candidates must be filtered out in RelayOnly mode, got {}", filtered.len());
+        assert!(
+            filtered.is_empty(),
+            "all Host candidates must be filtered out in RelayOnly mode, got {}",
+            filtered.len()
+        );
     }
 
     #[tokio::test]
@@ -858,8 +873,11 @@ mod tests {
 
         let filtered = guard.filter_candidates(candidates).await;
         // Only the Relay candidate should survive
-        assert_eq!(filtered.len(), 1,
-            "only Relay candidates must survive in RelayOnly mode");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only Relay candidates must survive in RelayOnly mode"
+        );
         assert_eq!(filtered[0].candidate_type, CandidateType::Relay);
     }
 
@@ -897,10 +915,17 @@ mod tests {
         ];
 
         let filtered = guard.filter_candidates(candidates).await;
-        assert_eq!(filtered.len(), 2,
-            "NoHost mode must allow STUN and Relay but block Host candidates");
-        assert!(filtered.iter().all(|c| c.candidate_type != CandidateType::Host),
-            "no Host candidate must survive NoHost filtering");
+        assert_eq!(
+            filtered.len(),
+            2,
+            "NoHost mode must allow STUN and Relay but block Host candidates"
+        );
+        assert!(
+            filtered
+                .iter()
+                .all(|c| c.candidate_type != CandidateType::Host),
+            "no Host candidate must survive NoHost filtering"
+        );
     }
 
     #[test]
@@ -908,36 +933,60 @@ mod tests {
         // 10.x.x.x
         let c1 = IceCandidate {
             ip: "10.0.0.1".parse().unwrap(),
-            port: 0, candidate_type: CandidateType::Host,
-            interface: String::new(), foundation: String::new(), priority: 0,
+            port: 0,
+            candidate_type: CandidateType::Host,
+            interface: String::new(),
+            foundation: String::new(),
+            priority: 0,
         };
-        assert!(c1.is_vpn_address(), "10.0.0.1 must be detected as VPN/private address");
+        assert!(
+            c1.is_vpn_address(),
+            "10.0.0.1 must be detected as VPN/private address"
+        );
 
         // 172.16.x.x
         let c2 = IceCandidate {
             ip: "172.20.0.1".parse().unwrap(),
-            port: 0, candidate_type: CandidateType::Host,
-            interface: String::new(), foundation: String::new(), priority: 0,
+            port: 0,
+            candidate_type: CandidateType::Host,
+            interface: String::new(),
+            foundation: String::new(),
+            priority: 0,
         };
-        assert!(c2.is_vpn_address(), "172.20.0.1 must be detected as VPN/private address");
+        assert!(
+            c2.is_vpn_address(),
+            "172.20.0.1 must be detected as VPN/private address"
+        );
 
         // Public IP — must not be flagged as VPN
         let c3 = IceCandidate {
             ip: "203.0.113.5".parse().unwrap(),
-            port: 0, candidate_type: CandidateType::Host,
-            interface: String::new(), foundation: String::new(), priority: 0,
+            port: 0,
+            candidate_type: CandidateType::Host,
+            interface: String::new(),
+            foundation: String::new(),
+            priority: 0,
         };
-        assert!(!c3.is_vpn_address(), "203.0.113.5 is a public IP and must not be a VPN address");
+        assert!(
+            !c3.is_vpn_address(),
+            "203.0.113.5 is a public IP and must not be a VPN address"
+        );
     }
 
     #[test]
     fn test_is_private_ip_covers_cgnat_range() {
         // 100.64.0.0/10 is carrier-grade NAT
-        assert!(is_private_ip(&"100.64.0.1".parse().unwrap()),
-            "CGNAT 100.64.x.x must be treated as private");
-        assert!(is_private_ip(&"100.127.255.255".parse().unwrap()),
-            "CGNAT upper bound must be treated as private");
-        assert!(!is_private_ip(&"100.128.0.0".parse().unwrap()),
-            "100.128.0.0 is outside CGNAT range and must not be private");
+        assert!(
+            is_private_ip(&"100.64.0.1".parse().unwrap()),
+            "CGNAT 100.64.x.x must be treated as private"
+        );
+        assert!(
+            is_private_ip(&"100.127.255.255".parse().unwrap()),
+            "CGNAT upper bound must be treated as private"
+        );
+        assert!(
+            !is_private_ip(&"100.128.0.0".parse().unwrap()),
+            "100.128.0.0 is outside CGNAT range and must not be private"
+        );
     }
 }

@@ -16,12 +16,12 @@
 
 #[cfg(feature = "webauthn")]
 mod inner {
+    use chrono::{DateTime, Duration, Utc};
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use chrono::{DateTime, Utc, Duration};
     use tokio::sync::RwLock;
     use webauthn_rs::prelude::*;
-    use serde::{Serialize, Deserialize};
 
     /// WebAuthn manager for FIDO2 authentication
     #[derive(Clone)]
@@ -53,17 +53,20 @@ mod inner {
             let rp_id_str = rp_id.into();
             let origin_str = origin.into();
 
-            let origin_url = Url::parse(&origin_str)
-                .map_err(|e| crate::RelayError::ConfigError(format!("Invalid origin URL: {}", e)))?;
+            let origin_url = Url::parse(&origin_str).map_err(|e| {
+                crate::RelayError::ConfigError(format!("Invalid origin URL: {}", e))
+            })?;
 
             let rp_origin = origin_url.clone();
-            let builder = WebauthnBuilder::new(&rp_id_str, &rp_origin)
-                .map_err(|e| crate::RelayError::ConfigError(format!("WebAuthn builder error: {}", e)))?;
+            let builder = WebauthnBuilder::new(&rp_id_str, &rp_origin).map_err(|e| {
+                crate::RelayError::ConfigError(format!("WebAuthn builder error: {}", e))
+            })?;
 
             let builder = builder.rp_name(&rp_name.into());
 
-            let webauthn = builder.build()
-                .map_err(|e| crate::RelayError::ConfigError(format!("WebAuthn build error: {}", e)))?;
+            let webauthn = builder.build().map_err(|e| {
+                crate::RelayError::ConfigError(format!("WebAuthn build error: {}", e))
+            })?;
 
             Ok(Self {
                 webauthn: Arc::new(webauthn),
@@ -83,22 +86,25 @@ mod inner {
         ) -> crate::Result<RegistrationChallenge> {
             let existing_creds = {
                 let creds = self.credentials.read().await;
-                creds.get(user_id)
+                creds
+                    .get(user_id)
                     .map(|v| v.iter().map(|c| c.passkey.clone()).collect())
                     .unwrap_or_default()
             };
 
-            let user_unique_id = Uuid::parse_str(user_id)
-                .unwrap_or_else(|_| Uuid::new_v4());
+            let user_unique_id = Uuid::parse_str(user_id).unwrap_or_else(|_| Uuid::new_v4());
 
-            let (ccr, reg_state) = self.webauthn
+            let (ccr, reg_state) = self
+                .webauthn
                 .start_passkey_registration(
                     user_unique_id,
                     username,
                     display_name,
                     Some(existing_creds),
                 )
-                .map_err(|e| crate::RelayError::Internal(format!("Registration start failed: {}", e)))?;
+                .map_err(|e| {
+                    crate::RelayError::Internal(format!("Registration start failed: {}", e))
+                })?;
 
             let challenge_id = uuid::Uuid::new_v4().to_string();
             let mut challenges = self.registration_challenges.write().await;
@@ -122,18 +128,25 @@ mod inner {
                 let cutoff = Utc::now() - self.challenge_timeout;
                 challenges.retain(|_, (_, ts)| *ts > cutoff);
 
-                challenges.remove(challenge_id)
-                    .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                        "Invalid or expired registration challenge".to_string()
-                    ))?
+                challenges
+                    .remove(challenge_id)
+                    .ok_or_else(|| {
+                        crate::RelayError::AuthenticationFailed(
+                            "Invalid or expired registration challenge".to_string(),
+                        )
+                    })?
                     .0
             };
 
-            let passkey = self.webauthn
+            let passkey = self
+                .webauthn
                 .finish_passkey_registration(&credential, &reg_state)
-                .map_err(|e| crate::RelayError::AuthenticationFailed(
-                    format!("Registration verification failed: {}", e)
-                ))?;
+                .map_err(|e| {
+                    crate::RelayError::AuthenticationFailed(format!(
+                        "Registration verification failed: {}",
+                        e
+                    ))
+                })?;
 
             let stored = StoredCredential {
                 credential_id: base64::encode(passkey.cred_id()),
@@ -145,7 +158,8 @@ mod inner {
             };
 
             let mut creds = self.credentials.write().await;
-            creds.entry(user_id.to_string())
+            creds
+                .entry(user_id.to_string())
                 .or_default()
                 .push(stored.clone());
 
@@ -156,24 +170,25 @@ mod inner {
         }
 
         /// Start authentication (returns challenge for client)
-        pub async fn start_authentication(
-            &self,
-            user_id: &str,
-        ) -> crate::Result<AuthChallenge> {
+        pub async fn start_authentication(&self, user_id: &str) -> crate::Result<AuthChallenge> {
             let user_creds = {
                 let creds = self.credentials.read().await;
-                creds.get(user_id)
+                creds
+                    .get(user_id)
                     .map(|v| v.iter().map(|c| c.passkey.clone()).collect())
-                    .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                        "No credentials registered for user".to_string()
-                    ))?
+                    .ok_or_else(|| {
+                        crate::RelayError::AuthenticationFailed(
+                            "No credentials registered for user".to_string(),
+                        )
+                    })?
             };
 
-            let (rcr, auth_state) = self.webauthn
+            let (rcr, auth_state) = self
+                .webauthn
                 .start_passkey_authentication(&user_creds)
-                .map_err(|e| crate::RelayError::Internal(
-                    format!("Authentication start failed: {}", e)
-                ))?;
+                .map_err(|e| {
+                    crate::RelayError::Internal(format!("Authentication start failed: {}", e))
+                })?;
 
             let challenge_id = uuid::Uuid::new_v4().to_string();
             let mut challenges = self.auth_challenges.write().await;
@@ -197,18 +212,25 @@ mod inner {
                 let cutoff = Utc::now() - self.challenge_timeout;
                 challenges.retain(|_, (_, ts)| *ts > cutoff);
 
-                challenges.remove(challenge_id)
-                    .ok_or_else(|| crate::RelayError::AuthenticationFailed(
-                        "Invalid or expired authentication challenge".to_string()
-                    ))?
+                challenges
+                    .remove(challenge_id)
+                    .ok_or_else(|| {
+                        crate::RelayError::AuthenticationFailed(
+                            "Invalid or expired authentication challenge".to_string(),
+                        )
+                    })?
                     .0
             };
 
-            let auth_result = self.webauthn
+            let auth_result = self
+                .webauthn
                 .finish_passkey_authentication(&credential, &auth_state)
-                .map_err(|e| crate::RelayError::AuthenticationFailed(
-                    format!("Authentication verification failed: {}", e)
-                ))?;
+                .map_err(|e| {
+                    crate::RelayError::AuthenticationFailed(format!(
+                        "Authentication verification failed: {}",
+                        e
+                    ))
+                })?;
 
             let mut creds = self.credentials.write().await;
             if let Some(user_creds) = creds.get_mut(user_id) {
@@ -227,21 +249,26 @@ mod inner {
             }
 
             Err(crate::RelayError::AuthenticationFailed(
-                "Credential not found after verification".to_string()
+                "Credential not found after verification".to_string(),
             ))
         }
 
         /// List user's registered credentials
         pub async fn list_credentials(&self, user_id: &str) -> Vec<CredentialInfo> {
             let creds = self.credentials.read().await;
-            creds.get(user_id)
-                .map(|v| v.iter().map(|c| CredentialInfo {
-                    credential_id: c.credential_id.clone(),
-                    created_at: c.created_at,
-                    last_used: c.last_used,
-                    counter: c.counter,
-                    name: c.name.clone(),
-                }).collect())
+            creds
+                .get(user_id)
+                .map(|v| {
+                    v.iter()
+                        .map(|c| CredentialInfo {
+                            credential_id: c.credential_id.clone(),
+                            created_at: c.created_at,
+                            last_used: c.last_used,
+                            counter: c.counter,
+                            name: c.name.clone(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default()
         }
 
@@ -263,7 +290,7 @@ mod inner {
             }
 
             Err(crate::RelayError::AuthenticationFailed(
-                "Credential not found".to_string()
+                "Credential not found".to_string(),
             ))
         }
 
@@ -286,7 +313,7 @@ mod inner {
             }
 
             Err(crate::RelayError::AuthenticationFailed(
-                "Credential not found".to_string()
+                "Credential not found".to_string(),
             ))
         }
 
@@ -305,7 +332,10 @@ mod inner {
     impl std::fmt::Debug for WebAuthnManager {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("WebAuthnManager")
-                .field("credentials_count", &self.credentials.try_read().map(|c| c.len()).unwrap_or(0))
+                .field(
+                    "credentials_count",
+                    &self.credentials.try_read().map(|c| c.len()).unwrap_or(0),
+                )
                 .finish()
         }
     }
@@ -363,8 +393,8 @@ mod inner {
 
 #[cfg(feature = "webauthn")]
 pub use inner::{
-    WebAuthnManager, RegistrationChallenge, AuthChallenge,
-    RegistrationResult, AuthenticationResult, CredentialInfo,
+    AuthChallenge, AuthenticationResult, CredentialInfo, RegistrationChallenge, RegistrationResult,
+    WebAuthnManager,
 };
 
 #[cfg(not(feature = "webauthn"))]
@@ -373,7 +403,7 @@ pub mod stub {
     //! Enable with `--features webauthn` (requires OpenSSL/Perl on the build system).
 
     use chrono::{DateTime, Utc};
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
 
     /// Stub WebAuthn manager — not functional without `webauthn` feature
     #[derive(Debug, Clone)]
@@ -386,7 +416,7 @@ pub mod stub {
             _origin: impl Into<String>,
         ) -> crate::Result<Self> {
             Err(crate::RelayError::ConfigError(
-                "WebAuthn is not available: build with --features webauthn".to_string()
+                "WebAuthn is not available: build with --features webauthn".to_string(),
             ))
         }
 

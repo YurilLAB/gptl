@@ -6,9 +6,9 @@
 //! - Key expiration with configurable TTL
 //! - Usage tracking and rate limiting per key
 
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 
 /// API key manager
@@ -74,14 +74,16 @@ impl ApiKeyManager {
         // Check key limit
         {
             let keys = self.keys.read().await;
-            let user_key_count = keys.values()
+            let user_key_count = keys
+                .values()
                 .filter(|k| k.user_id == user_id && !k.revoked)
                 .count();
-            
+
             if user_key_count >= self.max_keys_per_user {
-                return Err(crate::RelayError::AuthorizationFailed(
-                    format!("Maximum {} API keys allowed per user", self.max_keys_per_user)
-                ));
+                return Err(crate::RelayError::AuthorizationFailed(format!(
+                    "Maximum {} API keys allowed per user",
+                    self.max_keys_per_user
+                )));
             }
         }
 
@@ -89,9 +91,7 @@ impl ApiKeyManager {
         let key_id = generate_key_id(&self.key_prefix);
         let key_secret = generate_key_secret();
         let now = Utc::now();
-        let expires_at = expires_in
-            .or(self.default_ttl)
-            .map(|ttl| now + ttl);
+        let expires_at = expires_in.or(self.default_ttl).map(|ttl| now + ttl);
 
         let api_key = ApiKey {
             id: key_id.clone(),
@@ -132,23 +132,23 @@ impl ApiKeyManager {
     /// so the full key has the shape `{prefix}_{prefix}_{uuid}_{secret}`.
     /// We parse by stripping the leading `{prefix}_` and splitting on the
     /// last underscore to separate key_id from secret.
-    pub async fn validate_key(
-        &self,
-        full_key: &str,
-    ) -> crate::Result<ApiKeyValidation> {
+    pub async fn validate_key(&self, full_key: &str) -> crate::Result<ApiKeyValidation> {
         let prefix_sep = format!("{}_", self.key_prefix);
         if !full_key.starts_with(&prefix_sep) {
             return Err(crate::RelayError::InvalidApiKey);
         }
         let after_prefix = &full_key[prefix_sep.len()..];
-        let last_sep = after_prefix.rfind('_').ok_or(crate::RelayError::InvalidApiKey)?;
+        let last_sep = after_prefix
+            .rfind('_')
+            .ok_or(crate::RelayError::InvalidApiKey)?;
         let key_id = &after_prefix[..last_sep];
         let provided_secret = &after_prefix[last_sep + 1..];
 
         // Get key
         let key = {
             let keys = self.keys.read().await;
-            keys.get(key_id).cloned()
+            keys.get(key_id)
+                .cloned()
                 .ok_or(crate::RelayError::InvalidApiKey)?
         };
 
@@ -206,16 +206,14 @@ impl ApiKeyManager {
     /// Check if key has all required scopes
     pub fn has_all_scopes(&self, scopes: &[ApiKeyScope], required: &[ApiKeyScope]) -> bool {
         let has_admin = scopes.contains(&ApiKeyScope::Admin);
-        
-        required.iter().all(|req| {
-            has_admin || scopes.contains(req)
-        })
+
+        required.iter().all(|req| has_admin || scopes.contains(req))
     }
 
     /// Revoke an API key
     pub async fn revoke_key(&self, key_id: &str) -> crate::Result<()> {
         let mut keys = self.keys.write().await;
-        
+
         if let Some(key) = keys.get_mut(key_id) {
             key.revoked = true;
             Ok(())
@@ -228,7 +226,8 @@ impl ApiKeyManager {
     pub async fn rotate_key(&self, key_id: &str) -> crate::Result<ApiKeyCredentials> {
         let old_key = {
             let keys = self.keys.read().await;
-            keys.get(key_id).cloned()
+            keys.get(key_id)
+                .cloned()
                 .ok_or(crate::RelayError::InvalidApiKey)?
         };
 
@@ -237,13 +236,15 @@ impl ApiKeyManager {
         }
 
         // Create new key
-        let new_credentials = self.create_key(
-            &old_key.user_id,
-            format!("{} (rotated)", old_key.name),
-            old_key.scopes.clone(),
-            self.default_ttl,
-            Some(old_key.metadata.clone()),
-        ).await?;
+        let new_credentials = self
+            .create_key(
+                &old_key.user_id,
+                format!("{} (rotated)", old_key.name),
+                old_key.scopes.clone(),
+                self.default_ttl,
+                Some(old_key.metadata.clone()),
+            )
+            .await?;
 
         // Mark old key as rotated
         {
@@ -263,7 +264,7 @@ impl ApiKeyManager {
     /// List API keys for a user
     pub async fn list_user_keys(&self, user_id: &str) -> Vec<ApiKeyInfo> {
         let keys = self.keys.read().await;
-        
+
         keys.values()
             .filter(|k| k.user_id == user_id)
             .map(|k| ApiKeyInfo {
@@ -283,7 +284,7 @@ impl ApiKeyManager {
     /// Get API key details
     pub async fn get_key(&self, key_id: &str) -> Option<ApiKeyInfo> {
         let keys = self.keys.read().await;
-        
+
         keys.get(key_id).map(|k| ApiKeyInfo {
             id: k.id.clone(),
             name: k.name.clone(),
@@ -298,11 +299,16 @@ impl ApiKeyManager {
     }
 
     /// Check rate limit for a key
-    pub async fn check_rate_limit(&self, key_id: &str, quota: &RateLimitQuota) -> crate::Result<()> {
+    pub async fn check_rate_limit(
+        &self,
+        key_id: &str,
+        quota: &RateLimitQuota,
+    ) -> crate::Result<()> {
         let mut limits = self.rate_limits.write().await;
         let now = Utc::now();
-        
-        let state = limits.entry(key_id.to_string())
+
+        let state = limits
+            .entry(key_id.to_string())
             .or_insert_with(|| RateLimitState {
                 requests: 0,
                 window_start: now,
@@ -329,9 +335,7 @@ impl ApiKeyManager {
 
         let live_ids: std::collections::HashSet<String> = {
             let mut keys = self.keys.write().await;
-            keys.retain(|_, key| {
-                !key.revoked && key.expires_at.map(|e| e > now).unwrap_or(true)
-            });
+            keys.retain(|_, key| !key.revoked && key.expires_at.map(|e| e > now).unwrap_or(true));
             keys.keys().cloned().collect()
         };
 
@@ -345,12 +349,18 @@ impl ApiKeyManager {
     /// Get API key statistics
     pub async fn get_stats(&self) -> ApiKeyStats {
         let keys = self.keys.read().await;
-        
+
         let total = keys.len() as u64;
-        let active = keys.values().filter(|k| !k.revoked && k.expires_at.map(|e| e > Utc::now()).unwrap_or(true)).count() as u64;
+        let active = keys
+            .values()
+            .filter(|k| !k.revoked && k.expires_at.map(|e| e > Utc::now()).unwrap_or(true))
+            .count() as u64;
         let revoked = keys.values().filter(|k| k.revoked).count() as u64;
-        let expired = keys.values().filter(|k| k.expires_at.map(|e| e <= Utc::now()).unwrap_or(false)).count() as u64;
-        
+        let expired = keys
+            .values()
+            .filter(|k| k.expires_at.map(|e| e <= Utc::now()).unwrap_or(false))
+            .count() as u64;
+
         ApiKeyStats {
             total_keys: total,
             active_keys: active,
@@ -504,7 +514,7 @@ fn generate_key_secret() -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const LEN: usize = 48;
-    
+
     let mut rng = rand::thread_rng();
     (0..LEN)
         .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
@@ -551,7 +561,11 @@ fn verify_secret(secret: &str, hash: &str) -> bool {
     if hash.starts_with("$argon2") {
         return PasswordHash::new(hash)
             .ok()
-            .map(|parsed| Argon2::default().verify_password(secret.as_bytes(), &parsed).is_ok())
+            .map(|parsed| {
+                Argon2::default()
+                    .verify_password(secret.as_bytes(), &parsed)
+                    .is_ok()
+            })
             .unwrap_or(false);
     }
 
@@ -575,13 +589,16 @@ mod tests {
     async fn test_api_key_creation() {
         let manager = ApiKeyManager::new();
 
-        let credentials = manager.create_key(
-            "user123",
-            "Test Key",
-            vec![ApiKeyScope::ReadOnly],
-            None,
-            None,
-        ).await.unwrap();
+        let credentials = manager
+            .create_key(
+                "user123",
+                "Test Key",
+                vec![ApiKeyScope::ReadOnly],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert!(!credentials.key_id.is_empty());
         assert!(!credentials.key_secret.is_empty());
@@ -593,13 +610,16 @@ mod tests {
     async fn test_api_key_validation() {
         let manager = ApiKeyManager::new();
 
-        let credentials = manager.create_key(
-            "user123",
-            "Test Key",
-            vec![ApiKeyScope::ReadWrite],
-            None,
-            None,
-        ).await.unwrap();
+        let credentials = manager
+            .create_key(
+                "user123",
+                "Test Key",
+                vec![ApiKeyScope::ReadWrite],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Valid key
         let validation = manager.validate_key(&credentials.full_key).await.unwrap();
@@ -615,13 +635,16 @@ mod tests {
     async fn test_api_key_revocation() {
         let manager = ApiKeyManager::new();
 
-        let credentials = manager.create_key(
-            "user123",
-            "Test Key",
-            vec![ApiKeyScope::ReadOnly],
-            None,
-            None,
-        ).await.unwrap();
+        let credentials = manager
+            .create_key(
+                "user123",
+                "Test Key",
+                vec![ApiKeyScope::ReadOnly],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Revoke key
         manager.revoke_key(&credentials.key_id).await.unwrap();
@@ -651,13 +674,16 @@ mod tests {
     async fn test_key_rotation() {
         let manager = ApiKeyManager::new();
 
-        let credentials = manager.create_key(
-            "user123",
-            "Test Key",
-            vec![ApiKeyScope::ReadOnly],
-            None,
-            None,
-        ).await.unwrap();
+        let credentials = manager
+            .create_key(
+                "user123",
+                "Test Key",
+                vec![ApiKeyScope::ReadOnly],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         // Rotate key
         let new_credentials = manager.rotate_key(&credentials.key_id).await.unwrap();
@@ -666,7 +692,10 @@ mod tests {
         assert!(manager.validate_key(&credentials.full_key).await.is_err());
 
         // New key should work
-        let validation = manager.validate_key(&new_credentials.full_key).await.unwrap();
+        let validation = manager
+            .validate_key(&new_credentials.full_key)
+            .await
+            .unwrap();
         assert_eq!(validation.user_id, "user123");
     }
 
@@ -675,11 +704,19 @@ mod tests {
         let manager = ApiKeyManager::new().with_max_keys_per_user(2);
 
         // Create 2 keys (should succeed)
-        manager.create_key("user123", "Key 1", vec![], None, None).await.unwrap();
-        manager.create_key("user123", "Key 2", vec![], None, None).await.unwrap();
+        manager
+            .create_key("user123", "Key 1", vec![], None, None)
+            .await
+            .unwrap();
+        manager
+            .create_key("user123", "Key 2", vec![], None, None)
+            .await
+            .unwrap();
 
         // 3rd key should fail
-        let result = manager.create_key("user123", "Key 3", vec![], None, None).await;
+        let result = manager
+            .create_key("user123", "Key 3", vec![], None, None)
+            .await;
         assert!(result.is_err());
     }
 
@@ -699,13 +736,16 @@ mod tests {
         let manager = ApiKeyManager::new();
 
         // Create key with short expiration
-        let credentials = manager.create_key(
-            "user123",
-            "Test Key",
-            vec![ApiKeyScope::ReadOnly],
-            Some(Duration::seconds(-1)), // Already expired
-            None,
-        ).await.unwrap();
+        let credentials = manager
+            .create_key(
+                "user123",
+                "Test Key",
+                vec![ApiKeyScope::ReadOnly],
+                Some(Duration::seconds(-1)), // Already expired
+                None,
+            )
+            .await
+            .unwrap();
 
         // Should fail validation due to expiration
         let result = manager.validate_key(&credentials.full_key).await;
@@ -716,9 +756,18 @@ mod tests {
     async fn test_list_user_keys() {
         let manager = ApiKeyManager::new();
 
-        manager.create_key("user123", "Key 1", vec![], None, None).await.unwrap();
-        manager.create_key("user123", "Key 2", vec![], None, None).await.unwrap();
-        manager.create_key("user456", "Key 3", vec![], None, None).await.unwrap();
+        manager
+            .create_key("user123", "Key 1", vec![], None, None)
+            .await
+            .unwrap();
+        manager
+            .create_key("user123", "Key 2", vec![], None, None)
+            .await
+            .unwrap();
+        manager
+            .create_key("user456", "Key 3", vec![], None, None)
+            .await
+            .unwrap();
 
         let keys = manager.list_user_keys("user123").await;
         assert_eq!(keys.len(), 2);
@@ -731,13 +780,10 @@ mod tests {
     async fn test_rate_limiting() {
         let manager = ApiKeyManager::new();
 
-        let credentials = manager.create_key(
-            "user123",
-            "Test Key",
-            vec![],
-            None,
-            None,
-        ).await.unwrap();
+        let credentials = manager
+            .create_key("user123", "Test Key", vec![], None, None)
+            .await
+            .unwrap();
 
         let quota = RateLimitQuota {
             requests: 2,
@@ -745,8 +791,14 @@ mod tests {
         };
 
         // First 2 requests should succeed
-        assert!(manager.check_rate_limit(&credentials.key_id, &quota).await.is_ok());
-        assert!(manager.check_rate_limit(&credentials.key_id, &quota).await.is_ok());
+        assert!(manager
+            .check_rate_limit(&credentials.key_id, &quota)
+            .await
+            .is_ok());
+        assert!(manager
+            .check_rate_limit(&credentials.key_id, &quota)
+            .await
+            .is_ok());
 
         // 3rd request should fail
         let result = manager.check_rate_limit(&credentials.key_id, &quota).await;
@@ -758,22 +810,22 @@ mod tests {
         let manager = ApiKeyManager::new();
 
         // Create expired key
-        manager.create_key(
-            "user123",
-            "Expired Key",
-            vec![],
-            Some(Duration::seconds(-1)),
-            None,
-        ).await.unwrap();
+        manager
+            .create_key(
+                "user123",
+                "Expired Key",
+                vec![],
+                Some(Duration::seconds(-1)),
+                None,
+            )
+            .await
+            .unwrap();
 
         // Create valid key
-        manager.create_key(
-            "user123",
-            "Valid Key",
-            vec![],
-            None,
-            None,
-        ).await.unwrap();
+        manager
+            .create_key("user123", "Valid Key", vec![], None, None)
+            .await
+            .unwrap();
 
         manager.cleanup_expired().await;
 
@@ -787,8 +839,14 @@ mod tests {
     async fn test_api_key_stats() {
         let manager = ApiKeyManager::new();
 
-        manager.create_key("user1", "Key 1", vec![], None, None).await.unwrap();
-        let creds = manager.create_key("user2", "Key 2", vec![], None, None).await.unwrap();
+        manager
+            .create_key("user1", "Key 1", vec![], None, None)
+            .await
+            .unwrap();
+        let creds = manager
+            .create_key("user2", "Key 2", vec![], None, None)
+            .await
+            .unwrap();
 
         manager.revoke_key(&creds.key_id).await.unwrap();
 
@@ -826,7 +884,11 @@ mod tests {
         let secret = "test_secret";
         let h1 = hash_secret(secret);
         let h2 = hash_secret(secret);
-        assert!(h1.starts_with("$argon2"), "hash must be a PHC string, got {:?}", h1);
+        assert!(
+            h1.starts_with("$argon2"),
+            "hash must be a PHC string, got {:?}",
+            h1
+        );
         assert_ne!(h1, h2, "Argon2id must use a fresh random salt per call");
     }
 
@@ -847,8 +909,10 @@ mod tests {
         let mut h = Sha256::new();
         h.update(secret.as_bytes());
         let legacy_hex = format!("{:x}", h.finalize());
-        assert!(verify_secret(secret, &legacy_hex),
-            "verifier must accept legacy SHA-256 hex digests for backward compat");
+        assert!(
+            verify_secret(secret, &legacy_hex),
+            "verifier must accept legacy SHA-256 hex digests for backward compat"
+        );
         assert!(!verify_secret("wrong", &legacy_hex));
     }
 }

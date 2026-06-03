@@ -61,9 +61,8 @@ impl GeoBlocker {
     /// callers can choose between "no GeoIP" (skip the feature) and
     /// "abort startup" (security-required deployments).
     pub async fn load_database(&self, path: &str) -> crate::Result<()> {
-        let reader = maxminddb::Reader::open_readfile(path).map_err(|e| {
-            crate::RelayError::ConfigError(format!("GeoIP DB '{}': {}", path, e))
-        })?;
+        let reader = maxminddb::Reader::open_readfile(path)
+            .map_err(|e| crate::RelayError::ConfigError(format!("GeoIP DB '{}': {}", path, e)))?;
         let mut db = self.db.write().await;
         *db = Some(GeoIpDatabase::with_reader(reader));
         Ok(())
@@ -72,11 +71,11 @@ impl GeoBlocker {
     /// Block a country by code
     pub async fn block_country(&self, country_code: &str) -> crate::Result<()> {
         let code = country_code.to_uppercase();
-        
+
         // Validate country code
         if code.len() != 2 {
             return Err(crate::RelayError::ConfigError(
-                "Invalid country code (must be 2 characters)".to_string()
+                "Invalid country code (must be 2 characters)".to_string(),
             ));
         }
 
@@ -89,16 +88,16 @@ impl GeoBlocker {
     pub async fn allow_only_countries(&self, country_codes: &[String]) -> crate::Result<()> {
         let mut allowed = self.allowed_countries.write().await;
         allowed.clear();
-        
+
         for code in country_codes {
             if code.len() != 2 {
                 return Err(crate::RelayError::ConfigError(
-                    "Invalid country code (must be 2 characters)".to_string()
+                    "Invalid country code (must be 2 characters)".to_string(),
                 ));
             }
             allowed.insert(code.to_uppercase());
         }
-        
+
         Ok(())
     }
 
@@ -139,9 +138,7 @@ impl GeoBlocker {
         if self.block_tor {
             let tor_exits = self.tor_exits.read().await;
             if tor_exits.contains(&ip) {
-                return Err(crate::RelayError::IpBlocked(
-                    "Tor exit node".to_string()
-                ));
+                return Err(crate::RelayError::IpBlocked("Tor exit node".to_string()));
             }
         }
 
@@ -152,9 +149,10 @@ impl GeoBlocker {
         {
             let allowed = self.allowed_countries.read().await;
             if !allowed.is_empty() && !allowed.contains(&location.country_code) {
-                return Err(crate::RelayError::IpBlocked(
-                    format!("Country {} not allowed", location.country_code)
-                ));
+                return Err(crate::RelayError::IpBlocked(format!(
+                    "Country {} not allowed",
+                    location.country_code
+                )));
             }
         }
 
@@ -162,9 +160,10 @@ impl GeoBlocker {
         {
             let blocked = self.blocked_countries.read().await;
             if blocked.contains(&location.country_code) {
-                return Err(crate::RelayError::IpBlocked(
-                    format!("Country {} blocked", location.country_code)
-                ));
+                return Err(crate::RelayError::IpBlocked(format!(
+                    "Country {} blocked",
+                    location.country_code
+                )));
             }
         }
 
@@ -173,9 +172,7 @@ impl GeoBlocker {
             let blocked_asns = self.blocked_asns.read().await;
             if let Some(asn) = location.asn {
                 if blocked_asns.contains(&asn) {
-                    return Err(crate::RelayError::IpBlocked(
-                        format!("ASN {} blocked", asn)
-                    ));
+                    return Err(crate::RelayError::IpBlocked(format!("ASN {} blocked", asn)));
                 }
             }
         }
@@ -183,14 +180,14 @@ impl GeoBlocker {
         // Check VPN/proxy
         if self.block_vpns && location.is_vpn {
             return Err(crate::RelayError::IpBlocked(
-                "VPN/proxy detected".to_string()
+                "VPN/proxy detected".to_string(),
             ));
         }
 
         // Check hosting provider
         if self.block_hosting && location.is_hosting {
             return Err(crate::RelayError::IpBlocked(
-                "Hosting provider detected".to_string()
+                "Hosting provider detected".to_string(),
             ));
         }
 
@@ -200,7 +197,7 @@ impl GeoBlocker {
     /// Lookup geolocation for an IP
     pub async fn lookup(&self, ip: IpAddr) -> crate::Result<GeoLocation> {
         let db = self.db.read().await;
-        
+
         if let Some(ref database) = *db {
             Ok(database.lookup(ip))
         } else {
@@ -358,9 +355,7 @@ impl GeoIpDatabase {
         // overwrites if a lookup succeeds.
         if let Ok(asn) = self.reader.lookup::<maxminddb::geoip2::Asn>(ip) {
             loc.asn = asn.autonomous_system_number;
-            loc.asn_organization = asn
-                .autonomous_system_organization
-                .map(|s| s.to_string());
+            loc.asn_organization = asn.autonomous_system_organization.map(|s| s.to_string());
         }
 
         loc
@@ -396,10 +391,9 @@ impl GeoLocation {
     /// Check if IP is from EU (GDPR applies)
     pub fn is_eu(&self) -> bool {
         const EU_COUNTRIES: &[&str] = &[
-            "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR",
-            "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL",
-            "PL", "PT", "RO", "SK", "SI", "ES", "SE", "GB", "IS", "LI",
-            "NO", "CH",
+            "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IE",
+            "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "GB",
+            "IS", "LI", "NO", "CH",
         ];
         EU_COUNTRIES.contains(&self.country_code.as_str())
     }
@@ -450,10 +444,10 @@ impl GeoRiskLevel {
 /// Blocking strictness level
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockStrictness {
-    Low,      // Only block sanctioned
-    Medium,   // Block sanctioned + Tor
-    High,     // Block sanctioned + Tor + VPN
-    Maximum,  // Block all suspicious
+    Low,     // Only block sanctioned
+    Medium,  // Block sanctioned + Tor
+    High,    // Block sanctioned + Tor + VPN
+    Maximum, // Block all suspicious
 }
 
 #[cfg(test)]
@@ -522,12 +516,12 @@ mod tests {
             is_tor: false,
             is_hosting: false,
         };
-        
+
         assert_eq!(loc.risk_level(), GeoRiskLevel::Low);
-        
+
         loc.is_vpn = true;
         assert_eq!(loc.risk_level(), GeoRiskLevel::High);
-        
+
         loc.country_code = "IR".to_string();
         assert_eq!(loc.risk_level(), GeoRiskLevel::Critical);
     }
@@ -550,14 +544,14 @@ mod tests {
             is_tor: false,
             is_hosting: false,
         };
-        
+
         assert!(eu_loc.is_eu());
-        
+
         let us_loc = GeoLocation {
             country_code: "US".to_string(),
             ..eu_loc.clone()
         };
-        
+
         assert!(!us_loc.is_eu());
     }
 }

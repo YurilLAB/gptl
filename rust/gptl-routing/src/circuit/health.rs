@@ -100,31 +100,31 @@ impl CircuitMetrics {
     /// Record a successful request with latency
     pub fn record_success(&mut self, latency: Duration, bytes: u64) {
         let now = Instant::now();
-        
+
         // Update EWMA latency using Tor's formula: A_{t+Δt} = A_t * 0.5^(Δt/H)
         let delta_t = now.duration_since(self.last_measurement).as_secs_f64();
         let half_life_secs = self.ewma_half_life.as_secs_f64();
         let decay = 0.5f64.powf(delta_t / half_life_secs);
-        
+
         let latency_ms = latency.as_millis() as f64;
         // Correct EWMA: new = old * α + sample * (1 - α)
         self.latency_ewma = self.latency_ewma * decay + latency_ms * (1.0 - decay);
-        
+
         self.last_measurement = now;
         self.last_activity = now;
         self.bytes_transferred += bytes;
         self.successful_requests += 1;
         self.consecutive_failures = 0;
-        
+
         // Keep last 100 latency samples
         self.latency_samples.push_back(latency);
         while self.latency_samples.len() > 100 {
             self.latency_samples.pop_front();
         }
-        
+
         // Update health status
         self.update_health_score();
-        
+
         trace!(
             circuit_id = self.circuit_id,
             latency_ms = latency.as_millis() as u64,
@@ -136,14 +136,14 @@ impl CircuitMetrics {
     /// Record a failed request
     pub fn record_failure(&mut self, _failure_type: FailureType) {
         let now = Instant::now();
-        
+
         self.failed_requests += 1;
         self.consecutive_failures += 1;
         self.last_activity = now;
-        
+
         // Record failure timestamp
         self.recent_failures.push_back(now);
-        
+
         // Remove failures older than 5 minutes
         let cutoff = now - Duration::from_secs(300);
         while let Some(oldest) = self.recent_failures.front() {
@@ -153,10 +153,10 @@ impl CircuitMetrics {
                 break;
             }
         }
-        
+
         // Update health status
         self.update_health_score();
-        
+
         warn!(
             circuit_id = self.circuit_id,
             consecutive_failures = self.consecutive_failures,
@@ -168,21 +168,21 @@ impl CircuitMetrics {
     /// Update the health score based on current metrics
     fn update_health_score(&mut self) {
         let mut score = 100u8;
-        
+
         // Deduct for high latency EWMA (> 2 seconds)
         if self.latency_ewma > 2000.0 {
             score = score.saturating_sub(20);
         } else if self.latency_ewma > 1000.0 {
             score = score.saturating_sub(10);
         }
-        
+
         // Deduct for recent failures
         let recent_failure_count = self.recent_failures.len() as u8;
         score = score.saturating_sub(recent_failure_count * 10);
-        
+
         // Deduct for consecutive failures
         score = score.saturating_sub(self.consecutive_failures as u8 * 15);
-        
+
         // Deduct for high failure rate
         let total_requests = self.successful_requests + self.failed_requests;
         if total_requests > 10 {
@@ -193,7 +193,7 @@ impl CircuitMetrics {
                 score = score.saturating_sub(15);
             }
         }
-        
+
         // Deduct for high latency variance
         if self.latency_samples.len() >= 10 {
             let variance = self.calculate_latency_variance();
@@ -201,9 +201,9 @@ impl CircuitMetrics {
                 score = score.saturating_sub(10);
             }
         }
-        
+
         self.health_score = score;
-        
+
         // Update status based on score
         self.status = match score {
             80..=100 => HealthStatus::Healthy,
@@ -218,17 +218,17 @@ impl CircuitMetrics {
         if self.latency_samples.len() < 2 {
             return 0.0;
         }
-        
-        let samples: Vec<f64> = self.latency_samples
+
+        let samples: Vec<f64> = self
+            .latency_samples
             .iter()
             .map(|d| d.as_millis() as f64)
             .collect();
-        
+
         let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-        let variance = samples.iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / samples.len() as f64;
-        
+        let variance =
+            samples.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / samples.len() as f64;
+
         variance.sqrt()
     }
 
@@ -237,7 +237,7 @@ impl CircuitMetrics {
         if self.latency_samples.is_empty() {
             return Duration::from_millis(0);
         }
-        
+
         let sum: u128 = self.latency_samples.iter().map(|d| d.as_millis()).sum();
         let avg = sum / self.latency_samples.len() as u128;
         Duration::from_millis(avg as u64)
@@ -260,8 +260,8 @@ impl CircuitMetrics {
 
     /// Check if circuit needs rotation due to usage
     pub fn should_rotate_due_to_usage(&self, max_bytes: u64, max_requests: u64) -> bool {
-        self.bytes_transferred >= max_bytes || 
-        (self.successful_requests + self.failed_requests) >= max_requests
+        self.bytes_transferred >= max_bytes
+            || (self.successful_requests + self.failed_requests) >= max_requests
     }
 
     /// Get age of the circuit
@@ -363,10 +363,10 @@ impl CircuitHealthMonitor {
         let mut metrics = self.metrics.write().await;
         let circuit_metrics = CircuitMetrics::new(circuit_id);
         metrics.insert(circuit_id, circuit_metrics);
-        
+
         let mut ranking = self.health_ranking.write().await;
         ranking.push(circuit_id);
-        
+
         debug!(circuit_id, "Circuit registered with health monitor");
     }
 
@@ -374,10 +374,10 @@ impl CircuitHealthMonitor {
     pub async fn unregister_circuit(&self, circuit_id: u64) {
         let mut metrics = self.metrics.write().await;
         metrics.remove(&circuit_id);
-        
+
         let mut ranking = self.health_ranking.write().await;
         ranking.retain(|&id| id != circuit_id);
-        
+
         debug!(circuit_id, "Circuit unregistered from health monitor");
     }
 
@@ -449,52 +449,52 @@ impl CircuitHealthMonitor {
     /// Check if circuit needs rotation
     pub async fn needs_rotation(&self, circuit_id: u64) -> bool {
         let metrics = self.metrics.read().await;
-        
+
         if let Some(m) = metrics.get(&circuit_id) {
             // Check health status
             if matches!(m.status, HealthStatus::Unhealthy | HealthStatus::Failed) {
                 return true;
             }
-            
+
             // Check age
             if m.should_rotate_due_to_age(self.config.max_circuit_age) {
                 return true;
             }
-            
+
             // Check usage
             if m.should_rotate_due_to_usage(
                 self.config.max_bytes_before_rotation,
-                self.config.max_requests_before_rotation
+                self.config.max_requests_before_rotation,
             ) {
                 return true;
             }
-            
+
             // Check consecutive failures
             if m.consecutive_failures >= self.config.max_consecutive_failures {
                 return true;
             }
-            
+
             // Check idle timeout
             if m.idle_time() > self.config.idle_timeout {
                 return true;
             }
-            
+
             // Check failure rate
             if m.failure_rate() > self.config.max_failure_rate {
                 return true;
             }
         }
-        
+
         false
     }
 
     /// Get the healthiest circuit from a list of candidates
     pub async fn get_healthiest_circuit(&self, candidates: &[u64]) -> Option<u64> {
         let metrics = self.metrics.read().await;
-        
+
         let mut best_id = None;
         let mut best_score = 0u8;
-        
+
         for &circuit_id in candidates {
             if let Some(m) = metrics.get(&circuit_id) {
                 if m.status.is_usable() && m.health_score > best_score {
@@ -503,35 +503,33 @@ impl CircuitHealthMonitor {
                 }
             }
         }
-        
+
         best_id
     }
 
     /// Get circuits sorted by health score (best first)
     pub async fn get_circuits_by_health(&self) -> Vec<(u64, u8)> {
         let metrics = self.metrics.read().await;
-        
+
         let mut circuits: Vec<(u64, u8)> = metrics
             .iter()
             .filter(|(_, m)| m.status.is_usable())
             .map(|(&id, m)| (id, m.health_score))
             .collect();
-        
+
         // Sort by health score descending
         circuits.sort_by(|a, b| b.1.cmp(&a.1));
-        
+
         circuits
     }
 
     /// Get all unhealthy circuits that should be rotated
     pub async fn get_unhealthy_circuits(&self) -> Vec<u64> {
         let metrics = self.metrics.read().await;
-        
+
         metrics
             .iter()
-            .filter(|(_, m)| {
-                matches!(m.status, HealthStatus::Unhealthy | HealthStatus::Failed)
-            })
+            .filter(|(_, m)| matches!(m.status, HealthStatus::Unhealthy | HealthStatus::Failed))
             .map(|(&id, _)| id)
             .collect()
     }
@@ -539,14 +537,14 @@ impl CircuitHealthMonitor {
     /// Get statistics summary
     pub async fn get_statistics(&self) -> HealthStatistics {
         let metrics = self.metrics.read().await;
-        
+
         let mut healthy = 0;
         let mut degraded = 0;
         let mut unhealthy = 0;
         let mut failed = 0;
         let mut total_latency = Duration::from_millis(0);
         let mut total_bytes = 0u64;
-        
+
         for m in metrics.values() {
             match m.status {
                 HealthStatus::Healthy => healthy += 1,
@@ -557,14 +555,14 @@ impl CircuitHealthMonitor {
             total_latency += m.average_latency();
             total_bytes += m.bytes_transferred;
         }
-        
+
         let count = metrics.len();
         let avg_latency = if count > 0 {
             total_latency / count as u32
         } else {
             Duration::from_millis(0)
         };
-        
+
         HealthStatistics {
             total_circuits: count,
             healthy_circuits: healthy,
@@ -580,16 +578,16 @@ impl CircuitHealthMonitor {
     async fn update_health_ranking(&self) {
         let metrics = self.metrics.read().await;
         let mut ranking = self.health_ranking.write().await;
-        
+
         // Get all circuit IDs with their scores
         let mut scored: Vec<(u64, u8)> = metrics
             .iter()
             .map(|(&id, m)| (id, m.health_score))
             .collect();
-        
+
         // Sort by score ascending (unhealthy first for quick access)
         scored.sort_by(|a, b| a.1.cmp(&b.1));
-        
+
         *ranking = scored.into_iter().map(|(id, _)| id).collect();
     }
 
@@ -597,30 +595,30 @@ impl CircuitHealthMonitor {
     pub fn start_health_check_task(&self) {
         let metrics = self.metrics.clone();
         let config = self.config.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(config.health_check_interval);
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let mut metrics_guard = metrics.write().await;
                 let now = Instant::now();
-                
+
                 // Update all metrics
                 for (circuit_id, m) in metrics_guard.iter_mut() {
                     // Check for stale circuits
                     if m.idle_time() > config.idle_timeout {
                         warn!(circuit_id = *circuit_id, "Circuit idle timeout detected");
                     }
-                    
+
                     // Recalculate health scores
                     m.update_health_score();
                     m.last_measurement = now;
                 }
-                
+
                 drop(metrics_guard);
-                
+
                 trace!("Health check cycle completed");
             }
         });
@@ -662,7 +660,7 @@ mod tests {
         assert!(HealthStatus::Degraded.is_usable());
         assert!(!HealthStatus::Unhealthy.is_usable());
         assert!(!HealthStatus::Failed.is_usable());
-        
+
         assert_eq!(HealthStatus::Healthy.score(), 100);
         assert_eq!(HealthStatus::Failed.score(), 0);
     }
@@ -678,12 +676,12 @@ mod tests {
     #[test]
     fn test_circuit_metrics_success() {
         let mut metrics = CircuitMetrics::new(1);
-        
+
         metrics.record_success(Duration::from_millis(100), 1024);
         assert_eq!(metrics.successful_requests, 1);
         assert_eq!(metrics.bytes_transferred, 1024);
         assert_eq!(metrics.consecutive_failures, 0);
-        
+
         metrics.record_success(Duration::from_millis(200), 512);
         assert_eq!(metrics.successful_requests, 2);
     }
@@ -691,11 +689,11 @@ mod tests {
     #[test]
     fn test_circuit_metrics_failure() {
         let mut metrics = CircuitMetrics::new(1);
-        
+
         metrics.record_failure(FailureType::Timeout);
         assert_eq!(metrics.failed_requests, 1);
         assert_eq!(metrics.consecutive_failures, 1);
-        
+
         metrics.record_failure(FailureType::ConnectionFailed);
         assert_eq!(metrics.failed_requests, 2);
         assert_eq!(metrics.consecutive_failures, 2);
@@ -704,25 +702,28 @@ mod tests {
     #[test]
     fn test_circuit_metrics_health_degradation() {
         let mut metrics = CircuitMetrics::new(1);
-        
+
         // Multiple failures should degrade health
         for _ in 0..5 {
             metrics.record_failure(FailureType::Timeout);
         }
-        
+
         assert!(metrics.health_score < 100);
-        assert!(matches!(metrics.status, HealthStatus::Degraded | HealthStatus::Unhealthy | HealthStatus::Failed));
+        assert!(matches!(
+            metrics.status,
+            HealthStatus::Degraded | HealthStatus::Unhealthy | HealthStatus::Failed
+        ));
     }
 
     #[test]
     fn test_failure_rate() {
         let mut metrics = CircuitMetrics::new(1);
-        
+
         assert_eq!(metrics.failure_rate(), 0.0);
-        
+
         metrics.record_failure(FailureType::Timeout);
         assert_eq!(metrics.failure_rate(), 1.0);
-        
+
         metrics.record_success(Duration::from_millis(100), 100);
         assert_eq!(metrics.failure_rate(), 0.5);
     }
@@ -730,13 +731,13 @@ mod tests {
     #[test]
     fn test_circuit_metrics_rotation_checks() {
         let mut metrics = CircuitMetrics::new(1);
-        
+
         // Age check
         assert!(!metrics.should_rotate_due_to_age(Duration::from_secs(3600)));
-        
+
         // Usage checks
         assert!(!metrics.should_rotate_due_to_usage(1000, 100));
-        
+
         metrics.bytes_transferred = 1001;
         assert!(metrics.should_rotate_due_to_usage(1000, 100));
     }
@@ -744,9 +745,9 @@ mod tests {
     #[tokio::test]
     async fn test_health_monitor_register() {
         let monitor = CircuitHealthMonitor::new();
-        
+
         monitor.register_circuit(1).await;
-        
+
         let status = monitor.get_health_status(1).await;
         assert!(status.is_some());
         assert_eq!(status.unwrap(), HealthStatus::Healthy);
@@ -755,9 +756,11 @@ mod tests {
     #[tokio::test]
     async fn test_health_monitor_record_success() {
         let monitor = CircuitHealthMonitor::new();
-        
-        monitor.record_success(1, Duration::from_millis(100), 1024).await;
-        
+
+        monitor
+            .record_success(1, Duration::from_millis(100), 1024)
+            .await;
+
         let metrics = monitor.get_metrics(1).await.unwrap();
         assert_eq!(metrics.successful_requests, 1);
         assert_eq!(metrics.bytes_transferred, 1024);
@@ -766,18 +769,20 @@ mod tests {
     #[tokio::test]
     async fn test_health_monitor_get_healthiest() {
         let monitor = CircuitHealthMonitor::new();
-        
+
         // Register circuits
         monitor.register_circuit(1).await;
         monitor.register_circuit(2).await;
-        
+
         // Record failures for circuit 1
         monitor.record_failure(1, FailureType::Timeout).await;
         monitor.record_failure(1, FailureType::Timeout).await;
-        
+
         // Record success for circuit 2
-        monitor.record_success(2, Duration::from_millis(100), 100).await;
-        
+        monitor
+            .record_success(2, Duration::from_millis(100), 100)
+            .await;
+
         // Circuit 2 should be healthiest
         let healthiest = monitor.get_healthiest_circuit(&[1, 2]).await;
         assert_eq!(healthiest, Some(2));
@@ -786,30 +791,34 @@ mod tests {
     #[tokio::test]
     async fn test_health_monitor_needs_rotation() {
         let monitor = CircuitHealthMonitor::new();
-        
+
         monitor.register_circuit(1).await;
-        
+
         // Initially shouldn't need rotation
         assert!(!monitor.needs_rotation(1).await);
-        
+
         // After failures, should need rotation
         for _ in 0..5 {
             monitor.record_failure(1, FailureType::Timeout).await;
         }
-        
+
         assert!(monitor.needs_rotation(1).await);
     }
 
     #[tokio::test]
     async fn test_health_monitor_statistics() {
         let monitor = CircuitHealthMonitor::new();
-        
+
         monitor.register_circuit(1).await;
         monitor.register_circuit(2).await;
-        
-        monitor.record_success(1, Duration::from_millis(100), 1000).await;
-        monitor.record_success(2, Duration::from_millis(200), 2000).await;
-        
+
+        monitor
+            .record_success(1, Duration::from_millis(100), 1000)
+            .await;
+        monitor
+            .record_success(2, Duration::from_millis(200), 2000)
+            .await;
+
         let stats = monitor.get_statistics().await;
         assert_eq!(stats.total_circuits, 2);
         assert_eq!(stats.healthy_circuits, 2);

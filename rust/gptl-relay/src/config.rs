@@ -30,20 +30,17 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// Load configuration from file
     pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| crate::RelayError::ConfigError(
-                format!("Failed to read config file: {}", e)
-            ))?;
-        
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            crate::RelayError::ConfigError(format!("Failed to read config file: {}", e))
+        })?;
+
         Self::from_toml(&contents)
     }
 
     /// Load configuration from TOML string
     pub fn from_toml(toml: &str) -> crate::Result<Self> {
         toml::from_str(toml)
-            .map_err(|e| crate::RelayError::ConfigError(
-                format!("Invalid TOML: {}", e)
-            ))
+            .map_err(|e| crate::RelayError::ConfigError(format!("Invalid TOML: {}", e)))
     }
 
     /// Load with environment variable overrides
@@ -74,8 +71,9 @@ impl ServerConfig {
         }
 
         // Auth settings
-        if let Ok(true) = std::env::var("GPTL_MFA_REQUIRED")
-            .map(|v| v.parse::<bool>().unwrap_or(false)) {
+        if let Ok(true) =
+            std::env::var("GPTL_MFA_REQUIRED").map(|v| v.parse::<bool>().unwrap_or(false))
+        {
             self.auth.mfa_required = true;
         }
 
@@ -92,21 +90,21 @@ impl ServerConfig {
         // Validate server settings
         if self.server.bind_address.is_empty() {
             return Err(crate::RelayError::ConfigError(
-                "Bind address cannot be empty".to_string()
+                "Bind address cannot be empty".to_string(),
             ));
         }
 
         // Validate auth settings
         if self.auth.password_min_length < 8 {
             return Err(crate::RelayError::ConfigError(
-                "Password minimum length must be at least 8".to_string()
+                "Password minimum length must be at least 8".to_string(),
             ));
         }
 
         // Validate session settings
         if self.session.access_token_ttl_minutes < 5 {
             return Err(crate::RelayError::ConfigError(
-                "Session TTL must be at least 5 minutes".to_string()
+                "Session TTL must be at least 5 minutes".to_string(),
             ));
         }
 
@@ -127,15 +125,13 @@ impl ServerConfig {
 
     /// Save configuration to file
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> crate::Result<()> {
-        let toml = toml::to_string_pretty(self)
-            .map_err(|e| crate::RelayError::ConfigError(
-                format!("Failed to serialize config: {}", e)
-            ))?;
-        
-        std::fs::write(path, toml)
-            .map_err(|e| crate::RelayError::ConfigError(
-                format!("Failed to write config file: {}", e)
-            ))
+        let toml = toml::to_string_pretty(self).map_err(|e| {
+            crate::RelayError::ConfigError(format!("Failed to serialize config: {}", e))
+        })?;
+
+        std::fs::write(path, toml).map_err(|e| {
+            crate::RelayError::ConfigError(format!("Failed to write config file: {}", e))
+        })
     }
 }
 
@@ -160,10 +156,18 @@ pub struct ServerSettings {
     pub tls_key_path: Option<String>,
 }
 
-fn default_bind_address() -> String { "0.0.0.0:8443".to_string() }
-fn default_workers() -> usize { num_cpus::get() }
-fn default_request_timeout_secs() -> u64 { 30 }
-fn default_max_connections() -> usize { 10000 }
+fn default_bind_address() -> String {
+    "0.0.0.0:8443".to_string()
+}
+fn default_workers() -> usize {
+    num_cpus::get()
+}
+fn default_request_timeout_secs() -> u64 {
+    30
+}
+fn default_max_connections() -> usize {
+    10000
+}
 
 impl Default for ServerSettings {
     fn default() -> Self {
