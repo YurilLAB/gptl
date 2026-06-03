@@ -80,18 +80,28 @@ impl MfaAuthenticator {
         username: &str,
         password: &str,
     ) -> crate::Result<AuthStep> {
-        // Verify password first
+        // Verify password first.
         let configs = self.user_configs.read().await;
-        let config = configs
-            .get(username)
-            .ok_or_else(|| crate::RelayError::AuthenticationFailed("User not found".to_string()))?;
+        let config = match configs.get(username) {
+            Some(c) => c,
+            None => {
+                // Run a comparable Argon2 computation for unknown users so the
+                // response time does not reveal whether the username exists
+                // (user enumeration), and return the SAME generic error as a
+                // bad password.
+                let _ = self.password_hasher.hash(password);
+                return Err(crate::RelayError::AuthenticationFailed(
+                    "Invalid username or password".to_string(),
+                ));
+            }
+        };
 
         if !self
             .password_hasher
             .verify(password, &config.password_hash)?
         {
             return Err(crate::RelayError::AuthenticationFailed(
-                "Invalid password".to_string(),
+                "Invalid username or password".to_string(),
             ));
         }
 
