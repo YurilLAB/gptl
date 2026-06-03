@@ -189,6 +189,40 @@ mod tests {
         server.await.unwrap()
     }
 
+    /// Fuzz: the SOCKS5 server negotiation must never panic on arbitrary or
+    /// truncated client input — only return Ok/Err. The client closes after
+    /// sending so a short read hits EOF instead of hanging; negotiate is also
+    /// wrapped in a timeout as a backstop.
+    #[tokio::test]
+    async fn fuzz_socks5_negotiate_never_panics() {
+        use std::time::Duration;
+        let mut state: u64 = 0xA5A5_1234_DEAD_0001;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..250 {
+            let len = (next() % 72) as usize;
+            let bytes: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let _ = tokio::time::timeout(Duration::from_millis(500), negotiate(&mut stream)).await;
+            });
+
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let _ = client.write_all(&bytes).await;
+            let _ = client.shutdown().await;
+            drop(client);
+            let _ = server.await;
+        }
+    }
+
     fn socks5_domain_request(domain: &str, port: u16) -> Vec<u8> {
         let mut buf = vec![
             0x05,

@@ -737,6 +737,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fuzz_parse_dns_response_never_panics() {
+        // parse_dns_response runs on bytes from a (potentially hostile) DoH
+        // server, including DNS name-compression pointers. It must never panic
+        // (out-of-bounds slice / index / infinite loop) — only Ok/Err.
+        let mut state: u64 = 0x1357_9BDF_2468_ACE0;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..60_000 {
+            let len = (next() % 600) as usize;
+            let buf: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+            let _ = parse_dns_response(&buf);
+        }
+        // A few structured-but-malformed cases: header claims answers but body
+        // is truncated, and a self-referential compression pointer.
+        let _ = parse_dns_response(&[0, 0, 0x81, 0x80, 0, 1, 0, 5, 0, 0, 0, 0]);
+        let _ = parse_dns_response(&[0, 0, 0x81, 0x80, 0, 0, 0, 1, 0, 0, 0, 0, 0xc0, 0x0c]);
+    }
+
+    #[test]
     fn test_dns_cache() {
         let cache = DnsCache {
             entries: HashMap::new(),
