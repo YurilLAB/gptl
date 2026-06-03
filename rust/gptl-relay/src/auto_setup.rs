@@ -1539,9 +1539,12 @@ mod tests {
     }
     
     #[test]
-    fn test_invalid_port() {
-        let automation = FirewallAutomation::new();
-        assert!(automation.has_admin || !automation.has_admin); // Just to use automation
+    fn test_firewall_automation_construction() {
+        // Construction must not panic; admin detection must be deterministic
+        // within a process (it does not flip between calls).
+        let a = FirewallAutomation::new();
+        let b = FirewallAutomation::new();
+        assert_eq!(a.has_admin, b.has_admin);
     }
     
     #[tokio::test]

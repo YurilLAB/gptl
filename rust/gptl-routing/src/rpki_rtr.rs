@@ -156,16 +156,13 @@ where
 
     // ── 2. Read the first PDU.  Expect Cache Response (3) or Cache
     //       Reset (8) per RFC; Error Report (10) means we failed. ──
-    let mut version = 0u8;
-    let mut session_id = 0u16;
-    loop {
+    // Exactly one PDU is expected here, so this is a single read (not a loop).
+    let (version, session_id) = {
         let header = read_pdu_header(&mut stream).await?;
         match header.typ {
             pdu::CACHE_RESPONSE => {
-                version = header.version;
-                session_id = header.session_or_flags;
                 drain_remaining(&mut stream, &header).await?;
-                break;
+                (header.version, header.session_or_flags)
             }
             pdu::CACHE_RESET => {
                 drain_remaining(&mut stream, &header).await?;
@@ -184,7 +181,7 @@ where
                 )));
             }
         }
-    }
+    };
 
     // ── 3. Read Prefix PDUs until End Of Data. ──
     let mut prefixes = Vec::new();
