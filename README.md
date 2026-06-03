@@ -323,11 +323,47 @@ cargo test sybil_defense
 - Requires integration with a transport layer for full deployment
 - Network-level consensus and directory authority system not included
 - Performance optimizations for high-throughput scenarios are ongoing
+- **No network-wide congestion control yet** (no RTT/window flow control à la Tor
+  proposal 324), so throughput/congestion confirmation is not specifically mitigated
+- **AS-aware path selection is partial**: Counter-RAPTOR-style resilience scoring exists,
+  but live AS-path lookup is not yet wired to real BGP/RouteViews data
+- **The wire transport handshake is classical X25519 (ntor-style two-DH).** A hybrid
+  X25519 + ML-KEM-768 KEM is implemented in `gptl-crypto` but is not yet wired into the
+  circuit handshake, so harvest-now-decrypt-later resistance is not yet end-to-end
+- **No probe-resistant bridge transport** (no obfs4/ScrambleSuit-style authenticated,
+  high-entropy obfuscation), so entry points are not designed to survive an active
+  prober or a censor's passive fully-encrypted-traffic heuristics
+
+### Threat model and modern-attack resistance (2025)
+
+Low-latency anonymity cannot defeat a **global / end-to-end passive adversary**: an
+attacker who observes both the entry and exit sides can correlate flows by timing and
+volume. Modern deep-learning flow-correlation attacks — **DeepCorr** (Nasr et al., CCS
+2018) and **DeepCoFFEA** (Oh et al., IEEE S&P 2022) — make this practical, and no
+low-overhead padding defeats it. GPTL therefore aims to *reduce the probability that one
+adversary observes both ends* (entry guards, multi-layer vanguards, path/AS diversity,
+traffic splitting), **not** to defeat correlation itself.
+
+| Modern attack | GPTL posture | Status |
+|---|---|---|
+| Tagging attacks on relay crypto | Per-cell AEAD (ChaCha20-Poly1305, 16-byte tag) — any tampering fails authentication; no malleable AES-CTR + short MAC | **Resisted** |
+| Guard discovery (Øverlier–Syverson; PoPETs 2022) | 3-layer guard system (vanguards) with layered rotation | **Mitigated** |
+| Sniper / resource-exhaustion DoS (NDSS 2014) | Proof-of-work circuit allocation, bounded queues, per-circuit caps, per-IP connection cap, handshake timeout | **Mitigated** |
+| Onion-service flooding DoS (2019–2020) | Proof-of-work with effort-scaled difficulty | **Mitigated** |
+| Circuit fingerprinting (Kwon et al., USENIX 2015) | Preemptive circuit padding + cell-sequence normalization | **Partial** |
+| Website fingerprinting — DL attacks (DF, CCS 2018; Tik-Tok, PoPETs 2020) | WTF-PAD-style adaptive padding **plus** traffic splitting across paths. Note: WTF-PAD alone is broken by DF/Tik-Tok; splitting (TrafficSliver, CCS 2020) and regularization (RegulaTor, PoPETs 2022) are the credible directions | **Partial — padding alone is not sufficient** |
+| Flow correlation (DeepCorr; DeepCoFFEA) | Reduce both-ends observation via guards/diversity/splitting | **Fundamental limit — not defeated** |
+| RAPTOR / BGP & AS-level adversary (USENIX 2015) | RPKI ROV (RFC 6811), Counter-RAPTOR-style resilient selection, AS-path diversity | **Partial (no live AS data yet)** |
+| Active probing / fully-encrypted-traffic detection (USENIX 2023) | Relay is silent to non-protocol input and closes promptly; no banner to fingerprint | **Partial (no obfuscated bridge transport)** |
+| Harvest-now-decrypt-later (quantum) | Hybrid X25519 + ML-KEM-768 available in `gptl-crypto` | **Not yet wired into the transport handshake** |
+
+References for each attack are collected in
+[`research/TOR_I2P_VPN_ATTACKS_RESEARCH_REPORT.md`](research/TOR_I2P_VPN_ATTACKS_RESEARCH_REPORT.md).
 
 ### Security Properties
 - **Memory safety**: Rust ownership model eliminates use-after-free and buffer overflows
-- **Cryptographic agility**: Hybrid classical + post-quantum key exchange
-- **Forward secrecy**: Double Ratchet ratcheting ensures past sessions remain secure
+- **Cryptographic agility**: Hybrid classical + post-quantum key exchange available in `gptl-crypto`
+- **Forward secrecy**: Per-message symmetric key ratchet (Double-Ratchet-inspired); session keys are ephemeral per circuit
 - **Bounded resource usage**: All data structures have growth limits to prevent DoS
 - **Tamper-evident logging**: Merkle tree-backed audit log with cryptographic integrity
 - **Relay exit policy**: Private addresses (127.0.0.0/8, 10.0.0.0/8, 192.168.0.0/16, etc.) and SMTP ports blocked
