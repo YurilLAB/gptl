@@ -100,6 +100,15 @@ impl KeyExchange for X25519KeyExchange {
 
         let shared = secret.diffie_hellman(&public_key);
 
+        // Reject non-contributory key exchange: a low-order/zero peer public key
+        // drives the X25519 output to all zeros, giving the peer a predictable
+        // shared secret. was_contributory() is false in exactly that case.
+        if !shared.was_contributory() {
+            return Err(KeyExchangeError::InvalidPublicKey(
+                "non-contributory X25519 public key (low-order point)".to_string(),
+            ));
+        }
+
         Ok(SharedSecret(Zeroizing::new(shared.as_bytes().to_vec())))
     }
 }
@@ -412,13 +421,18 @@ mod tests {
         let kex = X25519KeyExchange::new();
         let (_pub, priv_key) = kex.generate_keypair().unwrap();
 
-        // All-zero public key should fail
+        // An all-zero public key is a low-order point: the DH output is all
+        // zeros (non-contributory), which must be rejected rather than producing
+        // a predictable shared secret.
         let invalid_pub = PublicKey(vec![0u8; 32]);
         let result = kex.compute_shared(&priv_key, &invalid_pub);
+        assert!(
+            result.is_err(),
+            "all-zero (low-order) public key must be rejected"
+        );
 
-        // Should either fail or produce a valid (but weak) shared secret
-        // X25519 has some weak keys but doesn't always reject them
-        assert!(result.is_ok() || result.is_err());
+        // A wrong-length public key is also rejected.
+        assert!(kex.compute_shared(&priv_key, &PublicKey(vec![0u8; 31])).is_err());
     }
 
     #[test]
