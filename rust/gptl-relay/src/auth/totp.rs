@@ -9,6 +9,10 @@
 
 use base32::{Alphabet, encode as base32_encode_lib};
 use rand::RngCore;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::{RelayError, Result};
@@ -20,6 +24,9 @@ pub struct TotpManager {
     digits: usize,
     /// Tolerated codes per side (e.g. 1 = accept previous, current, next step).
     drift_steps: u8,
+    /// Last successfully-consumed time step per secret, to prevent code reuse
+    /// (RFC 6238 §5.2). Shared across clones so replay state is global.
+    used_steps: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl Default for TotpManager {
@@ -28,6 +35,7 @@ impl Default for TotpManager {
             time_step: 30,
             digits: 6,
             drift_steps: 1,
+            used_steps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -60,9 +68,58 @@ impl TotpManager {
         )
         .map_err(|e| RelayError::ConfigError(format!("TOTP build: {:?}", e)))?;
 
-        // `check_current` does constant-time compare across the drift window.
-        totp.check_current(code)
-            .map_err(|e| RelayError::ConfigError(format!("TOTP check: {:?}", e)))
+        // `check_current` does a constant-time compare across the drift window.
+        if !totp
+            .check_current(code)
+            .map_err(|e| RelayError::ConfigError(format!("TOTP check: {:?}", e)))?
+        {
+            return Ok(false);
+        }
+
+        // The code is valid for the current window. Enforce single-use per
+        // RFC 6238 §5.2: identify which time step it matched and reject it if
+        // that step (or an earlier one) was already consumed for this secret.
+        // Otherwise a code captured (e.g. via shoulder-surf or a logged request)
+        // could be replayed for the whole +/- drift window.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| RelayError::ConfigError(format!("clock: {:?}", e)))?
+            .as_secs();
+        let current_step = now / self.time_step;
+        let drift = self.drift_steps as i64;
+
+        let mut matched_step: Option<u64> = None;
+        // Search newest step first so we record the most recent match.
+        for k in (-drift..=drift).rev() {
+            let step = match (current_step as i64).checked_add(k) {
+                Some(s) if s >= 0 => s as u64,
+                _ => continue,
+            };
+            let candidate = totp.generate(step * self.time_step);
+            if candidate.as_bytes().ct_eq(code.as_bytes()).into() {
+                matched_step = Some(step);
+                break;
+            }
+        }
+
+        // If we cannot localize the step (should not happen after check_current
+        // passed), fail closed rather than allow a possible replay.
+        let matched_step = match matched_step {
+            Some(s) => s,
+            None => return Ok(false),
+        };
+
+        let mut used = self
+            .used_steps
+            .lock()
+            .map_err(|_| RelayError::ConfigError("TOTP replay lock poisoned".into()))?;
+        if let Some(&last) = used.get(secret_b32) {
+            if matched_step <= last {
+                return Ok(false); // replay of an already-used (or older) code
+            }
+        }
+        used.insert(secret_b32.to_string(), matched_step);
+        Ok(true)
     }
 
     /// Setup TOTP for a user — produces a fresh 20-byte secret, a valid
@@ -124,6 +181,27 @@ mod tests {
         // "000000" is overwhelmingly unlikely to be the current valid code.
         let result = mgr.verify(&setup.secret, "000000").unwrap();
         assert!(!result, "TOTP must reject a fixed wrong code (was a stub returning Ok(true))");
+    }
+
+    #[tokio::test]
+    async fn test_totp_code_cannot_be_replayed() {
+        let mgr = TotpManager::default();
+        let setup = mgr.setup_for_user("carol").await.unwrap();
+
+        // Compute the current valid code the same way the manager does.
+        let secret_bytes = Secret::Encoded(setup.secret.clone()).to_bytes().unwrap();
+        let totp = TOTP::new(
+            Algorithm::SHA1, 6, 1, 30, secret_bytes,
+            Some("GPTL".to_string()), "GPTL".to_string(),
+        )
+        .unwrap();
+        let code = totp.generate_current().unwrap();
+
+        assert!(mgr.verify(&setup.secret, &code).unwrap(), "first use must be accepted");
+        assert!(
+            !mgr.verify(&setup.secret, &code).unwrap(),
+            "the same code must not be accepted twice (replay)"
+        );
     }
 
     #[tokio::test]
