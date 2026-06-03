@@ -17,17 +17,8 @@ use crate::{
     relay_conn::RelayConn,
     TransportError,
 };
-use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
-use rand_core::{OsRng, RngCore};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
-use x25519_dalek::{EphemeralSecret, PublicKey as X25519Public};
-use zeroize::Zeroizing;
-
-type HmacSha256 = Hmac<sha2::Sha256>;
 
 /// A unique stream ID within a circuit.
 pub type StreamId = u16;
@@ -193,22 +184,21 @@ impl Circuit {
             ));
         }
 
-        // ── Generate key material ────────────────────────────────────────────
-        let ephemeral_priv = EphemeralSecret::random_from_rng(OsRng);
-        let ephemeral_pub = X25519Public::from(&ephemeral_priv);
-
-        let mut client_nonce = [0u8; 32];
-        OsRng.fill_bytes(&mut client_nonce);
-
         let relay2_pubkey = relay.pubkey_bytes()?;
-        let relay2_fingerprint = sha256(&relay2_pubkey);
+
+        // ── Generate key material via the authenticated handshake ────────────
+        // Build the inner CREATE using the same two-DH (ntor-style) primitive
+        // as a direct connection. The CREATE cell's first 96 payload bytes carry
+        // [relay2_fingerprint || client_ephemeral_pub || client_nonce]; we tunnel
+        // exactly those bytes inside RELAY_EXTEND so relay1 can forward them.
+        let (create_cell, pending) =
+            crate::handshake::client_initiate(self.circuit_id, &relay2_pubkey)?;
+        let handshake_material = &create_cell.payload[0..96];
 
         // ── Build RELAY_EXTEND payload ───────────────────────────────────────
         // [0..4]            addr_len (u32 BE)
         // [4..4+addr_len]   "ip:port"
-        // [off..off+32]     relay2 fingerprint
-        // [off+32..off+64]  client ephemeral X25519 pubkey
-        // [off+64..off+96]  client nonce
+        // [off..off+96]     CREATE handshake material (fp || eph_pub || nonce)
         let addr_bytes = relay.address.as_bytes();
         let addr_len = addr_bytes.len() as u32;
 
@@ -223,9 +213,7 @@ impl Circuit {
         let mut payload = Vec::with_capacity(payload_len);
         payload.extend_from_slice(&addr_len.to_be_bytes());
         payload.extend_from_slice(addr_bytes);
-        payload.extend_from_slice(&relay2_fingerprint);
-        payload.extend_from_slice(ephemeral_pub.as_bytes());
-        payload.extend_from_slice(&client_nonce);
+        payload.extend_from_slice(handshake_material);
 
         let extend_cell = RelayCell {
             command: RelayCommand::Extend,
@@ -249,10 +237,11 @@ impl Circuit {
         .map_err(|_| TransportError::Protocol("RELAY_EXTEND timed out after 30s".into()))??;
 
         // ── Complete the key derivation ──────────────────────────────────────
-        // RELAY_EXTENDED payload:
-        //   [0..32]  relay2 ephemeral X25519 pubkey
-        //   [32..64] relay2 nonce
-        //   [64..96] key confirmation = HMAC-SHA256(forward_key, "gptl-v1-confirm")
+        // RELAY_EXTENDED carries the CREATED handshake response in its first 96
+        // bytes: [relay2_ephemeral_pub || relay2_nonce || key_confirmation].
+        // Reconstruct a CREATED cell and run the same authenticated two-DH
+        // finish, which derives the keys AND verifies the confirmation
+        // (constant-time), authenticating relay2 via its static key.
         if extended_cell.data.len() < 96 {
             return Err(TransportError::Handshake(format!(
                 "RELAY_EXTENDED payload too short: {} bytes (need 96)",
@@ -260,50 +249,14 @@ impl Circuit {
             )));
         }
 
-        let relay2_eph_pub_bytes: [u8; 32] = extended_cell.data[0..32]
-            .try_into()
-            .map_err(|_| TransportError::Handshake("relay2 eph pubkey truncated".into()))?;
-        let relay2_nonce: [u8; 32] = extended_cell.data[32..64]
-            .try_into()
-            .map_err(|_| TransportError::Handshake("relay2 nonce truncated".into()))?;
-        let received_confirmation: [u8; 32] = extended_cell.data[64..96]
-            .try_into()
-            .map_err(|_| TransportError::Handshake("key confirmation truncated".into()))?;
+        let mut created = Cell::new(self.circuit_id, CellType::Created);
+        created.payload[0..96].copy_from_slice(&extended_cell.data[0..96]);
 
-        let relay2_eph_pub = X25519Public::from(relay2_eph_pub_bytes);
-        let dh_shared = ephemeral_priv.diffie_hellman(&relay2_eph_pub);
-
-        // IKM = DH shared || relay2 fingerprint
-        let mut ikm = Zeroizing::new(Vec::with_capacity(64));
-        ikm.extend_from_slice(dh_shared.as_bytes());
-        ikm.extend_from_slice(&relay2_fingerprint);
-
-        // Salt = client_nonce || relay2_nonce
-        let mut salt = [0u8; 64];
-        salt[0..32].copy_from_slice(&client_nonce);
-        salt[32..64].copy_from_slice(&relay2_nonce);
-
-        let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
-        let mut okm = Zeroizing::new([0u8; 64]);
-        hk.expand(b"gptl-transport-v1", okm.as_mut())
-            .map_err(|e| TransportError::Handshake(format!("HKDF expand failed: {}", e)))?;
-
-        let mut forward_key = Zeroizing::new([0u8; 32]);
-        let mut backward_key = Zeroizing::new([0u8; 32]);
-        forward_key.copy_from_slice(&okm[0..32]);
-        backward_key.copy_from_slice(&okm[32..64]);
-
-        // Verify key confirmation — constant-time
-        let expected = hmac_sha256_confirm(&forward_key)?;
-        if expected.ct_eq(&received_confirmation).unwrap_u8() != 1 {
-            return Err(TransportError::Handshake(
-                "RELAY_EXTENDED key confirmation mismatch — relay2 authentication failed".into(),
-            ));
-        }
+        let keys = crate::handshake::client_finish(pending, &created)?;
 
         // ── Add new hop ──────────────────────────────────────────────────────
         self.hops
-            .push(CircuitCiphers::new(&forward_key, &backward_key));
+            .push(CircuitCiphers::new(&keys.forward_key, &keys.backward_key));
         Ok(())
     }
 
@@ -623,19 +576,6 @@ enum DecryptResult {
     Cell(RelayCell),
     Destroy,
     Padding,
-}
-
-// ── Crypto helpers ────────────────────────────────────────────────────────────
-
-fn sha256(data: &[u8]) -> [u8; 32] {
-    Sha256::digest(data).into()
-}
-
-fn hmac_sha256_confirm(key: &[u8; 32]) -> Result<[u8; 32], TransportError> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|e| TransportError::Crypto(format!("HMAC init: {}", e)))?;
-    mac.update(b"gptl-v1-confirm");
-    Ok(mac.finalize().into_bytes().into())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

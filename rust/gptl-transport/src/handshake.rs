@@ -17,11 +17,16 @@
 //! **Key derivation (ntor-style, two ECDH values):**
 //!   dh1 = ECDH(client_ephemeral_priv, relay_static_pub)
 //!   dh2 = ECDH(client_ephemeral_priv, relay_ephemeral_pub)
-//!   ikm = dh1 || dh2  (64 bytes)
+//!   ikm = dh1 || dh2 || relay_fingerprint  (96 bytes)
 //!   salt = client_nonce || relay_nonce  (64 bytes)
 //!   okm = HKDF-SHA256(ikm, salt=salt, info="gptl-transport-v1") → 64 bytes
 //!   forward_key  = okm[0..32]   (client→relay AE key)
 //!   backward_key = okm[32..64]  (relay→client AE key)
+//!
+//! `dh1` binds the session to possession of the relay's **static** private key,
+//! which is what authenticates the relay and prevents a man-in-the-middle: an
+//! attacker who does not hold the relay's static key cannot compute `dh1` and so
+//! cannot derive `forward_key`/`backward_key` or forge the key confirmation.
 
 use crate::{
     cell::{Cell, CellType},
@@ -65,13 +70,13 @@ impl Drop for SessionKeys {
 /// State held by the client while waiting for the CREATED response.
 pub struct PendingHandshake {
     relay_fingerprint: [u8; 32],
-    // Stored for Phase 2 two-DH extension; unused in Phase 1 single-DH path.
-    #[allow(dead_code)]
+    /// Relay static public key — used for `dh1` (relay authentication).
     relay_static_pub: X25519Public,
-    client_ephemeral_priv: Option<EphemeralSecret>, // consumed in finish()
-    // Stored for Phase 2 extension; unused in Phase 1.
-    #[allow(dead_code)]
-    client_ephemeral_pub: X25519Public,
+    /// Client ephemeral private key. Held as a `StaticSecret` (not
+    /// `EphemeralSecret`) because the ntor handshake performs **two** ECDH
+    /// operations with it (against the relay's static and ephemeral keys);
+    /// `EphemeralSecret::diffie_hellman` consumes the key after a single use.
+    client_ephemeral_priv: StaticSecret,
     client_nonce: [u8; 32],
 }
 
@@ -85,8 +90,8 @@ pub fn client_initiate(
     // Compute fingerprint (SHA-256 of relay static pubkey)
     let fingerprint = sha256(relay_static_pub);
 
-    // Generate ephemeral keypair
-    let ephemeral_priv = EphemeralSecret::random_from_rng(OsRng);
+    // Generate ephemeral keypair (StaticSecret so it can be used for two ECDHs)
+    let ephemeral_priv = StaticSecret::random_from_rng(OsRng);
     let ephemeral_pub = X25519Public::from(&ephemeral_priv);
 
     // Random client nonce
@@ -104,8 +109,7 @@ pub fn client_initiate(
     let state = PendingHandshake {
         relay_fingerprint: fingerprint,
         relay_static_pub: relay_pub,
-        client_ephemeral_priv: Some(ephemeral_priv),
-        client_ephemeral_pub: ephemeral_pub,
+        client_ephemeral_priv: ephemeral_priv,
         client_nonce,
     };
 
@@ -135,25 +139,26 @@ pub fn client_finish(
 
     let relay_ephemeral_pub = X25519Public::from(relay_ephemeral_pub_bytes);
 
-    // Two ECDH computations — client uses ephemeral priv against both relay keys
-    let ephemeral_priv = state
+    // Two ECDH computations (ntor-style):
+    //   dh1 = client_ephemeral · relay_static   → authenticates the relay
+    //   dh2 = client_ephemeral · relay_ephemeral → forward secrecy
+    let dh1 = state
         .client_ephemeral_priv
-        .take()
-        .ok_or_else(|| TransportError::Handshake("handshake already consumed".into()))?;
+        .diffie_hellman(&state.relay_static_pub);
+    let dh2 = state
+        .client_ephemeral_priv
+        .diffie_hellman(&relay_ephemeral_pub);
 
-    let dh2_shared = ephemeral_priv.diffie_hellman(&relay_ephemeral_pub);
-    // Note: EphemeralSecret is consumed by diffie_hellman; we need dh1 first.
-    // Re-derive: we use the relay static pub stored in state for dh1.
-    // Since EphemeralSecret is consumed, we compute dh1 from a re-derived ephemeral.
-    // DESIGN NOTE: We use a two-step trick — encode dh1 from the ephemeral pub bytes
-    // and the static key using a fresh StaticSecret loaded from state for testing.
-    // In a real system, we would need a different approach. Here we use a single DH
-    // + blind the static key contribution via HKDF info to avoid the consumption issue.
-    //
-    // For Phase 1 simplicity: derive keys from (dh2 + fingerprint as static commitment).
-    // This is replaced in Phase 2 with a proper two-party KEM.
-    let keys = derive_keys_single_dh(
-        dh2_shared.as_bytes(),
+    // Reject low-order / non-contributory peer keys (all-zero shared secret).
+    if !dh1.was_contributory() || !dh2.was_contributory() {
+        return Err(TransportError::Handshake(
+            "non-contributory ECDH (low-order relay key)".into(),
+        ));
+    }
+
+    let keys = derive_keys_two_dh(
+        dh1.as_bytes(),
+        dh2.as_bytes(),
         &state.relay_fingerprint,
         &state.client_nonce,
         &relay_nonce,
@@ -253,16 +258,28 @@ pub fn relay_respond(
     let relay_ephemeral_priv = EphemeralSecret::random_from_rng(OsRng);
     let relay_ephemeral_pub = X25519Public::from(&relay_ephemeral_priv);
 
-    // ECDH: relay ephemeral × client ephemeral
-    let dh_shared = relay_ephemeral_priv.diffie_hellman(&client_ephemeral_pub);
+    // Two ECDH computations matching the client:
+    //   dh1 = relay_static · client_ephemeral    → proves we hold the static key
+    //   dh2 = relay_ephemeral · client_ephemeral → forward secrecy
+    let relay_static_secret = StaticSecret::from(*static_key.private);
+    let dh1 = relay_static_secret.diffie_hellman(&client_ephemeral_pub);
+    let dh2 = relay_ephemeral_priv.diffie_hellman(&client_ephemeral_pub);
+
+    // Reject low-order / non-contributory client keys (all-zero shared secret).
+    if !dh1.was_contributory() || !dh2.was_contributory() {
+        return Err(TransportError::Handshake(
+            "non-contributory ECDH (low-order client key)".into(),
+        ));
+    }
 
     // Random relay nonce
     let mut relay_nonce = [0u8; 32];
     OsRng.fill_bytes(&mut relay_nonce);
 
     // Derive keys (must produce same result as client_finish)
-    let keys = derive_keys_single_dh(
-        dh_shared.as_bytes(),
+    let keys = derive_keys_two_dh(
+        dh1.as_bytes(),
+        dh2.as_bytes(),
         &static_key.fingerprint,
         &client_nonce,
         &relay_nonce,
@@ -282,16 +299,19 @@ pub fn relay_respond(
 
 // ── Key derivation helpers ────────────────────────────────────────────────────
 
-/// Derive forward_key and backward_key from a single DH output + fingerprint commitment.
-fn derive_keys_single_dh(
-    dh_bytes: &[u8],
+/// Derive forward_key and backward_key from the two ntor ECDH outputs plus the
+/// relay's static-key fingerprint (identity binding).
+fn derive_keys_two_dh(
+    dh1_bytes: &[u8],
+    dh2_bytes: &[u8],
     relay_fingerprint: &[u8; 32],
     client_nonce: &[u8; 32],
     relay_nonce: &[u8; 32],
 ) -> Result<SessionKeys, TransportError> {
-    // IKM = ECDH shared || relay_fingerprint (binds identity to key material)
-    let mut ikm = Vec::with_capacity(dh_bytes.len() + 32);
-    ikm.extend_from_slice(dh_bytes);
+    // IKM = dh1 || dh2 || relay_fingerprint (binds the relay's static identity)
+    let mut ikm = Zeroizing::new(Vec::with_capacity(dh1_bytes.len() + dh2_bytes.len() + 32));
+    ikm.extend_from_slice(dh1_bytes);
+    ikm.extend_from_slice(dh2_bytes);
     ikm.extend_from_slice(relay_fingerprint);
 
     // Salt = client_nonce || relay_nonce
@@ -448,6 +468,52 @@ mod tests {
         let (keys2, _) = run_handshake(&relay_key);
         assert_ne!(*keys1.forward_key, *keys2.forward_key);
         assert_ne!(*keys1.backward_key, *keys2.backward_key);
+    }
+
+    #[test]
+    fn test_mitm_without_static_key_is_rejected() {
+        // The relay the client intends to reach.
+        let relay_key = RelayStaticKey::generate();
+        let (create_cell, pending) = client_initiate(1, &relay_key.public).unwrap();
+
+        // An active attacker observes the CREATE cell — it learns the client
+        // ephemeral pubkey and the relay fingerprint (both public) but does NOT
+        // know the relay's static private key.
+        let client_eph_pub_bytes: [u8; 32] = create_cell.payload[32..64].try_into().unwrap();
+        let client_eph_pub = X25519Public::from(client_eph_pub_bytes);
+        let client_nonce: [u8; 32] = create_cell.payload[64..96].try_into().unwrap();
+
+        // The attacker forges a CREATED cell using only an ephemeral×ephemeral DH
+        // (the previously-broken single-DH scheme). It cannot compute
+        // dh1 = client_ephemeral · relay_static without the static key, so it must
+        // guess — here, the best it can do is a zero/garbage dh1.
+        let atk_eph = EphemeralSecret::random_from_rng(OsRng);
+        let atk_eph_pub = X25519Public::from(&atk_eph);
+        let dh2 = atk_eph.diffie_hellman(&client_eph_pub);
+        let fake_dh1 = [0u8; 32];
+        let mut relay_nonce = [0u8; 32];
+        OsRng.fill_bytes(&mut relay_nonce);
+        let forged_keys = derive_keys_two_dh(
+            &fake_dh1,
+            dh2.as_bytes(),
+            &relay_key.fingerprint,
+            &client_nonce,
+            &relay_nonce,
+        )
+        .unwrap();
+        let confirmation = compute_confirmation(&forged_keys.forward_key).unwrap();
+
+        let mut forged = Cell::new(1, CellType::Created);
+        forged.payload[0..32].copy_from_slice(atk_eph_pub.as_bytes());
+        forged.payload[32..64].copy_from_slice(&relay_nonce);
+        forged.payload[64..96].copy_from_slice(&confirmation);
+
+        // The client derives the REAL dh1 using the relay's static pubkey, which
+        // differs from the attacker's guess, so key confirmation must fail.
+        assert!(
+            client_finish(pending, &forged).is_err(),
+            "MITM without the relay static key must be rejected"
+        );
     }
 
     #[test]
