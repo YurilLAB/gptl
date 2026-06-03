@@ -79,7 +79,17 @@ impl AuditLogger {
                 let mut storage = self.storage.write().await;
                 storage.entries = log.entries;
                 storage.merkle_root = log.merkle_root;
-                storage.next_sequence = log.entry_count;
+                // Resume sequencing from the highest loaded sequence + 1, NOT
+                // from entry_count. After archival the retained entries are a
+                // sliding window (e.g. sequences 200..1199 with entry_count 1000),
+                // so seeding next_sequence from the count would assign new entries
+                // sequences that collide with / regress below existing ones and
+                // permanently break verify_integrity's chain check on restart.
+                storage.next_sequence = storage
+                    .entries
+                    .back()
+                    .map(|e| e.sequence + 1)
+                    .unwrap_or(0);
                 storage.update_merkle_tree();
             }
         }
@@ -201,7 +211,7 @@ impl AuditLogger {
 
         // Trim old entries if needed
         if storage.entries.len() > self.max_memory_entries {
-            storage.archive_old_entries();
+            storage.archive_old_entries(self.max_memory_entries);
         }
 
         // Release lock before saving
@@ -467,10 +477,11 @@ impl LogStorage {
         }
     }
 
-    fn archive_old_entries(&mut self) {
-        // In production, this would write to persistent storage
-        // For now, just keep recent entries
-        while self.entries.len() > 1000 {
+    fn archive_old_entries(&mut self, max_entries: usize) {
+        // In production, this would write to persistent storage before dropping.
+        // Trim down to the configured cap (not a hardcoded constant, which would
+        // make AuditLogger::with_max_memory_entries a no-op for any cap < 1000).
+        while self.entries.len() > max_entries {
             self.entries.pop_front();
         }
     }
@@ -707,6 +718,12 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    // An odd length would make `&hex[i..i + 2]` slice past the end and panic.
+    // hex_decode runs on fields read from a persisted (potentially tampered or
+    // truncated) audit log, so it must reject malformed input gracefully.
+    if hex.len() % 2 != 0 {
+        return None;
+    }
     (0..hex.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
@@ -793,12 +810,90 @@ mod tests {
         }
 
         let report = logger.verify_integrity().await;
-        assert!(report.total_entries > 0 && report.total_entries <= 1000,
-            "archive must have trimmed; got total={}", report.total_entries);
+        // The configured cap (50) must be honored — previously archive_old_entries
+        // hardcoded 1000, so a cap < 1000 never actually trimmed.
+        assert!(report.total_entries > 0 && report.total_entries <= 50,
+            "archive must trim to the configured cap (50); got total={}", report.total_entries);
         assert!(report.broken_chain_at.is_none(),
             "integrity must NOT flag a broken chain on a well-formed archived log; \
              got broken_chain_at={:?} valid={} invalid={}",
             report.broken_chain_at, report.valid_entries, report.invalid_entries);
+    }
+
+    #[tokio::test]
+    async fn test_sequence_resumes_after_reload_following_archival() {
+        // Regression: next_sequence was restored from entry_count (the trimmed
+        // count) instead of highest_sequence + 1, so after a restart following
+        // archival, new entries were assigned colliding/regressing sequences and
+        // verify_integrity reported a broken chain. Also exercises hex_decode of
+        // persisted hashes.
+        let path = std::env::temp_dir().join(format!(
+            "gptl_audit_reload_{}_{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let mk_event = |i: usize| AuthEvent {
+            user_id: Some(format!("u{}", i)),
+            username: Some(format!("u{}", i)),
+            auth_method: "password".to_string(),
+            success: true,
+            failure_reason: None,
+            mfa_used: false,
+            client_cert: false,
+        };
+
+        // Log past the cap so archival produces a sliding window of high
+        // sequences (last 50 of 120 -> sequences 70..=119), then persist.
+        {
+            let logger = AuditLogger::new(vec![1u8; 32])
+                .with_max_memory_entries(50)
+                .with_persistent_storage(&path);
+            let ctx = crate::SecurityContext::new("192.168.1.1".parse().unwrap());
+            for i in 0..120usize {
+                logger.log_auth_attempt(mk_event(i), &ctx).await.unwrap();
+            }
+            logger.save_to_storage().await.unwrap();
+        }
+
+        // Reload into a fresh logger.
+        let logger2 = AuditLogger::new(vec![1u8; 32])
+            .with_max_memory_entries(50)
+            .with_persistent_storage(&path);
+        logger2.load_from_storage().await.unwrap();
+        assert!(
+            logger2.verify_integrity().await.broken_chain_at.is_none(),
+            "reloaded archived log must verify cleanly"
+        );
+
+        // A newly appended entry must extend the chain (sequence 120, not 50).
+        let ctx = crate::SecurityContext::new("10.0.0.1".parse().unwrap());
+        let entry = logger2.log_auth_attempt(mk_event(999), &ctx).await.unwrap();
+        assert_eq!(
+            entry.sequence, 120,
+            "next sequence must resume at highest+1 (119+1), not entry_count (50)"
+        );
+        let report = logger2.verify_integrity().await;
+        assert!(
+            report.broken_chain_at.is_none(),
+            "appending after reload must not break the chain: {:?}",
+            report
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_hex_decode_rejects_odd_length() {
+        // Must not panic on attacker-supplied odd-length hex from a tampered log.
+        assert_eq!(hex_decode("abc"), None);
+        assert_eq!(hex_decode("a"), None);
+        assert_eq!(hex_decode("zz"), None); // non-hex
+        assert_eq!(hex_decode("00ff"), Some(vec![0x00, 0xff]));
+        assert_eq!(hex_decode(""), Some(vec![]));
     }
 
     #[tokio::test]
