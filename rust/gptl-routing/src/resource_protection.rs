@@ -86,13 +86,23 @@ struct RateLimiter {
 struct OomHandler {
     /// Memory threshold (percentage)
     threshold: f64,
-    /// Kill priority queue
-    kill_queue: Vec<u32>,
+    /// Kill priority queue of (circuit_id, verified_difficulty), sorted so
+    /// the lowest-difficulty circuits are killed first under memory pressure.
+    kill_queue: Vec<(u32, u32)>,
 }
 
 impl ResourceGuard {
-    /// Create new resource guard
+    /// Default PoW difficulty (leading zero bits) required to allocate a circuit.
+    pub const DEFAULT_POW_DIFFICULTY: u32 = 20;
+
+    /// Create new resource guard with the default PoW difficulty.
     pub fn new(config: Arc<RwLock<RoutingConfig>>) -> Self {
+        Self::with_difficulty(config, Self::DEFAULT_POW_DIFFICULTY)
+    }
+
+    /// Create a resource guard with an explicit PoW difficulty (leading zero
+    /// bits). Lower values are useful in tests to keep PoW generation fast.
+    pub fn with_difficulty(config: Arc<RwLock<RoutingConfig>>, difficulty: u32) -> Self {
         let memory_pool = Arc::new(RwLock::new(MemoryPool {
             total_available: 1024 * 1024 * 1024, // 1GB
             allocated: 0,
@@ -102,7 +112,7 @@ impl ResourceGuard {
         let circuit_quotas = Arc::new(RwLock::new(HashMap::new()));
         
         let pow_verifier = Arc::new(RwLock::new(PowVerifier {
-            difficulty: 20, // 20 leading zero bits
+            difficulty, // required leading zero bits
             verified_cache: HashMap::new(),
         }));
         
@@ -143,15 +153,22 @@ impl ResourceGuard {
                 drop(pool_read);
                 
                 if usage > 0.9 {
-                    // OOM condition - kill circuits
+                    // OOM condition - kill circuits, freeing their reserved
+                    // memory back into the pool (otherwise `allocated` never
+                    // drops and the relay stays permanently "exhausted").
                     let mut oom_handler = oom.write().await;
                     let mut circuit_quotas = quotas.write().await;
-                    
-                    // Kill circuits by priority
-                    for circuit_id in &oom_handler.kill_queue {
-                        circuit_quotas.remove(circuit_id);
+                    let mut pool_write = pool.write().await;
+
+                    // Kill lowest-difficulty circuits first (queue is sorted
+                    // ascending by difficulty in `allocate`).
+                    for (circuit_id, _difficulty) in &oom_handler.kill_queue {
+                        if let Some(quota) = circuit_quotas.remove(circuit_id) {
+                            pool_write.allocated =
+                                pool_write.allocated.saturating_sub(quota.max_memory);
+                        }
                     }
-                    
+
                     oom_handler.kill_queue.clear();
                 }
             }
@@ -162,27 +179,25 @@ impl ResourceGuard {
 
     /// Allocate circuit resources
     pub async fn allocate(&self, pow: ProofOfWork) -> Result<CircuitAllocation, RoutingError> {
-        // Verify proof-of-work
-        {
-            let verifier = self.pow_verifier.read().await;
+        // Verify proof-of-work (write lock: verify records the PoW for replay
+        // protection). The effective difficulty is clamped to the server's
+        // required difficulty so an attacker cannot claim a huge `pow.difficulty`
+        // to inflate the memory/bandwidth quota it receives.
+        let effective_difficulty = {
+            let mut verifier = self.pow_verifier.write().await;
             if !verifier.verify(&pow).await {
                 return Err(RoutingError::ResourceAllocationFailed(
                     "Invalid proof-of-work".to_string()
                 ));
             }
-        }
-        
-        // Check rate limits
-        {
-            let _limiter = self.rate_limiter.read().await;
-            // Rate limit check would go here
-        }
-        
+            pow.difficulty.min(verifier.difficulty)
+        };
+
         // Allocate memory
         let circuit_id = self.generate_circuit_id().await;
-        let memory_quota = self.calculate_memory_quota(&pow).await;
-        let bandwidth_quota = self.calculate_bandwidth_quota(&pow).await;
-        
+        let memory_quota = self.calculate_memory_quota(effective_difficulty);
+        let bandwidth_quota = self.calculate_bandwidth_quota(effective_difficulty);
+
         {
             let mut pool = self.memory_pool.write().await;
             if pool.allocated + memory_quota > pool.total_available {
@@ -192,7 +207,7 @@ impl ResourceGuard {
             }
             pool.allocated += memory_quota;
         }
-        
+
         // Store quota
         {
             let mut quotas = self.circuit_quotas.write().await;
@@ -203,15 +218,15 @@ impl ResourceGuard {
                 current_bandwidth: 0,
             });
         }
-        
-        // Add to kill queue with priority based on PoW
+
+        // Add to kill queue, ordered so the lowest-priority (lowest verified
+        // difficulty) circuits are killed first under memory pressure.
         {
             let mut oom = self.oom_handler.write().await;
-            // Lower PoW difficulty = lower priority (kill first)
-            oom.kill_queue.push(circuit_id);
-            oom.kill_queue.sort_by_key(|_| pow.difficulty);
+            oom.kill_queue.push((circuit_id, effective_difficulty));
+            oom.kill_queue.sort_by_key(|&(_, difficulty)| difficulty);
         }
-        
+
         Ok(CircuitAllocation {
             circuit_id,
             memory_quota,
@@ -231,7 +246,7 @@ impl ResourceGuard {
         
         // Remove from kill queue
         let mut oom = self.oom_handler.write().await;
-        oom.kill_queue.retain(|&id| id != circuit_id);
+        oom.kill_queue.retain(|&(id, _)| id != circuit_id);
         
         Ok(())
     }
@@ -262,42 +277,37 @@ impl ResourceGuard {
         rand::random()
     }
 
-    /// Calculate memory quota based on PoW
-    async fn calculate_memory_quota(&self, pow: &ProofOfWork) -> usize {
+    /// Calculate memory quota from the *verified* PoW difficulty.
+    fn calculate_memory_quota(&self, difficulty: u32) -> usize {
         let base_quota = 100 * 1024 * 1024; // 100MB base
-        
+
         // Higher difficulty = more memory
-        let difficulty_bonus = (pow.difficulty as usize) * 10 * 1024 * 1024;
-        
+        let difficulty_bonus = (difficulty as usize) * 10 * 1024 * 1024;
+
         base_quota + difficulty_bonus
     }
 
-    /// Calculate bandwidth quota based on PoW
-    async fn calculate_bandwidth_quota(&self, pow: &ProofOfWork) -> u64 {
+    /// Calculate bandwidth quota from the *verified* PoW difficulty.
+    fn calculate_bandwidth_quota(&self, difficulty: u32) -> u64 {
         let base_quota = 1024 * 1024; // 1MB/s base
-        
+
         // Higher difficulty = more bandwidth
-        let difficulty_bonus = (pow.difficulty as u64) * 512 * 1024;
-        
+        let difficulty_bonus = (difficulty as u64) * 512 * 1024;
+
         base_quota + difficulty_bonus
     }
 }
 
 impl PowVerifier {
-    /// Verify proof-of-work
-    async fn verify(&self, pow: &ProofOfWork) -> bool {
-        // Cache lookup uses the FULL submitted hash so an attacker cannot
-        // replay the same nonce with a forged hash and bypass verification.
-        if let Some(&timestamp) = self.verified_cache.get(&pow.hash) {
-            if timestamp.elapsed() < Duration::from_secs(300) {
-                // Still recompute below — a cache hit without recomputation
-                // would let an attacker plant garbage in the cache by
-                // submitting the same hash bytes twice in 5 minutes.
-                // Here we just shortcut difficulty check; recomputation follows.
-                // Fall through.
-            }
-        }
+    /// How long a successfully-verified PoW is remembered to reject replays.
+    const REPLAY_WINDOW: Duration = Duration::from_secs(300);
 
+    /// Verify proof-of-work.
+    ///
+    /// Takes `&mut self` so a verified PoW can be recorded in the replay cache.
+    /// Returns `true` only if the recomputed hash matches, meets the server's
+    /// *own* difficulty threshold, and has not been used recently.
+    async fn verify(&mut self, pow: &ProofOfWork) -> bool {
         // Recompute SHA256(circuit_id || nonce) and constant-time-compare to
         // the submitted hash. Trusting `pow.hash` blindly lets an attacker
         // submit ProofOfWork { hash: vec![0; 32], .. } and pass.
@@ -309,8 +319,7 @@ impl PowVerifier {
         if pow.hash.len() != computed.len() {
             return false;
         }
-        let matches = constant_time_eq(&pow.hash, computed.as_slice());
-        if !matches {
+        if !constant_time_eq(&pow.hash, computed.as_slice()) {
             return false;
         }
 
@@ -318,7 +327,28 @@ impl PowVerifier {
             .take_while(|&&b| b == 0)
             .count() * 8;
 
-        leading_zeros >= pow.difficulty as usize
+        // The threshold is the SERVER's difficulty, never the attacker-supplied
+        // `pow.difficulty` (which would let a client send difficulty: 0 and pass
+        // with zero work).
+        if leading_zeros < self.difficulty as usize {
+            return false;
+        }
+
+        // Anti-replay: reject a PoW whose exact hash was accepted recently, so
+        // one solved puzzle cannot be reused to allocate unlimited circuits.
+        if let Some(&ts) = self.verified_cache.get(&pow.hash) {
+            if ts.elapsed() < Self::REPLAY_WINDOW {
+                return false;
+            }
+        }
+
+        // Record this PoW and prune expired entries to bound cache growth.
+        let now = Instant::now();
+        self.verified_cache
+            .retain(|_, &mut ts| now.duration_since(ts) < Self::REPLAY_WINDOW);
+        self.verified_cache.insert(pow.hash.clone(), now);
+
+        true
     }
 
     /// Update difficulty based on network conditions
@@ -580,7 +610,7 @@ mod tests {
     #[tokio::test]
     async fn test_circuit_allocation() {
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        let guard = ResourceGuard::new(config);
+        let guard = ResourceGuard::with_difficulty(config, 8);
 
         // Generate valid PoW
         let generator = PowGenerator::new(8); // low difficulty keeps tests fast
@@ -598,7 +628,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_quota_enforcement() {
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        let guard = ResourceGuard::new(config);
+        let guard = ResourceGuard::with_difficulty(config, 8);
 
         // Generate and allocate
         let generator = PowGenerator::new(8); // low difficulty keeps tests fast
@@ -615,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn test_circuit_release() {
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        let guard = ResourceGuard::new(config);
+        let guard = ResourceGuard::with_difficulty(config, 8);
 
         let generator = PowGenerator::new(8); // low difficulty keeps tests fast
         let pow = generator.generate(12345);
@@ -770,29 +800,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pow_difficulty_zero_handled_safely() {
-        // Difficulty 0 means zero leading zero bits — any hash is valid.
-        // Must not panic and must succeed immediately.
+    async fn test_attacker_supplied_difficulty_is_ignored() {
+        // A client must not be able to bypass PoW by claiming difficulty 0.
+        // The server enforces its OWN difficulty, so a near-zero-work PoW (even
+        // with a valid hash) must be rejected by a normal-difficulty guard.
         let generator = PowGenerator::new(0);
-        let pow = generator.generate(1);
-        // All hashes satisfy ≥ 0 leading zeros
-        let leading_zeros = pow.hash.iter()
-            .take_while(|&&b| b == 0)
-            .count() * 8;
-        // Constraint: leading_zeros >= 0 (always true, just checking no panic)
-        assert!(leading_zeros >= 0, "difficulty 0 must not panic during generation");
+        let mut pow = generator.generate(1);
+        // Attacker also lies about the difficulty field — must be ignored.
+        pow.difficulty = 0;
 
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        let guard = ResourceGuard::new(config);
+        let guard = ResourceGuard::new(config); // default difficulty (20)
         let result = guard.allocate(pow).await;
-        assert!(result.is_ok(),
-            "PoW with difficulty 0 must succeed allocation");
+        assert!(
+            result.is_err(),
+            "a zero-work PoW must be rejected regardless of the claimed difficulty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pow_cannot_be_replayed() {
+        // One solved PoW must not allocate more than one circuit.
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = ResourceGuard::with_difficulty(config, 8);
+        let generator = PowGenerator::new(8);
+        let pow = generator.generate(31337);
+
+        assert!(guard.allocate(pow.clone()).await.is_ok(), "first use succeeds");
+        assert!(
+            guard.allocate(pow).await.is_err(),
+            "replaying the same PoW must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_attacker_cannot_inflate_quota_via_difficulty() {
+        // Claiming a huge difficulty must not grant a larger memory/bandwidth
+        // quota than the server's verified difficulty warrants.
+        let config = Arc::new(RwLock::new(RoutingConfig::default()));
+        let guard = ResourceGuard::with_difficulty(config, 8);
+        let generator = PowGenerator::new(8);
+        let mut pow = generator.generate(4242);
+        pow.difficulty = u32::MAX; // lie
+
+        let alloc = guard.allocate(pow).await.unwrap();
+        // Quota is bounded by the server difficulty (8), not u32::MAX.
+        assert_eq!(alloc.memory_quota, 100 * 1024 * 1024 + 8 * 10 * 1024 * 1024);
     }
 
     #[tokio::test]
     async fn test_memory_over_allocation_rejected() {
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        let guard = ResourceGuard::new(config);
+        let guard = ResourceGuard::with_difficulty(config, 8);
 
         // Fill the memory pool to near capacity first
         {
@@ -812,7 +871,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_check_over_quota_rejected() {
         let config = Arc::new(RwLock::new(RoutingConfig::default()));
-        let guard = ResourceGuard::new(config);
+        let guard = ResourceGuard::with_difficulty(config, 8);
 
         let generator = PowGenerator::new(8);
         let pow = generator.generate(555);
