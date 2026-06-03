@@ -169,12 +169,19 @@ impl SessionManager {
                 ));
             }
 
-            // Check fingerprint binding
-            if let (Some(expected_fp), Some(provided_fp)) = (&claims.fp, fingerprint) {
-                if expected_fp != provided_fp {
-                    return Err(crate::RelayError::SessionBindingMismatch(
-                        "Device fingerprint mismatch".to_string()
-                    ));
+            // Check fingerprint binding. If the token is bound to a fingerprint,
+            // the caller MUST present the matching one. Previously, omitting the
+            // fingerprint (None) skipped the check entirely, letting a stolen
+            // token bound to a device be replayed simply by not sending a
+            // fingerprint. Fail closed instead.
+            if let Some(expected_fp) = &claims.fp {
+                match fingerprint {
+                    Some(ref provided_fp) if provided_fp == expected_fp => {}
+                    _ => {
+                        return Err(crate::RelayError::SessionBindingMismatch(
+                            "Device fingerprint mismatch".to_string(),
+                        ));
+                    }
                 }
             }
         }
@@ -539,6 +546,23 @@ mod tests {
             Some("device_fingerprint"),
         ).await;
         assert!(result.is_err());
+
+        // A token bound to a fingerprint must NOT validate when the caller
+        // omits the fingerprint (regression: this previously skipped the check).
+        let result = manager.validate_access_token(
+            &tokens.access_token,
+            ip,
+            None,
+        ).await;
+        assert!(result.is_err(), "omitting a bound fingerprint must be rejected");
+
+        // Wrong fingerprint must also fail.
+        let result = manager.validate_access_token(
+            &tokens.access_token,
+            ip,
+            Some("wrong_fingerprint"),
+        ).await;
+        assert!(result.is_err(), "mismatched fingerprint must be rejected");
     }
 
     #[tokio::test]
