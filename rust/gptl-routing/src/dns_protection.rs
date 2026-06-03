@@ -231,8 +231,19 @@ impl DnsGuard {
 
     /// Resolve via DNS-over-HTTPS (RFC 8484)
     async fn resolve_doh(&self, query: &str) -> Result<Vec<IpAddr>, RoutingError> {
-        let mut resolver = self.doh_resolver.write().await;
-        let endpoint = &resolver.endpoints[resolver.current].clone();
+        // Snapshot what we need under a short read lock, then release it before
+        // the network request. Previously the WRITE lock was held across the
+        // entire .send().await (up to `timeout`), serializing every concurrent
+        // DNS resolution behind one writer during blocking I/O — a self-DoS.
+        let (endpoint, timeout, used_idx, num_endpoints) = {
+            let resolver = self.doh_resolver.read().await;
+            (
+                resolver.endpoints[resolver.current].clone(),
+                resolver.timeout,
+                resolver.current,
+                resolver.endpoints.len(),
+            )
+        };
 
         // Build DNS query in wire format
         let dns_query = build_dns_query(query)?;
@@ -241,14 +252,14 @@ impl DnsGuard {
         let client = reqwest::Client::builder()
             .use_rustls_tls()
             .min_tls_version(reqwest::tls::Version::TLS_1_3)
-            .timeout(resolver.timeout)
+            .timeout(timeout)
             .https_only(true)
             .build()
             .map_err(|e| RoutingError::ResourceAllocationFailed(format!("DoH client error: {}", e)))?;
 
         // RFC 8484: POST method with application/dns-message
         let response = client
-            .post(endpoint)
+            .post(&endpoint)
             .header("Content-Type", "application/dns-message")
             .header("Accept", "application/dns-message")
             .body(dns_query)
@@ -263,8 +274,15 @@ impl DnsGuard {
                 parse_dns_response(&body)
             }
             Ok(_) | Err(_) => {
-                // Failover to next endpoint
-                resolver.current = (resolver.current + 1) % resolver.endpoints.len();
+                // Briefly take the write lock only to rotate the endpoint, and
+                // only if no concurrent caller already rotated past the one we
+                // used (avoids skipping endpoints under concurrency).
+                if num_endpoints > 0 {
+                    let mut resolver = self.doh_resolver.write().await;
+                    if resolver.current == used_idx {
+                        resolver.current = (used_idx + 1) % num_endpoints;
+                    }
+                }
                 tracing::warn!("DoH endpoint failed, rotating to next");
                 Err(RoutingError::ResourceAllocationFailed("DoH resolution failed".to_string()))
             }
