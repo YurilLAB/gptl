@@ -71,6 +71,9 @@ pub fn load(name: &str, config_path: &Path) -> Result<GptlConfig, ConfigError> {
     if let Some(cfg) = builtin_config(name) {
         return Ok(cfg);
     }
+    // Reject path separators / `..` before building a filesystem path, so a
+    // crafted name (e.g. "../../etc/passwd") cannot escape the profiles dir.
+    validate_name(name)?;
     let path = profiles_dir(config_path).join(format!("{}.toml", name));
     if !path.exists() {
         return Err(ConfigError::UnknownKey(format!(
@@ -110,6 +113,9 @@ pub fn delete(name: &str, config_path: &Path) -> Result<(), ConfigError> {
             message: format!("'{}' is a built-in profile and cannot be deleted.", name),
         });
     }
+    // Reject path separators / `..` so delete can't remove files outside the
+    // profiles directory (e.g. "../config" or an absolute path).
+    validate_name(name)?;
     let path = profiles_dir(config_path).join(format!("{}.toml", name));
     if !path.exists() {
         return Err(ConfigError::UnknownKey(format!(
@@ -142,4 +148,35 @@ fn validate_name(name: &str) -> Result<(), ConfigError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_load_and_delete_reject_path_traversal() {
+        let cfg = PathBuf::from("/tmp/gptl-nonexistent/config.toml");
+        for bad in ["../config", "../../etc/passwd", "a/b", "/etc/shadow", "..", "foo/../bar"] {
+            assert!(
+                load(bad, &cfg).is_err(),
+                "load must reject traversal name {:?}",
+                bad
+            );
+            assert!(
+                delete(bad, &cfg).is_err(),
+                "delete must reject traversal name {:?}",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_name_accepts_normal_names() {
+        assert!(validate_name("my-profile_1").is_ok());
+        assert!(validate_name("work").is_ok());
+        assert!(validate_name("").is_err());
+        assert!(validate_name("../x").is_err());
+    }
 }
