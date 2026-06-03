@@ -148,7 +148,7 @@ Production-grade cryptographic primitives (FIPS 140-3 validated via aws-lc-rs):
 
 - **AEAD ciphers** — AES-256-GCM (primary), ChaCha20-Poly1305 (fallback)
 - **Key exchange** — X25519 and Hybrid X25519 + ML-KEM-768 (post-quantum, NIST FIPS 203)
-- **Forward secrecy** — Key ratcheting with Double Ratchet-inspired design
+- **Forward secrecy** — Per-message symmetric key ratchet (Double-Ratchet-inspired) with an optional sending-side DH ratchet step; not a full bidirectional Double Ratchet
 - **Counter-based nonces** — NIST-compliant with automatic rotation at 2³² messages
 - **Memory safety** — All keys and secrets zeroized on drop
 
@@ -166,7 +166,7 @@ Wire-level transport layer:
 
 - **Cell protocol** — Fixed 512-byte cells resist traffic-size analysis
 - **ntor-lite handshake** — X25519 + HKDF-SHA256 key agreement with HMAC key confirmation
-- **Per-circuit encryption** — ChaCha20-Poly1305 with counter-based nonces (replay-immune)
+- **Per-circuit encryption** — ChaCha20-Poly1305 with per-direction counter nonces (replay-resistant on the in-order stream; the receive counter only advances after a cell authenticates)
 - **Multi-hop circuits** — Two-hop layered encryption via circuit extension
 - **SOCKS5 proxy** — RFC 1928 client interface with IPv4, IPv6, and domain support
 - **Guard persistence** — Persistent entry guards with rotation and failure tracking
@@ -270,7 +270,7 @@ GPTL uses production-grade cryptographic primitives:
 | Classic key exchange | X25519 | RFC 7748 |
 | Post-quantum KEM | ML-KEM-768 (Kyber) | NIST FIPS 203 |
 | Hybrid key exchange | X25519 + ML-KEM-768 | IETF draft-ietf-tls-ecdhe-mlkem |
-| Forward secrecy | Double Ratchet | Signal specification |
+| Forward secrecy | Symmetric KDF ratchet (Double-Ratchet-inspired) | HKDF-SHA256 |
 | Crypto library | aws-lc-rs | FIPS 140-3 validated |
 
 Key properties:
