@@ -212,7 +212,8 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let _ = tokio::time::timeout(Duration::from_millis(500), negotiate(&mut stream)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_millis(500), negotiate(&mut stream)).await;
             });
 
             let mut client = TcpStream::connect(addr).await.unwrap();

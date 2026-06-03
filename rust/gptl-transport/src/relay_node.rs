@@ -1164,7 +1164,10 @@ mod tests {
             .await
             .expect("relay must close the over-limit connection promptly")
             .unwrap();
-        assert_eq!(n, 0, "over-limit connection must be closed (EOF) by the relay");
+        assert_eq!(
+            n, 0,
+            "over-limit connection must be closed (EOF) by the relay"
+        );
 
         // A within-limit connection stays open (no handshake timeout yet).
         let mut b = [0u8; 1];
