@@ -45,8 +45,13 @@ pub struct RelayOptions {
     /// Maximum concurrent streams within a single circuit.  Default: 256.
     pub max_streams_per_circuit: u16,
     /// How long to wait for the initial CREATE cell after TCP accept.
-    /// Default: 30 s.
+    /// Default: 15 s.  Kept short so a connection that never completes the
+    /// handshake (a slowloris-style probe) cannot tie up resources for long.
     pub handshake_timeout: Duration,
+    /// Maximum concurrent connections from a single peer IP. Bounds a single
+    /// source's ability to occupy connection/circuit slots with idle or
+    /// slow-handshake connections.  Default: 16.
+    pub max_conns_per_ip: usize,
     /// Hard cap on a single circuit's lifetime.  Default: 3600 s (1 h).
     pub max_circuit_lifetime: Duration,
     /// When `true`, the relay's exit policy permits loopback / RFC1918
@@ -62,7 +67,8 @@ impl Default for RelayOptions {
         Self {
             max_circuits: 1000,
             max_streams_per_circuit: 256,
-            handshake_timeout: Duration::from_secs(30),
+            handshake_timeout: Duration::from_secs(15),
+            max_conns_per_ip: 16,
             max_circuit_lifetime: Duration::from_secs(3600),
             allow_private: false,
             // SMTP submission ports — a common open-relay abuse vector.
@@ -89,6 +95,8 @@ impl RelayOptions {
 pub struct RelayNode {
     static_key: Arc<RelayStaticKey>,
     active_circuits: Arc<AtomicUsize>,
+    /// Live connection count per peer IP, enforcing `max_conns_per_ip`.
+    conns_per_ip: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, u32>>>,
     options: RelayOptions,
     metrics: Arc<RelayMetrics>,
 }
@@ -115,6 +123,7 @@ impl RelayNode {
         Self {
             static_key: Arc::new(static_key),
             active_circuits: Arc::new(AtomicUsize::new(0)),
+            conns_per_ip: Arc::new(std::sync::Mutex::new(HashMap::new())),
             options,
             metrics: RelayMetrics::new(),
         }
@@ -187,6 +196,28 @@ impl RelayNode {
                 continue;
             }
 
+            // Per-IP connection cap: stop one source from occupying many
+            // connection/circuit slots with idle or slow-handshake connections
+            // (a slowloris-style DoS). Distributed sources are still bounded by
+            // max_circuits above.
+            let ip = peer.ip();
+            {
+                let mut map = self.conns_per_ip.lock().unwrap();
+                let entry = map.entry(ip).or_insert(0);
+                if *entry >= self.options.max_conns_per_ip as u32 {
+                    warn!(
+                        "per-IP connection limit reached ({}) for {}, rejecting",
+                        self.options.max_conns_per_ip, peer
+                    );
+                    self.metrics
+                        .circuits_rejected_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    drop(stream);
+                    continue;
+                }
+                *entry += 1;
+            }
+
             debug!("connection from {}", peer);
 
             let node = Arc::clone(&self);
@@ -208,6 +239,14 @@ impl RelayNode {
                 node.metrics
                     .active_circuits
                     .store(n as u64, Ordering::Relaxed);
+                // Release this connection's per-IP slot.
+                let mut map = node.conns_per_ip.lock().unwrap();
+                if let Some(c) = map.get_mut(&ip) {
+                    *c -= 1;
+                    if *c == 0 {
+                        map.remove(&ip);
+                    }
+                }
             });
         }
     }
@@ -1094,6 +1133,48 @@ async fn handle_extend(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_per_ip_connection_cap_rejects_excess() {
+        // A single source must not be able to occupy more than max_conns_per_ip
+        // connection slots with idle (un-handshaked) connections.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let key = RelayStaticKey::generate();
+        let opts = RelayOptions {
+            max_conns_per_ip: 2,
+            ..Default::default()
+        };
+        let node = Arc::new(RelayNode::new(key, opts));
+        let node_for_run = Arc::clone(&node);
+        tokio::spawn(async move {
+            let _ = node_for_run.run(listener).await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Two idle connections from this IP fill the per-IP budget.
+        let mut c1 = TcpStream::connect(relay_addr).await.unwrap();
+        let _c2 = TcpStream::connect(relay_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // The third is accepted at TCP level but the relay closes it promptly.
+        let mut c3 = TcpStream::connect(relay_addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(Duration::from_secs(2), c3.read(&mut buf))
+            .await
+            .expect("relay must close the over-limit connection promptly")
+            .unwrap();
+        assert_eq!(n, 0, "over-limit connection must be closed (EOF) by the relay");
+
+        // A within-limit connection stays open (no handshake timeout yet).
+        let mut b = [0u8; 1];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), c1.read(&mut b))
+                .await
+                .is_err(),
+            "within-limit connection should remain open"
+        );
+    }
 
     #[test]
     fn test_is_private_address_blocks_loopback_and_rfc1918() {
