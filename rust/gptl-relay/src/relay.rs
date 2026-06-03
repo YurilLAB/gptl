@@ -44,6 +44,11 @@ pub struct RelayServer {
     /// audit event but the TCP stream is dropped (the legacy "log-only"
     /// behavior, retained for use cases that only want the audit layer).
     relay_node: Option<Arc<RelayNode>>,
+    /// Caps the number of connections being handled concurrently
+    /// (`config.max_connections`). Without this the accept loop spawned an
+    /// unbounded task per connection, so a connection flood could exhaust
+    /// memory / file descriptors / tasks regardless of the RelayNode caps.
+    conn_semaphore: Arc<tokio::sync::Semaphore>,
     /// Server state
     state: Arc<RwLock<ServerState>>,
 }
@@ -58,6 +63,8 @@ impl RelayServer {
     pub fn new(config: RelayConfig) -> Self {
         let mut signing_key = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut signing_key);
+        // At least 1 permit so a misconfigured 0 doesn't deadlock the listener.
+        let max_conns = config.max_connections.max(1);
         Self {
             config,
             auth: Arc::new(RwLock::new(MfaAuthenticator::new(
@@ -70,6 +77,7 @@ impl RelayServer {
             api_key_manager: Arc::new(RwLock::new(ApiKeyManager::default())),
             audit_logger: Arc::new(RwLock::new(AuditLogger::default())),
             relay_node: None,
+            conn_semaphore: Arc::new(tokio::sync::Semaphore::new(max_conns)),
             state: Arc::new(RwLock::new(ServerState::Stopped)),
         }
     }
@@ -170,9 +178,26 @@ impl RelayServer {
                 crate::RelayError::Internal(format!("Failed to accept connection: {}", e))
             })?;
 
+            // Enforce the global concurrent-connection cap. Shedding load (drop
+            // the stream) when at capacity bounds memory/FD/task usage under a
+            // connection flood instead of spawning unboundedly.
+            let permit = match Arc::clone(&self.conn_semaphore).try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(
+                        "max_connections ({}) reached; rejecting {}",
+                        self.config.max_connections,
+                        peer_addr
+                    );
+                    drop(stream);
+                    continue;
+                }
+            };
+
             // Handle connection in a new task
             let server = self.clone_ref();
             tokio::spawn(async move {
+                let _permit = permit; // released when the connection finishes
                 if let Err(e) = server.handle_connection(stream, peer_addr).await {
                     tracing::warn!("Connection error from {}: {}", peer_addr, e);
                 }
@@ -222,7 +247,11 @@ impl RelayServer {
                 description: format!("Connection accepted from {}", client_ip),
                 details: None,
             };
-            logger.log_security_event(event, &ctx).await?;
+            // Don't couple connection availability to the logging subsystem: a
+            // log-write failure (e.g. disk full) is reported, not fatal.
+            if let Err(e) = logger.log_security_event(event, &ctx).await {
+                tracing::warn!("audit log write failed for {}: {}", client_ip, e);
+            }
         }
 
         // 4. Hand off to the relay protocol.
@@ -407,6 +436,7 @@ impl RelayServer {
             api_key_manager: self.api_key_manager.clone(),
             audit_logger: self.audit_logger.clone(),
             relay_node: self.relay_node.clone(),
+            conn_semaphore: self.conn_semaphore.clone(),
             state: self.state.clone(),
         }
     }
@@ -478,6 +508,28 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_max_connections_cap_is_config_sized_and_sheds() {
+        // The accept loop's concurrency cap must come from config.max_connections
+        // and shed (reject) once exhausted, bounding a connection flood.
+        let server = RelayServer::new(RelayConfig {
+            max_connections: 2,
+            ..RelayConfig::default()
+        });
+        let p1 = Arc::clone(&server.conn_semaphore).try_acquire_owned();
+        let p2 = Arc::clone(&server.conn_semaphore).try_acquire_owned();
+        assert!(p1.is_ok() && p2.is_ok(), "first max_connections permits available");
+
+        let p3 = Arc::clone(&server.conn_semaphore).try_acquire_owned();
+        assert!(p3.is_err(), "a connection beyond the cap must be shed");
+
+        drop(p1);
+        assert!(
+            Arc::clone(&server.conn_semaphore).try_acquire_owned().is_ok(),
+            "a permit frees when its connection finishes"
+        );
+    }
 
     /// Full pipeline test: TCP accept → IP allowlist → rate-limit →
     /// audit-log → relay protocol → echo destination → round-trip.
