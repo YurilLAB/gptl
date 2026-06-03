@@ -158,7 +158,14 @@ mod tests {
     #[test]
     fn test_load_and_delete_reject_path_traversal() {
         let cfg = PathBuf::from("/tmp/gptl-nonexistent/config.toml");
-        for bad in ["../config", "../../etc/passwd", "a/b", "/etc/shadow", "..", "foo/../bar"] {
+        for bad in [
+            "../config",
+            "../../etc/passwd",
+            "a/b",
+            "/etc/shadow",
+            "..",
+            "foo/../bar",
+        ] {
             assert!(
                 load(bad, &cfg).is_err(),
                 "load must reject traversal name {:?}",

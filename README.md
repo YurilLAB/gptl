@@ -334,6 +334,20 @@ cargo test sybil_defense
   high-entropy obfuscation), so entry points are not designed to survive an active
   prober or a censor's passive fully-encrypted-traffic heuristics
 
+#### Relay-server (`gptl-relay`) feature gaps to address before production
+- **Sybil defense is not yet enforced end-to-end**: the reputation/stake checks exist,
+  but the shield is not populated from the live relay set and stake is self-reported
+  rather than proof-verified, so `verify_relay` is effectively permissive today
+- **mTLS client-cert auth is a fingerprint allowlist only** — it does not verify the
+  certificate chain/signature or validity dates; treat it as a pinned-cert mechanism,
+  not full PKI
+- **WebAuthn MFA is incomplete** (no assertion-verification step bound to the pending
+  login); use TOTP as the second factor until this is wired
+- **Session/audit signing keys are generated per process start** in `secure-relay`; pin
+  them via configuration to keep sessions valid and audit logs verifiable across restarts
+- **Threat-intel and geo-IP layers fail open** on lookup errors / missing database; for
+  high-assurance deployments configure them to fail closed
+
 ### Threat model and modern-attack resistance (2025)
 
 Low-latency anonymity cannot defeat a **global / end-to-end passive adversary**: an

@@ -153,8 +153,16 @@ impl KeyRatchet {
         // (salt = zero vector for the initial derivation).
         let zeros = [0u8; 32];
         let root_key = Self::hkdf_derive(&shared_secret.0, &zeros, b"gptl-root-key");
-        let i2r = Self::hkdf_derive(&shared_secret.0, &root_key, b"gptl-chain-initiator-to-responder");
-        let r2i = Self::hkdf_derive(&shared_secret.0, &root_key, b"gptl-chain-responder-to-initiator");
+        let i2r = Self::hkdf_derive(
+            &shared_secret.0,
+            &root_key,
+            b"gptl-chain-initiator-to-responder",
+        );
+        let r2i = Self::hkdf_derive(
+            &shared_secret.0,
+            &root_key,
+            b"gptl-chain-responder-to-initiator",
+        );
 
         // Assign send/recv by role so they cross-wire between the two peers.
         let (send_chain_key, recv_chain_key) = if initiator { (i2r, r2i) } else { (r2i, i2r) };
@@ -419,13 +427,25 @@ mod tests {
         // A *sending* DH step resets only the send counter.
         let dh = SharedSecret(Zeroizing::new(vec![0x77u8; 32]));
         ratchet.ratchet_dh(&dh, true).unwrap();
-        assert_eq!(ratchet.stats().send_count, 0, "send_count resets on a send-step");
-        assert_eq!(ratchet.stats().recv_count, 3, "recv_count unchanged by a send-step");
+        assert_eq!(
+            ratchet.stats().send_count,
+            0,
+            "send_count resets on a send-step"
+        );
+        assert_eq!(
+            ratchet.stats().recv_count,
+            3,
+            "recv_count unchanged by a send-step"
+        );
 
         // A *receiving* DH step resets only the recv counter.
         let dh2 = SharedSecret(Zeroizing::new(vec![0x88u8; 32]));
         ratchet.ratchet_dh(&dh2, false).unwrap();
-        assert_eq!(ratchet.stats().recv_count, 0, "recv_count resets on a recv-step");
+        assert_eq!(
+            ratchet.stats().recv_count,
+            0,
+            "recv_count resets on a recv-step"
+        );
     }
 
     #[test]
@@ -442,18 +462,30 @@ mod tests {
         // initiator -> responder
         let i_send1 = initiator.next_send_key().unwrap();
         let r_recv1 = responder.next_recv_key().unwrap();
-        assert_eq!(i_send1, r_recv1, "initiator send[0] must equal responder recv[0]");
+        assert_eq!(
+            i_send1, r_recv1,
+            "initiator send[0] must equal responder recv[0]"
+        );
         let i_send2 = initiator.next_send_key().unwrap();
         let r_recv2 = responder.next_recv_key().unwrap();
-        assert_eq!(i_send2, r_recv2, "initiator send[1] must equal responder recv[1]");
+        assert_eq!(
+            i_send2, r_recv2,
+            "initiator send[1] must equal responder recv[1]"
+        );
 
         // responder -> initiator
         let r_send1 = responder.next_send_key().unwrap();
         let i_recv1 = initiator.next_recv_key().unwrap();
-        assert_eq!(r_send1, i_recv1, "responder send[0] must equal initiator recv[0]");
+        assert_eq!(
+            r_send1, i_recv1,
+            "responder send[0] must equal initiator recv[0]"
+        );
 
         // The two directions must NOT share a key stream.
-        assert_ne!(i_send1, r_send1, "the two directions must use independent keys");
+        assert_ne!(
+            i_send1, r_send1,
+            "the two directions must use independent keys"
+        );
     }
 
     #[test]
@@ -470,7 +502,10 @@ mod tests {
 
         let i_send = initiator.next_send_key().unwrap();
         let r_recv = responder.next_recv_key().unwrap();
-        assert_eq!(i_send, r_recv, "post-DH send chain must match peer's recv chain");
+        assert_eq!(
+            i_send, r_recv,
+            "post-DH send chain must match peer's recv chain"
+        );
     }
 
     #[test]
