@@ -325,12 +325,21 @@ impl ApiKeyManager {
 
     /// Cleanup expired keys
     pub async fn cleanup_expired(&self) {
-        let mut keys = self.keys.write().await;
         let now = Utc::now();
-        
-        keys.retain(|_, key| {
-            !key.revoked && key.expires_at.map(|e| e > now).unwrap_or(true)
-        });
+
+        let live_ids: std::collections::HashSet<String> = {
+            let mut keys = self.keys.write().await;
+            keys.retain(|_, key| {
+                !key.revoked && key.expires_at.map(|e| e > now).unwrap_or(true)
+            });
+            keys.keys().cloned().collect()
+        };
+
+        // Drop rate-limit state for keys that no longer exist; otherwise the map
+        // grows without bound as keys are revoked / expire / churn (it was never
+        // pruned previously).
+        let mut limits = self.rate_limits.write().await;
+        limits.retain(|key_id, _| live_ids.contains(key_id));
     }
 
     /// Get API key statistics
