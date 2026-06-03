@@ -301,10 +301,19 @@ pub async fn serve_metrics<F>(addr: std::net::SocketAddr, render: F) -> Result<(
 where
     F: Fn() -> String + Send + Sync + 'static,
 {
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::sync::Semaphore;
+
+    // Bound concurrent connections and how long a client may take to send its
+    // request headers, so a slowloris (connect, send nothing) cannot accumulate
+    // tasks/file descriptors against this endpoint.
+    const MAX_METRICS_CONNS: usize = 64;
+    const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
     let render = Arc::new(render);
+    let sem = Arc::new(Semaphore::new(MAX_METRICS_CONNS));
     let listener = TcpListener::bind(addr).await?;
     tracing::info!("metrics endpoint listening on http://{}/metrics", addr);
 
@@ -313,26 +322,43 @@ where
             Ok(x) => x,
             Err(_) => continue,
         };
+        // Shed load when at the connection cap instead of queueing unbounded.
+        let permit = match Arc::clone(&sem).try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                drop(stream);
+                continue;
+            }
+        };
         let render = Arc::clone(&render);
         tokio::spawn(async move {
+            let _permit = permit; // released when this task ends
             let mut buf = [0u8; 1024];
             let mut total = 0usize;
             // Read until we see the end-of-headers sentinel or hit the
             // buffer cap (no legitimate GET /metrics request is bigger
-            // than ~256 bytes).
-            loop {
-                if total >= buf.len() {
-                    break;
-                }
-                match stream.read(&mut buf[total..]).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        total += n;
-                        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
+            // than ~256 bytes), bounded by HEADER_READ_TIMEOUT.
+            let read_headers = async {
+                loop {
+                    if total >= buf.len() {
+                        break;
+                    }
+                    match stream.read(&mut buf[total..]).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            total += n;
+                            if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
                         }
                     }
                 }
+            };
+            if tokio::time::timeout(HEADER_READ_TIMEOUT, read_headers)
+                .await
+                .is_err()
+            {
+                return; // slow client: drop the connection
             }
 
             let head = std::str::from_utf8(&buf[..total]).unwrap_or("");
