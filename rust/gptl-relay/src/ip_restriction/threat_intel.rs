@@ -129,7 +129,16 @@ impl ThreatIntelligence {
         aggregated.categories.sort();
         aggregated.categories.dedup();
 
-        if aggregated.score >= self.min_threat_score {
+        // Block if the score crosses the threshold OR the IP is flagged with any
+        // auto-block category (Malware/C2/Botnet/Scanner). Previously only the
+        // score gate was checked and `auto_block_categories` was never read, so a
+        // C2/botnet IP with a sub-threshold confidence score was admitted.
+        let category_flagged = aggregated
+            .categories
+            .iter()
+            .any(|c| self.auto_block_categories.contains(c));
+
+        if aggregated.score >= self.min_threat_score || category_flagged {
             Some(aggregated)
         } else {
             None
@@ -767,6 +776,55 @@ mod tests {
         ti.add_feed(ThreatFeed::LocalBlocklist { entries: vec![] });
 
         assert_eq!(ti.feeds.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_low_score_but_auto_block_category_is_blocked() {
+        // An IP flagged as C2 with a sub-threshold score must still be blocked,
+        // because C2 is an auto-block category. (Regression: only the score gate
+        // was checked, so category-flagged-but-low-score IPs were admitted.)
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let info = ThreatInfo {
+            ip,
+            score: 30, // well below the default min_threat_score (80)
+            categories: vec![ThreatCategory::C2],
+            reports: vec![],
+            sources: vec!["local".to_string()],
+            fetched_at: Utc::now(),
+        };
+        let mut ti = ThreatIntelligence::new(); // default: blocks C2/Botnet/Malware/Scanner
+        ti.add_feed(ThreatFeed::LocalBlocklist {
+            entries: vec![(ip, info)],
+        });
+
+        assert!(
+            ti.check_ip(ip).await.is_some(),
+            "a C2-flagged IP must be blocked even with a low score"
+        );
+
+        // A clean IP not on any feed is not blocked.
+        let clean: IpAddr = "203.0.113.8".parse().unwrap();
+        assert!(ti.check_ip(clean).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_low_score_non_blocked_category_is_allowed() {
+        // A low-score IP flagged only with a NON-auto-block category (e.g. a
+        // hosting provider) should not be blocked on score alone.
+        let ip: IpAddr = "203.0.113.9".parse().unwrap();
+        let info = ThreatInfo {
+            ip,
+            score: 10,
+            categories: vec![ThreatCategory::Hosting],
+            reports: vec![],
+            sources: vec!["local".to_string()],
+            fetched_at: Utc::now(),
+        };
+        let mut ti = ThreatIntelligence::new();
+        ti.add_feed(ThreatFeed::LocalBlocklist {
+            entries: vec![(ip, info)],
+        });
+        assert!(ti.check_ip(ip).await.is_none());
     }
 
     #[tokio::test]
