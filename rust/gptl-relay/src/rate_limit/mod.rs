@@ -61,6 +61,15 @@ impl AuthRateLimiter {
         let mut limiter = self.ip_limiter.write().await;
         let state = limiter.entry(ip).or_insert_with(IpRateLimitState::new);
 
+        // Reset the request counter once the sliding window has elapsed. Without
+        // this the counter only ever grows, so an IP/account is blocked forever
+        // after `max_requests` total requests rather than per window.
+        let now = Utc::now();
+        if now - state.window_start >= Duration::seconds(self.config.ip_rate_limit_window_secs) {
+            state.window_start = now;
+            state.requests = 0;
+        }
+
         // Check if in exponential backoff
         if let Some(backoff_until) = state.backoff_until {
             if backoff_until > Utc::now() {
@@ -103,6 +112,15 @@ impl AuthRateLimiter {
 
         let mut limiter = self.account_limiter.write().await;
         let state = limiter.entry(username.to_string()).or_insert_with(AccountRateLimitState::new);
+
+        // Reset the counter once the sliding window has elapsed (see check_ip).
+        let now = Utc::now();
+        if now - state.window_start
+            >= Duration::seconds(self.config.account_rate_limit_window_secs as i64)
+        {
+            state.window_start = now;
+            state.requests = 0;
+        }
 
         if state.requests >= self.config.max_requests_per_account {
             let wait_secs = self.config.account_rate_limit_window_secs;
@@ -352,6 +370,8 @@ impl Default for RateLimitConfig {
 #[derive(Debug)]
 struct IpRateLimitState {
     requests: u32,
+    /// Start of the current counting window; `requests` resets when it elapses.
+    window_start: DateTime<Utc>,
     last_request: DateTime<Utc>,
     consecutive_failures: u32,
     backoff_until: Option<DateTime<Utc>>,
@@ -359,9 +379,11 @@ struct IpRateLimitState {
 
 impl IpRateLimitState {
     fn new() -> Self {
+        let now = Utc::now();
         Self {
             requests: 0,
-            last_request: Utc::now(),
+            window_start: now,
+            last_request: now,
             consecutive_failures: 0,
             backoff_until: None,
         }
@@ -372,14 +394,18 @@ impl IpRateLimitState {
 #[derive(Debug)]
 struct AccountRateLimitState {
     requests: u32,
+    /// Start of the current counting window; `requests` resets when it elapses.
+    window_start: DateTime<Utc>,
     last_request: DateTime<Utc>,
 }
 
 impl AccountRateLimitState {
     fn new() -> Self {
+        let now = Utc::now();
         Self {
             requests: 0,
-            last_request: Utc::now(),
+            window_start: now,
+            last_request: now,
         }
     }
 }
@@ -499,10 +525,42 @@ mod tests {
         assert!(matches!(action, FailureAction::CaptchaRequired));
     }
 
+    #[tokio::test]
+    async fn test_account_rate_limit_window_resets() {
+        // An account must NOT be permanently blocked after max requests; the
+        // counter must reset once the window elapses. Previously it never did,
+        // so a few requests against any username locked it out indefinitely.
+        let config = RateLimitConfig {
+            max_requests_per_account: 2,
+            account_rate_limit_window_secs: 60,
+            ..RateLimitConfig::default()
+        };
+        let limiter = AuthRateLimiter::with_config(config);
+        let user = "victim";
+
+        assert!(limiter.check_account(user).await.is_ok());
+        assert!(limiter.check_account(user).await.is_ok());
+        // Third within the window is blocked.
+        assert!(limiter.check_account(user).await.is_err());
+
+        // Simulate the window elapsing by rewinding window_start.
+        {
+            let mut m = limiter.account_limiter.write().await;
+            let st = m.get_mut(user).unwrap();
+            st.window_start = Utc::now() - Duration::seconds(120);
+        }
+
+        // After the window, requests are allowed again.
+        assert!(
+            limiter.check_account(user).await.is_ok(),
+            "counter must reset after the rate-limit window elapses"
+        );
+    }
+
     #[test]
     fn test_backoff_calculation() {
         let limiter = AuthRateLimiter::new();
-        
+
         // Test exponential growth
         let b1 = limiter.calculate_backoff(3);
         assert_eq!(b1.num_seconds(), 2); // 2^1

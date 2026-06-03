@@ -53,8 +53,15 @@ pub struct RelayServer {
 }
 
 impl RelayServer {
-    /// Create a new relay server
+    /// Create a new relay server.
+    ///
+    /// The session-token signing key is generated randomly per instance. A
+    /// fixed/known key would let anyone forge valid session tokens, so there is
+    /// deliberately no insecure default. To pin a key (e.g. to keep sessions
+    /// valid across restarts) use [`RelayServer::with_session_manager`].
     pub fn new(config: RelayConfig) -> Self {
+        let mut signing_key = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut signing_key);
         Self {
             config,
             auth: Arc::new(RwLock::new(MfaAuthenticator::new(
@@ -63,7 +70,7 @@ impl RelayServer {
             ))),
             ip_allowlist: Arc::new(RwLock::new(IpAllowlist::default())),
             rate_limiter: Arc::new(RwLock::new(AuthRateLimiter::default())),
-            session_manager: Arc::new(RwLock::new(SessionManager::new(&[0u8; 32]))),
+            session_manager: Arc::new(RwLock::new(SessionManager::new(&signing_key))),
             api_key_manager: Arc::new(RwLock::new(ApiKeyManager::default())),
             audit_logger: Arc::new(RwLock::new(AuditLogger::default())),
             relay_node: None,
