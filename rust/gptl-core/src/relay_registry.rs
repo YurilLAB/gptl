@@ -786,21 +786,29 @@ impl SignedRelayList {
             return Ok(false);
         }
 
-        // Decode authority key
+        // Decode authority key. Length-check BEFORE converting: copy_from_slice
+        // panics on a length mismatch, and this data is deserialized from an
+        // untrusted directory blob (a malformed key would be a remote DoS).
         let pk_bytes = BASE64.decode(&self.authority_key)
             .map_err(|e| RegistryError::InvalidKey(format!("Invalid authority key: {}", e)))?;
-        
-        let mut pk_array = [0u8; 32];
-        pk_array.copy_from_slice(&pk_bytes);
+        let pk_array: [u8; 32] = pk_bytes.as_slice().try_into().map_err(|_| {
+            RegistryError::InvalidKey(format!(
+                "authority key must be 32 bytes, got {}",
+                pk_bytes.len()
+            ))
+        })?;
         let verifying_key = VerifyingKey::from_bytes(&pk_array)
             .map_err(|e| RegistryError::InvalidKey(format!("Invalid verifying key: {:?}", e)))?;
 
-        // Decode signature
+        // Decode signature (same length-check rationale).
         let sig_bytes = BASE64.decode(&self.signature)
             .map_err(|e| RegistryError::InvalidProof(format!("Invalid signature: {}", e)))?;
-        
-        let mut sig_array = [0u8; 64];
-        sig_array.copy_from_slice(&sig_bytes);
+        let sig_array: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+            RegistryError::InvalidProof(format!(
+                "signature must be 64 bytes, got {}",
+                sig_bytes.len()
+            ))
+        })?;
         let signature = Signature::from_bytes(&sig_array);
 
         // Create canonical representation
@@ -882,6 +890,28 @@ impl Default for RegistryRateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_signed_relay_list_verify_rejects_malformed_keys_without_panic() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+        // Authority key / signature are deserialized from an untrusted directory
+        // blob; wrong-length values must error, not panic via copy_from_slice.
+        let mut list = SignedRelayList::new(vec![]);
+
+        // Authority key that decodes to the wrong length (16 bytes, not 32).
+        list.authority_key = BASE64.encode([0u8; 16]);
+        list.signature = BASE64.encode([0u8; 64]);
+        assert!(matches!(list.verify(), Err(RegistryError::InvalidKey(_))));
+
+        // Valid-length key but wrong-length signature (8 bytes, not 64).
+        list.authority_key = BASE64.encode([0u8; 32]);
+        list.signature = BASE64.encode([0u8; 8]);
+        assert!(matches!(list.verify(), Err(RegistryError::InvalidProof(_))));
+
+        // Non-base64 garbage must error too, not panic.
+        list.authority_key = "!!!not base64!!!".to_string();
+        assert!(list.verify().is_err());
+    }
 
     #[tokio::test]
     async fn test_in_memory_registry() {
