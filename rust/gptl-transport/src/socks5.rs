@@ -204,7 +204,12 @@ mod tests {
             state
         };
 
-        for _ in 0..250 {
+        let iters: usize = std::env::var("GPTL_FUZZ_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|n: usize| (n / 100).clamp(250, 5_000)) // socket churn per iter
+            .unwrap_or(250);
+        for _ in 0..iters {
             let len = (next() % 72) as usize;
             let bytes: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
 

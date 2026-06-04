@@ -68,6 +68,24 @@ jobs:
       - name: Ensure benchmarks compile
         run: cargo build --workspace --benches --verbose
 
+  fuzz:
+    name: deep fuzz (wire parsers)
+    runs-on: ubuntu-latest
+    env:
+      # Run the stable-toolchain fuzz harnesses far deeper than the fast
+      # default used in the normal test run.
+      GPTL_FUZZ_ITERS: "3000000"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies (aws-lc-rs)
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev nasm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Deep-fuzz the wire-format / crypto parsers
+        run: cargo test --workspace --release fuzz -- --nocapture
+
   docs:
     name: doc build
     runs-on: ubuntu-latest

@@ -748,7 +748,11 @@ mod tests {
             state ^= state << 17;
             state
         };
-        for _ in 0..60_000 {
+        let iters: usize = std::env::var("GPTL_FUZZ_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60_000);
+        for _ in 0..iters {
             let len = (next() % 600) as usize;
             let buf: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
             let _ = parse_dns_response(&buf);

@@ -537,7 +537,12 @@ mod tests {
         };
         let relay_key = RelayStaticKey::generate();
 
-        for _ in 0..4_000 {
+        let iters: usize = std::env::var("GPTL_FUZZ_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .map(|n: usize| n / 6) // handshake iters are heavier (keygen per loop)
+            .unwrap_or(4_000);
+        for _ in 0..iters {
             // Random CREATE cell into relay_respond.
             let mut create = Cell::new((next() & 0xffff_ffff) as u32, CellType::Create);
             for b in create.payload.iter_mut() {

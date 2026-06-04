@@ -578,6 +578,15 @@ mod tests {
     // structure-aware malformed bytes at the wire parsers and assert they never
     // panic (only return Ok/Err) and that decode∘encode round-trips.
 
+    /// Iteration count for fuzz loops; overridable via GPTL_FUZZ_ITERS so CI can
+    /// run a much deeper sweep than the fast default used locally.
+    pub(crate) fn fuzz_iters(default: usize) -> usize {
+        std::env::var("GPTL_FUZZ_ITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
+    }
+
     /// Small, fast, deterministic xorshift64* PRNG (reproducible across runs).
     struct Xorshift(u64);
     impl Xorshift {
@@ -600,7 +609,7 @@ mod tests {
     #[test]
     fn fuzz_parsers_never_panic_on_random_input() {
         let mut rng = Xorshift(0x9E37_79B9_7F4A_7C15);
-        let iters = 25_000;
+        let iters = fuzz_iters(25_000);
 
         for _ in 0..iters {
             // Cell::from_bytes — fixed 512 bytes.
