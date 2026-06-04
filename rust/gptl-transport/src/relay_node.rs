@@ -320,9 +320,19 @@ impl RelayNode {
 // ── Internal: per-circuit driver ─────────────────────────────────────────────
 
 /// Destination write-half plus per-stream metadata.
+///
+/// The writer is held behind its own `Arc<Mutex<..>>` so a slow/stalled
+/// destination only blocks writes to *its* stream — not the whole circuit. If
+/// the writer lived directly in the `streams` map, a write that blocked on a
+/// full TCP send buffer would hold the shared `streams` lock and wedge every
+/// other stream (head-of-line blocking).
 struct OutboundConn {
-    write_half: tokio::net::tcp::OwnedWriteHalf,
+    writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
 }
+
+/// Max time to push a relayed cell into a destination's socket before the relay
+/// gives up on that stream (bounds resource-holding by a stalled destination).
+const DEST_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn relay_circuit(
     conn: RelayConn,
@@ -568,11 +578,21 @@ async fn dispatch_relay_cell(
             .await
         }
         RelayCommand::Data => {
-            let mut map = streams.lock().await;
-            if let Some(conn) = map.get_mut(&inner.stream_id) {
-                if conn.write_half.write_all(&inner.data).await.is_err() {
+            // Clone the per-stream writer handle and release the `streams` lock
+            // BEFORE writing, so a stalled destination cannot block other streams
+            // or wedge the shared map.
+            let writer = {
+                let map = streams.lock().await;
+                map.get(&inner.stream_id).map(|c| Arc::clone(&c.writer))
+            };
+            if let Some(writer) = writer {
+                let write_result = {
+                    let mut w = writer.lock().await;
+                    tokio::time::timeout(DEST_WRITE_TIMEOUT, w.write_all(&inner.data)).await
+                };
+                // Timeout or write error → tear down just this stream.
+                if !matches!(write_result, Ok(Ok(()))) {
                     let sid = inner.stream_id;
-                    drop(map);
                     streams.lock().await.remove(&sid);
                     send_data_cell(
                         ciphers,
@@ -868,10 +888,12 @@ async fn begin_stream(
     metrics.streams_opened_total.fetch_add(1, Ordering::Relaxed);
 
     let (read_half, write_half) = tcp.into_split();
-    streams
-        .lock()
-        .await
-        .insert(stream_id, OutboundConn { write_half });
+    streams.lock().await.insert(
+        stream_id,
+        OutboundConn {
+            writer: Arc::new(Mutex::new(write_half)),
+        },
+    );
 
     let tx = dest_tx.clone();
     tokio::spawn(async move {
