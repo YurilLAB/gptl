@@ -3,7 +3,37 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A next-generation anonymity network with comprehensive defenses against modern attacks on Tor, I2P, and VPN systems.
+A research anonymity network with defenses against modern attacks on Tor, I2P, and VPN systems.
+
+> ### ⚠️ Implementation status (read before relying on this)
+>
+> GPTL is a **research implementation**. The cryptographic transport (`gptl-transport`)
+> is real and works end-to-end, but several advertised defenses are implemented as
+> **standalone library modules that are not yet wired into the live data path.**
+> Verified by reading the code and by running a live 2-hop circuit under packet capture:
+>
+> **Active in the live SOCKS5 → relay data path:**
+> - Authenticated ntor-style handshake + per-hop layered AEAD (1- and 2-hop) —
+>   *verified: no plaintext leaks on inter-relay hops, every cell is a fixed 512 bytes*
+> - Random-interval padding cells
+> - Persistent entry guards (load/save/rotate)
+> - Circuit pool pre-building
+> - Relay-side exit policy — *verified live: loopback / 169.254.169.254 / RFC1918 / SMTP blocked*
+> - Per-IP connection cap, handshake timeout, per-stream write timeout, `max_connections` cap
+>
+> **Implemented but NOT yet wired into the live path (library/standalone code):**
+> - The whole `gptl-core::anti_surveillance` pipeline (adaptive/WTF-PAD padding,
+>   traffic shaping, timing protection, circuit obfuscation, flow-correlation defense) —
+>   `gptl-transport` does not depend on `gptl-core`, so `protect_outgoing` is never called
+> - The whole `gptl-routing` crate (BGP/RPKI protection, Sybil defense, resource/PoW
+>   protection, DNS-leak guard, WebRTC-leak guard) — `RoutingManager` is not instantiated
+>   by any binary; its circuit builder returns mock paths
+> - The bootstrap relay directory is currently **trusted without signature/consensus
+>   verification** — do not distribute `relays.json` over an untrusted channel
+>
+> The "10 attack categories" below describe the *design and the code that exists*, not a
+> set of protections all active in the shipped data path. See **Security Considerations →
+> Threat model** for the honest per-attack status.
 
 ## Overview
 
