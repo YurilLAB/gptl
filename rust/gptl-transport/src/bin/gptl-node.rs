@@ -39,6 +39,17 @@ async fn main() {
     info!("relay fingerprint: {}", hex::encode(static_key.fingerprint));
     info!("relay pubkey:      {}", hex::encode(static_key.public));
 
+    // Persist a freshly-generated key BEFORE anything else (including
+    // --print-descriptor), so the descriptor we publish matches the key the
+    // relay will actually serve with on subsequent runs. Otherwise
+    // `gptl-node --key <path> --print-descriptor` (per the usage example) would
+    // print a throwaway key and the relay would later generate a different one.
+    if let Some(ref path) = args.key_path {
+        if !path.exists() {
+            persist_key(&static_key, path);
+        }
+    }
+
     if args.print_descriptor {
         let desc = RelayDescriptor {
             nickname: args.nickname.clone(),
@@ -48,12 +59,6 @@ async fn main() {
         let config = BootstrapConfig { relays: vec![desc] };
         println!("{}", serde_json::to_string_pretty(&config).unwrap());
         return;
-    }
-
-    if let Some(ref path) = args.key_path {
-        if !path.exists() {
-            persist_key(&static_key, path);
-        }
     }
 
     if args.allow_private {
@@ -292,5 +297,8 @@ fn init_logging(level: &str) {
     tracing_subscriber::fmt()
         .with_max_level(filter)
         .with_target(false)
+        // Write logs to stderr so stdout stays clean for machine-readable output
+        // (e.g. `gptl-node --print-descriptor > relays.json`).
+        .with_writer(std::io::stderr)
         .init();
 }
