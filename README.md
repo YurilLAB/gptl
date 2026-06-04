@@ -28,8 +28,10 @@ A research anonymity network with defenses against modern attacks on Tor, I2P, a
 > - The whole `gptl-routing` crate (BGP/RPKI protection, Sybil defense, resource/PoW
 >   protection, DNS-leak guard, WebRTC-leak guard) — `RoutingManager` is not instantiated
 >   by any binary; its circuit builder returns mock paths
-> - The bootstrap relay directory is currently **trusted without signature/consensus
->   verification** — do not distribute `relays.json` over an untrusted channel
+> - The bootstrap relay directory supports **ed25519 signature verification against a
+>   pinned authority key** (`gptl-authority sign` + `gptl-client --authority-key <HEX>`);
+>   it can still be loaded **unsigned** (with a warning) for local testing. A full
+>   consensus/multi-authority directory system is not yet implemented.
 >
 > The "10 attack categories" below describe the *design and the code that exists*, not a
 > set of protections all active in the shipped data path. See **Security Considerations →
