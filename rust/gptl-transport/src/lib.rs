@@ -24,7 +24,7 @@ pub mod relay_node;
 pub mod selftest;
 pub mod socks5;
 
-pub use bootstrap::{BootstrapConfig, RelayDescriptor};
+pub use bootstrap::{BootstrapConfig, RelayDescriptor, SignedDirectory};
 pub use cell::{Cell, CellType, RelayCell, RelayCommand};
 pub use circuit::{Circuit, CircuitStream};
 pub use circuit_pool::{CircuitPool, CircuitPoolManager, PoolConfig};

@@ -40,14 +40,37 @@ async fn main() {
             .expect("could not determine config directory; pass --relays <PATH>")
     });
 
-    let bootstrap = match BootstrapConfig::from_json_file(&relays_path) {
+    // With --authority-key, the directory MUST be a SignedDirectory and verify
+    // against the pinned key (authenticated root of trust). Without it, the
+    // directory is loaded unsigned (trust-on-first-use / local testing) with a
+    // warning.
+    let load_result = match args.authority_key.as_deref() {
+        Some(authority_hex) => BootstrapConfig::from_signed_json_file(&relays_path, authority_hex),
+        None => {
+            tracing::warn!(
+                "loading UNSIGNED relay directory {} — the directory is trusted \
+                 without authentication; pass --authority-key <HEX> to require a \
+                 signed directory",
+                relays_path.display()
+            );
+            BootstrapConfig::from_json_file(&relays_path)
+        }
+    };
+    let bootstrap = match load_result {
         Ok(b) => b,
         Err(TransportError::Bootstrap(e)) => {
             eprintln!("error: {}", e);
-            eprintln!(
-                "hint: create {} with at least one relay entry (see gptl-node --print-descriptor)",
-                relays_path.display()
-            );
+            if args.authority_key.is_some() {
+                eprintln!(
+                    "hint: sign {} with `gptl-authority sign` and pin the matching public key",
+                    relays_path.display()
+                );
+            } else {
+                eprintln!(
+                    "hint: create {} with at least one relay entry (see gptl-node --print-descriptor)",
+                    relays_path.display()
+                );
+            }
             std::process::exit(1);
         }
         Err(e) => {
@@ -244,6 +267,9 @@ async fn main() {
 
 struct Args {
     relays: Option<PathBuf>,
+    /// Pinned ed25519 authority public key (hex). When set, the relay directory
+    /// must be a signed directory that verifies against this key.
+    authority_key: Option<String>,
     listen: SocketAddr,
     log_level: String,
     hop_count: usize,
@@ -257,6 +283,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut relays: Option<PathBuf> = None;
+    let mut authority_key: Option<String> = None;
     let mut listen: SocketAddr = "127.0.0.1:1080".parse().unwrap();
     let mut log_level = "info".to_string();
     let mut hop_count: usize = 1;
@@ -270,6 +297,9 @@ fn parse_args() -> Args {
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
+            "--authority-key" => {
+                authority_key = Some(next_arg(&arg, &mut iter));
+            }
             "--relays" => {
                 let val = next_arg(&arg, &mut iter);
                 relays = Some(PathBuf::from(val));
@@ -348,6 +378,7 @@ fn parse_args() -> Args {
 
     Args {
         relays,
+        authority_key,
         listen,
         log_level,
         hop_count,
@@ -376,6 +407,9 @@ fn print_usage() {
     println!("OPTIONS:");
     println!(
         "  --relays <PATH>             Path to relays.json  (default: ~/.config/gptl/relays.json)"
+    );
+    println!(
+        "  --authority-key <HEX>       Pin an ed25519 directory authority key; require a signed directory"
     );
     println!("  --listen <ADDR>             SOCKS5 listen address (default: 127.0.0.1:1080)");
     println!("  --hops <N>                  Number of hops: 1 (single) or 2 (two-hop, default: 1)");

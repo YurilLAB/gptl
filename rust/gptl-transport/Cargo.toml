@@ -14,6 +14,10 @@ path = "src/bin/gptl-client.rs"
 name = "gptl-node"
 path = "src/bin/gptl-node.rs"
 
+[[bin]]
+name = "gptl-authority"
+path = "src/bin/gptl-authority.rs"
+
 [dependencies]
 # Async runtime
 tokio          = { version = "1.35", features = ["full"] }
@@ -26,6 +30,7 @@ toml           = "0.8"
 
 # Crypto
 x25519-dalek   = { version = "2.0", features = ["static_secrets"] }
+ed25519-dalek  = { version = "2.1", features = ["rand_core"] }
 sha2           = "0.10"
 hmac           = "0.12"
 hkdf           = "0.12"
