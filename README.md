@@ -5,6 +5,8 @@
 
 A research anonymity network with defenses against modern attacks on Tor, I2P, and VPN systems.
 
+> **Part of the Yuril suite — ypanel.** GPTL is surfaced in **ypanel**, Yuril Security's unified operator control panel (`https://yurillab.dev/ypanel`): relays, circuits, streams, and an honest capabilities scorecard that mirrors the implementation status below. See [`docs/ypanel.md`](docs/ypanel.md) for the connection model + current status.
+
 > ### ⚠️ Implementation status (read before relying on this)
 >
 > GPTL is a **research implementation**. The cryptographic transport (`gptl-transport`)
